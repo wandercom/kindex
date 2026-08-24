@@ -78,6 +78,9 @@ class InvalidIntervalError(ValueError):
 RESERVED_EXTRA_KEYS = frozenset({
     "claim", "lock", "coord_status", "session_status", "task_status",
     "current_state", "messages", "members", "resources", "inject_messages",
+    # Recorded referent-staleness demotion (R0). Written by the stale sweep /
+    # bind_referent only; a generic edit must not fabricate or clear it.
+    "referent_stale",
 })
 
 _EXPIRES_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -113,6 +116,39 @@ def _validate_expires(expires: str) -> None:
         raise ValueError(
             f"expires must be a real YYYY-MM-DD date, got {expires!r}"
         ) from None
+
+
+def _normalize_binding(
+    referent: dict | None,
+    asserted_at: str | None,
+    true_of: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Validate/normalize an R0 referent binding for storage.
+
+    Returns ``(referent_json, asserted_at, true_of)``. ``asserted_at``
+    defaults to now when a referent is supplied; ``true_of`` defaults to
+    ``asserted_at`` (claim time and observation time coincide unless the
+    caller says otherwise).
+    """
+    from .referent import validate_referent
+    from .trust import normalize_rfc3339
+
+    referent_json = None
+    if referent is not None:
+        referent_json = _jdumps(validate_referent(referent))
+    asserted_norm = (
+        normalize_rfc3339(asserted_at, field="asserted_at")
+        if asserted_at is not None else None
+    )
+    true_norm = (
+        normalize_rfc3339(true_of, field="true_of")
+        if true_of is not None else None
+    )
+    if referent_json is not None and asserted_norm is None:
+        asserted_norm = normalize_rfc3339(_utc_now(), field="asserted_at")
+    if true_norm is None:
+        true_norm = asserted_norm
+    return referent_json, asserted_norm, true_norm
 
 
 def _trunc(value: Any, limit: int = _DIFF_TRUNCATE) -> str | None:
@@ -461,6 +497,9 @@ class Store:
         if current_version < 8:
             self._migrate_v8()
 
+        if current_version < 9:
+            self._migrate_v9()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -587,7 +626,43 @@ class Store:
             execute(
                 "meta.stamp_version_8",
                 "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION),),
+                # Literal "8", not str(SCHEMA_VERSION): this migration brings a
+                # store TO version 8; stamping the code's current version here
+                # would mark later migrations (v9+) as applied before they run.
+                # Byte-identical to what every already-migrated DB received
+                # (SCHEMA_VERSION was 8 when this block last changed).
+                ("8",),
+            )
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
+    def _migrate_v9(self) -> None:
+        """Referent binding + two clocks (PRD lineage-grounding R0).
+
+        Adds nullable ``referent`` (JSON), ``asserted_at``, ``true_of`` to
+        nodes. Atomic: mutations, verification, and the version stamp share
+        one BEGIN IMMEDIATE transaction (v8 pattern); ``BaseException`` so
+        cancellation rolls back as reliably as a SQLite error.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            c.execute("ALTER TABLE nodes ADD COLUMN referent TEXT")
+            c.execute("ALTER TABLE nodes ADD COLUMN asserted_at TEXT")
+            c.execute("ALTER TABLE nodes ADD COLUMN true_of TEXT")
+            node_cols = {
+                row["name"]
+                for row in c.execute("PRAGMA table_info(nodes)").fetchall()
+            }
+            if not {"referent", "asserted_at", "true_of"} <= node_cols:
+                raise RuntimeError(
+                    "v9 migration verification failed: referent columns"
+                )
+            c.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                ("9",),
             )
             c.commit()
         except BaseException:
@@ -782,11 +857,24 @@ class Store:
         prov_why: str = "",
         prov_source: str = "",
         extra: dict | None = None,
+        referent: dict | None = None,
+        asserted_at: str | None = None,
+        true_of: str | None = None,
     ) -> str:
-        """Insert a node. Returns its ID."""
+        """Insert a node. Returns its ID.
+
+        ``referent``/``asserted_at``/``true_of`` bind the claim to the external
+        thing it describes (R0): the referent shape is validated, the two
+        clocks are normalized RFC 3339 UTC, ``asserted_at`` defaults to now
+        when a binding is supplied, and ``true_of`` defaults to ``asserted_at``.
+        The store performs no file IO — digests are computed by callers.
+        """
         # Merge user-supplied tags into domains (supplement, never replace)
         if tags:
             domains = list(set((domains or []) + tags))
+        referent_json, asserted_norm, true_of_norm = _normalize_binding(
+            referent, asserted_at, true_of
+        )
         nid = node_id or _uuid()
         now = _now()
         when = prov_when or now
@@ -795,13 +883,16 @@ class Store:
                (id, type, title, content, aka, intent,
                 prov_who, prov_when, prov_activity, prov_why, prov_source,
                 weight, domains, status, audience,
-                created_at, updated_at, last_accessed, extra)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                created_at, updated_at, last_accessed, extra,
+                referent, asserted_at, true_of)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?)""",
             (nid, node_type, title, content,
              _jdumps(aka or []), intent,
              _jdumps(prov_who or []), when, prov_activity, prov_why, prov_source,
              weight, _jdumps(domains or []), status, audience,
-             now, now, now, _jdumps(extra or {})),
+             now, now, now, _jdumps(extra or {}),
+             referent_json, asserted_norm, true_of_norm),
         )
         self.conn.commit()
         actor = (prov_who or [""])[0] if prov_who else ""
@@ -1449,6 +1540,72 @@ class Store:
                     "verified_at": verified,
                     "valid_at": valid,
                     "invalid_at": invalid,
+                },
+            )
+            result_row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return self._row_to_dict(result_row)
+
+    def bind_referent(
+        self,
+        node_id: str,
+        referent: dict,
+        *,
+        asserted_at: str | None = None,
+        true_of: str | None = None,
+    ) -> dict:
+        """(Re)bind a node's referent and clocks; clear any stale marker.
+
+        A deliberate, logged act (R0): rebinding asserts the claim is true of
+        the referent's current recorded state. ``asserted_at`` keeps the
+        node's existing claim time by default (a rebind re-observes the
+        referent, it does not re-date the claim); ``true_of`` defaults to now
+        (the new observation instant). Node content is never touched.
+        """
+        from .referent import validate_referent
+        from .trust import normalize_rfc3339
+
+        validated = validate_referent(referent)
+        conn = self.conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Node not found: {node_id}")
+            now = _utc_now()
+            asserted = normalize_rfc3339(
+                asserted_at or row["asserted_at"] or now, field="asserted_at"
+            )
+            observed = normalize_rfc3339(true_of or now, field="true_of")
+            try:
+                extra = json.loads(row["extra"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            stale_cleared = extra.pop("referent_stale", None) is not None
+            conn.execute(
+                """UPDATE nodes
+                      SET referent = ?, asserted_at = ?, true_of = ?,
+                          extra = ?, updated_at = ?
+                    WHERE id = ?""",
+                (_jdumps(validated), asserted, observed,
+                 _jdumps(extra), _now(), node_id),
+            )
+            self._log_in_transaction(
+                conn, "bind_referent", node_id, row["title"], "",
+                {
+                    "digest": validated.get("content_digest"),
+                    "scope": validated.get("digest_scope"),
+                    "true_of": observed,
+                    "stale_cleared": stale_cleared,
                 },
             )
             result_row = conn.execute(
@@ -3153,7 +3310,7 @@ class Store:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)
-        for key in ("aka", "domains", "prov_who", "extra"):
+        for key in ("aka", "domains", "prov_who", "extra", "referent"):
             if key in d and isinstance(d[key], str):
                 try:
                     d[key] = json.loads(d[key])

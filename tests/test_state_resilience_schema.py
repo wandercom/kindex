@@ -42,7 +42,10 @@ def _assert_declared_v8_inventory(conn: sqlite3.Connection) -> None:
     version = conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()
-    assert version is not None and version[0] == "8"
+    # >= 8: the declared v8 inventory must exist; later user-authorized
+    # migrations (v9 referent binding, PRD lineage-grounding R0) advance the
+    # stamp past it. Reverting to v7 still turns this red.
+    assert version is not None and int(version[0]) >= 8
     assert _NODE_V8_FIELDS <= _columns(conn, "nodes")
     assert "updated_at" in _columns(conn, "edges")
     assert "kind" in _columns(conn, "suggestions")

@@ -444,11 +444,18 @@ def test_i6_schema_v8_inventory_is_unchanged_by_decay(tmp_path):
     """
     store = _store(tmp_path, "schema")
     try:
-        assert store_mod.SCHEMA_VERSION == 8
+        # >= 8, stamped consistently with the code: the durable intent is
+        # (a) the v8 trust/ledger inventory exists and (b) decay itself
+        # causes no DDL (the fingerprint equality below). The original
+        # literal ==8 pinned the version current at authoring time; later
+        # user-authorized migrations (v9 referent binding, PRD
+        # lineage-grounding R0) legitimately advance it. Reverting to the
+        # historical v7 schema still turns this red.
+        assert store_mod.SCHEMA_VERSION >= 8
         version = store.conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
-        assert version and version[0] == "8"
+        assert version and version[0] == str(store_mod.SCHEMA_VERSION)
         assert {"verified_at", "verified_by", "prov_method", "valid_at",
                 "invalid_at"} <= {
             row[1] for row in store.conn.execute("PRAGMA table_info(nodes)")

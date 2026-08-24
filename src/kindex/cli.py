@@ -461,18 +461,62 @@ def cmd_invalidate(args):
 
 # ── add ────────────────────────────────────────────────────────────────
 
+def _referent_binding_from_args(args) -> dict:
+    """Build add_node binding kwargs from the --referent flags ({} if unused).
+
+    File-scope referents are hashed here (relative paths resolve against the
+    cwd) unless an explicit --referent-digest is supplied; url/repo scopes
+    require the explicit digest. Fail-closed: an unhashable file with no
+    digest is an error, never a silent unbound add.
+    """
+    raw = getattr(args, "referent", None)
+    asserted = getattr(args, "asserted_at", None)
+    true_of = getattr(args, "true_of", None)
+    if not raw:
+        if asserted or true_of:
+            return {"asserted_at": asserted, "true_of": true_of}
+        return {}
+    from .referent import ReferentError, hash_file, validate_referent
+
+    scope = getattr(args, "referent_scope", None) or (
+        "url" if "://" in raw else "file")
+    digest = getattr(args, "referent_digest", None)
+    if not digest:
+        if scope != "file":
+            print(f"Error: --referent-digest is required for scope '{scope}'",
+                  file=sys.stderr)
+            sys.exit(1)
+        try:
+            digest = hash_file(Path(raw))
+        except OSError as e:
+            print(f"Error: cannot hash referent file '{raw}': {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+    key = "url" if scope == "url" else "path"
+    ref = {key: raw, "content_digest": digest, "digest_scope": scope}
+    try:
+        validate_referent(ref)
+    except ReferentError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    return {"referent": ref, "asserted_at": asserted, "true_of": true_of}
+
+
 def cmd_add(args):
     """Quick capture with auto-extraction and linking.
 
     For operational types (constraint, directive, checkpoint, watch),
     creates the node directly with metadata from flags.
-    For knowledge types, runs the extraction pipeline.
+    For knowledge types, runs the extraction pipeline — unless a referent
+    binding is supplied, which implies direct creation (extraction would
+    rewrite the claim and decouple it from what it was bound to).
     """
     store = _store(args)
     ledger, cfg = _ledger(args)
     content = " ".join(args.note)
     node_type = args.type or "concept"
     tag_list = [t.strip() for t in args.tags.split(",") if t.strip()] if getattr(args, "tags", None) else []
+    binding = _referent_binding_from_args(args)
 
     # Resolve current user for provenance
     cfg = _config(args)
@@ -509,6 +553,7 @@ def cmd_add(args):
             prov_source="cli",
             prov_who=[current_user],
             extra=extra,
+            **binding,
         )
         label = node_type.capitalize()
         print(f"  {label}: {content} ({nid})")
@@ -516,6 +561,26 @@ def cmd_add(args):
             for k, v in extra.items():
                 print(f"    {k}: {v}")
         print(f"\n1 {node_type} added.")
+        store.close()
+        return
+
+    # A referent-bound claim is created directly: extraction would rewrite
+    # the text and decouple the claim from the state it was bound to.
+    if binding:
+        nid = store.add_node(
+            title=content[:60].strip() or content,
+            content=content,
+            node_type=node_type,
+            audience=args.audience or "private",
+            tags=tag_list,
+            prov_activity="manual-add",
+            prov_source="cli",
+            prov_who=[current_user],
+            **binding,
+        )
+        ref = binding.get("referent") or {}
+        bound = ref.get("path") or ref.get("url") or "clocks only"
+        print(f"  Added (bound to {bound}): {content[:60]} ({nid})")
         store.close()
         return
 
@@ -1526,14 +1591,21 @@ def cmd_export(args):
         # Only keep edges where target is in our exported set
         filtered_edges = [e for e in edges if e["to_id"] in node_ids]
 
-        output.append({
+        record = {
             "id": n["id"], "type": n["type"], "title": n["title"],
             "content": n.get("content", ""),
             "weight": n["weight"], "domains": n.get("domains", []),
             "audience": n.get("audience", "private"),
             "edges": [{"to": e["to_id"], "type": e["type"], "weight": e["weight"]}
                       for e in filtered_edges],
-        })
+        }
+        # R0 referent binding + clocks round-trip through export/import.
+        if isinstance(n.get("referent"), dict):
+            record["referent"] = n["referent"]
+        for clock in ("asserted_at", "true_of"):
+            if n.get(clock):
+                record[clock] = n[clock]
+        output.append(record)
 
     if args.format == "jsonl":
         for item in output:
@@ -1591,6 +1663,61 @@ def cmd_ingest(args):
             sys.exit(1)
         print(f"\n{adapter.meta.name}: {result}")
 
+    store.close()
+
+
+# ── stale (R0 referent staleness) ─────────────────────────────────────
+
+def cmd_stale(args):
+    """Re-hash referent-bound nodes; demote stale ones from trusted recall.
+
+    Detection never deletes or rewrites content: a stale/missing referent
+    records a demotion marker and the node becomes a re-verification
+    candidate. `--rebind <id>` is the deliberate re-verification act.
+    """
+    from .referent import rebind, stale_sweep
+
+    store = _store(args)
+    base = getattr(args, "base_dir", None)
+
+    if getattr(args, "rebind", None):
+        try:
+            node = rebind(store, args.rebind, base)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            store.close()
+            sys.exit(1)
+        ref = node.get("referent") or {}
+        if args.json:
+            print(_dumps({
+                "rebound": node["id"],
+                "content_digest": ref.get("content_digest"),
+                "true_of": node.get("true_of"),
+            }, indent=2))
+        else:
+            print(f"Rebound {node['id']} to "
+                  f"{(ref.get('content_digest') or '')[:12]} "
+                  f"(true_of {node.get('true_of')})")
+        store.close()
+        return
+
+    report = stale_sweep(store, base)
+    if args.json:
+        print(_dumps(report, indent=2))
+    else:
+        print(f"Checked {report['checked']} referent-bound node(s): "
+              f"{report['fresh']} fresh, {len(report['stale'])} stale, "
+              f"{len(report['missing'])} missing, "
+              f"{report['unhashable']} unhashable")
+        for kind in ("stale", "missing"):
+            for e in report[kind]:
+                print(f"  [{kind}] {e['id']}  {e['title'][:60]}")
+        for e in report["cleared"]:
+            print(f"  [cleared] {e['id']}  {e['title'][:60]}")
+        if report["stale"] or report["missing"]:
+            print("\nThese nodes are demoted from trusted recall "
+                  "(re-verification candidates). After confirming a claim "
+                  "still holds, rebind with `kin stale --rebind <id>`.")
     store.close()
 
 
@@ -3370,6 +3497,27 @@ def cmd_import_graph(args):
                     print(f"  Would replace: {title}")
         else:
             if not dry_run:
+                # R0 binding travels with the import; a malformed binding is
+                # reported visibly and the node is created unbound rather
+                # than silently dropped or silently bound wrong.
+                binding: dict = {}
+                if any(item.get(k) for k in ("referent", "asserted_at", "true_of")):
+                    try:
+                        from .store import _normalize_binding
+                        _normalize_binding(
+                            item.get("referent"),
+                            item.get("asserted_at"),
+                            item.get("true_of"),
+                        )
+                        binding = {
+                            "referent": item.get("referent"),
+                            "asserted_at": item.get("asserted_at"),
+                            "true_of": item.get("true_of"),
+                        }
+                    except (ValueError, TypeError) as exc:
+                        print(f"  Warning: invalid referent binding on "
+                              f"'{title}' ({exc}); imported unbound",
+                              file=sys.stderr)
                 store.add_node(
                     title=title,
                     content=item.get("content", ""),
@@ -3380,6 +3528,7 @@ def cmd_import_graph(args):
                     audience=item.get("audience", "private"),
                     prov_activity="import",
                     prov_source=str(filepath),
+                    **binding,
                 )
             created += 1
             if dry_run:
@@ -6260,8 +6409,38 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--audience", choices=["private", "team", "org", "public"],
                    help="Audience scope")
     s.add_argument("--tags", help="Comma-separated tags for contextual surfacing")
+    # R0 referent binding: bind the claim to the thing it describes.
+    # Any binding flag implies direct node creation (no extraction rewrite —
+    # a bound claim must stay the exact claim that was bound).
+    s.add_argument("--referent",
+                   help="Path or URL the claim describes (binds a content "
+                        "digest; file paths are hashed now)")
+    s.add_argument("--referent-digest",
+                   help="Explicit content digest (required for url/repo "
+                        "scope; sha256 hex, or 7-64 hex commit for repo)")
+    s.add_argument("--referent-scope", choices=["file", "url", "repo"],
+                   help="What the digest covers (default: url for URLs, "
+                        "file otherwise)")
+    s.add_argument("--asserted-at",
+                   help="RFC3339 claim time (default: now when binding)")
+    s.add_argument("--true-of",
+                   help="RFC3339 instant the referent was observed in the "
+                        "digested state (default: asserted-at)")
     _common(s)
     s.set_defaults(func=cmd_add)
+
+    # stale — R0 referent staleness sweep
+    s = sub.add_parser("stale",
+                       help="Re-hash referent-bound nodes; demote stale ones")
+    s.add_argument("--base-dir",
+                   help="Resolve relative referent paths against this dir "
+                        "(default: cwd)")
+    s.add_argument("--rebind",
+                   metavar="NODE_ID",
+                   help="Re-hash one node's referent and rebind to the "
+                        "current state (clears its stale marker)")
+    _common(s)
+    s.set_defaults(func=cmd_stale)
 
     # learn
     s = sub.add_parser("learn", help="Extract knowledge from sessions/inbox")

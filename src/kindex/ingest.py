@@ -985,7 +985,7 @@ def _kin_index_node(node: dict) -> dict:
     # edit) crosses a 2-dp boundary and is visible. This preserves the
     # information 0.30.1 carried while keeping the file stable against
     # the unconditional decay fold (R2.1).
-    return {
+    out = {
         "domains": sorted(node.get("domains") or []),
         "id": node["id"],
         "title": node["title"],
@@ -993,6 +993,24 @@ def _kin_index_node(node: dict) -> dict:
         "updated_at": _node_time(node),
         "weight": round(node["weight"], 2),
     }
+    # R0 referent binding + two clocks travel with the projection (schema v2
+    # unknown-field passthrough keeps them safe through older merge drivers,
+    # which pass node dicts through whole). An absolute local path is
+    # REDACTED (digest and scope kept, path_redacted flag set): tracked
+    # .kin files must never carry machine-local absolute paths.
+    referent = node.get("referent")
+    if isinstance(referent, dict):
+        path = referent.get("path")
+        if path and Path(path).is_absolute():
+            referent = {
+                k: v for k, v in referent.items() if k != "path"
+            }
+            referent["path_redacted"] = True
+        out["referent"] = referent
+    for clock in ("asserted_at", "true_of"):
+        if node.get(clock):
+            out[clock] = node[clock]
+    return out
 
 
 def _git_ancestor_exists(path: Path) -> bool:

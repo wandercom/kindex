@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Audience scopes for tenancy model
 AUDIENCES = ("private", "team", "org", "public")
@@ -84,6 +84,13 @@ CREATE TABLE IF NOT EXISTS nodes (
     prov_method TEXT,
     valid_at TEXT,
     invalid_at TEXT,
+    -- referent binding + two clocks (R0): what external thing the claim
+    -- describes (JSON {path|url, content_digest, digest_scope}), when the
+    -- claim was asserted, and when the referent was observed in the state
+    -- the digest describes. NULL = unbound claim (legacy behavior).
+    referent TEXT,
+    asserted_at TEXT,
+    true_of TEXT,
     -- scoring
     weight REAL NOT NULL DEFAULT 0.5,
     domains TEXT NOT NULL DEFAULT '',       -- JSON array

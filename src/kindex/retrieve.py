@@ -92,7 +92,14 @@ def _has_mutable_references(content: str) -> bool:
 
 
 def _staleness_caveat(node: dict) -> str:
-    """Staleness warning based on age, type, AND content analysis."""
+    """Staleness warning based on age, type, AND content analysis.
+
+    A recorded stale-referent marker (R0: the referent sweep re-hashed the
+    thing this claim describes and it moved or vanished) outranks every
+    age/content heuristic — it is a measured fact, not a guess.
+    """
+    if (node.get("extra") or {}).get("referent_stale"):
+        return " [stale-referent]"
     days = _node_age_days(node)
     if days is None or days <= 1:
         return ""

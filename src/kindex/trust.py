@@ -28,6 +28,7 @@ TRUST_REASONS = (
     "unverified",
     "not_yet_valid",
     "invalidated",
+    "stale_referent",
     "mutual_contradiction",
 )
 
@@ -144,6 +145,20 @@ def _base_trust_decision(node: dict, *, at: datetime) -> TrustDecision:
         except ValueError:
             # Corrupt end-time metadata fails closed.
             return TrustDecision(False, "invalidated")
+
+    # R0 demotion: a recorded stale-referent marker (written by the referent
+    # sweep when re-hashing found the referent moved or missing) removes the
+    # node from trusted recall until it is re-verified/rebound. This also
+    # strips its power to contradict — only admitted nodes may suppress.
+    extra = node.get("extra")
+    if isinstance(extra, str):
+        try:
+            import json
+            extra = json.loads(extra)
+        except (ValueError, TypeError):
+            extra = {}
+    if isinstance(extra, dict) and extra.get("referent_stale"):
+        return TrustDecision(False, "stale_referent")
 
     return TrustDecision(True, "trusted")
 

@@ -214,6 +214,10 @@ class TestReservedKeys:
             "claim", "lock", "coord_status", "session_status", "task_status",
             "current_state", "messages", "members", "resources",
             "inject_messages",
+            # R0 staleness demotion marker (PRD lineage-grounding): written
+            # by the referent sweep / bind_referent only; a generic edit
+            # must not fabricate or clear a demotion.
+            "referent_stale",
         }
 
     def test_expires_merge_preserves_reserved_keys(self, store):

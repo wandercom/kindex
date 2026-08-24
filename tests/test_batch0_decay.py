@@ -313,9 +313,17 @@ def test_p6_i6_decay_preserves_current_declared_v8_inventory(tmp_path):
     """
     s = _mk_store(tmp_path)
     try:
-        assert s.conn.execute(
+        # >= 8, stamped consistently with the code: the durable intent is the
+        # v8 inventory below plus zero decay-owned DDL (the before/after
+        # fingerprint). The original =="8" pinned the version current at
+        # authoring; later user-authorized migrations (v9 referent binding,
+        # PRD lineage-grounding R0) advance the stamp. A v7 reversion is
+        # still red.
+        from kindex.schema import SCHEMA_VERSION as _current_schema
+        stamp = s.conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone()[0] == "8"
+        ).fetchone()[0]
+        assert int(stamp) >= 8 and stamp == str(_current_schema)
         assert {"verified_at", "verified_by", "prov_method", "valid_at",
                 "invalid_at"} <= {
             r[1] for r in s.conn.execute("PRAGMA table_info(nodes)")

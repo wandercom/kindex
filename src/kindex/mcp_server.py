@@ -425,6 +425,11 @@ def add(
     tags: str = "",
     domains: str = "",
     audience: str = "private",
+    referent: str = "",
+    referent_digest: str = "",
+    referent_scope: str = "",
+    asserted_at: str = "",
+    true_of: str = "",
 ) -> str:
     """Add a knowledge node to the graph. ALWAYS `search` first to avoid duplicates.
 
@@ -446,6 +451,16 @@ def add(
         tags: Comma-separated tags for contextual surfacing (e.g. "kindex,python").
         domains: Alias for tags (deprecated, use tags instead).
         audience: Visibility scope (private, team, org, public). Default: private.
+        referent: Path or URL the claim describes (R0 binding). File paths
+            are hashed now — use an absolute path (the MCP server's cwd is
+            not the project's) or supply referent_digest.
+        referent_digest: Explicit content digest (required for url/repo
+            scope; sha256 hex, or 7-64 hex commit for repo scope).
+        referent_scope: file | url | repo (default: url for URLs, file
+            otherwise).
+        asserted_at: RFC3339 claim time (default: now when binding).
+        true_of: RFC3339 instant the referent was observed in the digested
+            state (default: asserted_at).
     """
     store, config = _get_store()
     from .extract import keyword_extract
@@ -453,17 +468,50 @@ def add(
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     domain_list = [d.strip() for d in domains.split(",") if d.strip()] if domains else []
 
+    binding: dict = {}
+    if referent:
+        from pathlib import Path
+
+        from .referent import ReferentError, hash_file, validate_referent
+
+        scope = referent_scope or ("url" if "://" in referent else "file")
+        digest = referent_digest
+        if not digest:
+            if scope != "file":
+                return (f"Error: referent_digest is required for scope "
+                        f"'{scope}'")
+            try:
+                digest = hash_file(Path(referent))
+            except OSError as e:
+                return (f"Error: cannot hash referent file '{referent}' "
+                        f"({e}); pass an absolute path or referent_digest")
+        key = "url" if scope == "url" else "path"
+        ref = {key: referent, "content_digest": digest, "digest_scope": scope}
+        try:
+            validate_referent(ref)
+        except ReferentError as e:
+            return f"Error: {e}"
+        binding["referent"] = ref
+    if asserted_at:
+        binding["asserted_at"] = asserted_at
+    if true_of:
+        binding["true_of"] = true_of
+
     # Create the node
     title = text[:60].strip()
-    nid = store.add_node(
-        title=title,
-        content=text,
-        node_type=node_type,
-        domains=domain_list,
-        tags=tag_list,
-        audience=audience,
-        prov_activity="mcp-add",
-    )
+    try:
+        nid = store.add_node(
+            title=title,
+            content=text,
+            node_type=node_type,
+            domains=domain_list,
+            tags=tag_list,
+            audience=audience,
+            prov_activity="mcp-add",
+            **binding,
+        )
+    except ValueError as e:
+        return f"Error: {e}"
 
     # Try auto-linking
     existing_titles = [n["title"] for n in store.all_nodes(limit=200)]
@@ -1263,6 +1311,59 @@ def graph_heal() -> str:
         lines.append(f"\n## Disconnected Components: {stats['components']}")
         lines.append("  -> Use `suggest` to find cross-component link candidates")
 
+    return "\n".join(lines)
+
+
+@_tool()
+def stale_check(base_dir: str = "", rebind: str = "") -> str:
+    """Re-hash referent-bound nodes; demote stale ones from trusted recall.
+
+    R0 staleness sweep: every active node carrying a file-scope referent is
+    re-hashed against its recorded content digest. A mismatch (or missing
+    file) records a demotion marker — the node drops out of trusted_only
+    recall, shows " [stale-referent]" in search/context output, and becomes
+    a re-verification candidate. Content is never deleted or rewritten.
+    A fresh re-hash clears a previously recorded marker.
+
+    Args:
+        base_dir: Resolve relative referent paths against this directory
+            (default: the server's cwd — prefer absolute referent paths).
+        rebind: Node ID to deliberately re-verify instead of sweeping:
+            re-hash its referent and rebind to the current state (moves
+            true_of to now, keeps asserted_at, clears the stale marker).
+    """
+    store, _ = _get_store()
+    from .referent import rebind as rebind_fn
+    from .referent import stale_sweep
+
+    base = base_dir or None
+    if rebind:
+        try:
+            node = rebind_fn(store, rebind, base)
+        except Exception as e:
+            return f"Error: {e}"
+        ref = node.get("referent") or {}
+        return (f"Rebound {node['id']} to "
+                f"{(ref.get('content_digest') or '')[:12]} "
+                f"(true_of {node.get('true_of')}); stale marker cleared.")
+
+    report = stale_sweep(store, base)
+    lines = [
+        f"Checked {report['checked']} referent-bound node(s): "
+        f"{report['fresh']} fresh, {len(report['stale'])} stale, "
+        f"{len(report['missing'])} missing, "
+        f"{report['unhashable']} unhashable"
+    ]
+    for kind in ("stale", "missing"):
+        for e in report[kind]:
+            lines.append(f"  [{kind}] {e['id']}  {e['title'][:60]}")
+    for e in report["cleared"]:
+        lines.append(f"  [cleared] {e['id']}  {e['title'][:60]}")
+    if report["stale"] or report["missing"]:
+        lines.append(
+            "Demoted from trusted recall (re-verification candidates). "
+            "After confirming a claim still holds, use "
+            "stale_check(rebind=<id>).")
     return "\n".join(lines)
 
 
