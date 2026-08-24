@@ -4,699 +4,688 @@
     "python",
     "shell"
   ],
-  "node_count": 133,
+  "node_count": 123,
   "nodes": [
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-05f34125a9ba",
+      "id": "code-mod-kindex-05f34125a9ba",
       "title": "src/kindex/adapters/sessions.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-086378eea6e0",
+      "id": "code-mod-kindex-086378eea6e0",
       "title": "src/kindex/attention.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-0c0f8066c77b",
+      "id": "code-mod-kindex-0c0f8066c77b",
       "title": "src/kindex/agent_adapters.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "shell"
       ],
-      "id": "code-mod-kindex-state-resilience-0fae9ff61910",
+      "id": "code-mod-kindex-0fae9ff61910",
       "title": "scripts/sync-version.sh",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-1008402a94e8",
+      "id": "code-mod-kindex-1008402a94e8",
       "title": "src/kindex/adapters/registry.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:23",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-119a6050feb3",
+      "id": "code-mod-kindex-119a6050feb3",
       "title": "src/kindex/adapters/claude_web.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-13363db31233",
+      "id": "code-mod-kindex-13363db31233",
       "title": "src/kindex/kin_merge.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-1668da8a23a5",
+      "id": "code-mod-kindex-1668da8a23a5",
       "title": "src/kindex/daemon.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-177b370455a7",
+      "id": "code-mod-kindex-177b370455a7",
       "title": "src/kindex/models.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-191e560d5a37",
+      "id": "code-mod-kindex-191e560d5a37",
       "title": "src/kindex/modes.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-22T20:04:24",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-1a589d0d4ff2",
+      "id": "code-mod-kindex-1a589d0d4ff2",
       "title": "src/kindex/adapters/pipeline.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-1b467bb9761a",
+      "id": "code-mod-kindex-1b467bb9761a",
       "title": "src/kindex/reminders.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-1cc1824729d5",
+      "id": "code-mod-kindex-1cc1824729d5",
       "title": "src/kindex/ingest.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-1fd61a2a944a",
+      "id": "code-mod-kindex-1fd61a2a944a",
       "title": "src/kindex/actions.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-21dd45af3575",
+      "id": "code-mod-kindex-21dd45af3575",
       "title": "src/kindex/scheduling.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-26bb9b6e1fcb",
+      "id": "code-mod-kindex-26bb9b6e1fcb",
       "title": "src/kindex/graph.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:23",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-2ecdcb3c4276",
+      "id": "code-mod-kindex-2ecdcb3c4276",
       "title": "src/kindex/adapters/github.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-2fcd370316b8",
+      "id": "code-mod-kindex-2fcd370316b8",
       "title": "src/kindex/sim.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-42ecd8f0766c",
+      "id": "code-mod-kindex-42ecd8f0766c",
       "title": "src/kindex/adapters/files.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-4506c94e9fe5",
-      "title": "src/kindex/trust.py",
-      "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-mod-kindex-state-resilience-46a31493a160",
+      "id": "code-mod-kindex-46a31493a160",
       "title": "src/kindex/store.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-4af5ee17841c",
+      "id": "code-mod-kindex-4af5ee17841c",
       "title": "src/kindex/adapters/linear.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-4d774506f9e3",
+      "id": "code-mod-kindex-4d774506f9e3",
       "title": "src/kindex/reinforce.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-5998a0a5ca33",
+      "id": "code-mod-kindex-5998a0a5ca33",
       "title": "src/kindex/agent_settings.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-5aa57e096c49",
+      "id": "code-mod-kindex-5aa57e096c49",
       "title": "src/kindex/dream.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-12T11:32:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-62731532a556",
+      "id": "code-mod-kindex-62731532a556",
       "title": "src/kindex/setup.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-66df7720eed6",
+      "id": "code-mod-kindex-66df7720eed6",
       "title": "src/kindex/cli.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-6a3142a46050",
+      "id": "code-mod-kindex-6a3142a46050",
       "title": "src/kindex/config.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-6a374a6f7fce",
+      "id": "code-mod-kindex-6a374a6f7fce",
       "title": "src/kindex/vectors.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-702e4442e57e",
+      "id": "code-mod-kindex-702e4442e57e",
       "title": "src/kindex/tasks.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-12T11:32:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-70d2128d6f82",
+      "id": "code-mod-kindex-70d2128d6f82",
       "title": "src/kindex/routing.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-12T11:32:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-7c7bbd6990da",
+      "id": "code-mod-kindex-7c7bbd6990da",
       "title": "src/kindex/adapters/__init__.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-7ccf79c98767",
+      "id": "code-mod-kindex-7ccf79c98767",
       "title": "src/kindex/adapters/base.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-7e3e66278abe",
+      "id": "code-mod-kindex-7e3e66278abe",
       "title": "src/kindex/archive.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-12T11:32:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-858b7166f927",
+      "id": "code-mod-kindex-858b7166f927",
       "title": "src/kindex/budget.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-8a94356fd973",
+      "id": "code-mod-kindex-8a94356fd973",
       "title": "src/kindex/analytics.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-92df373f87c7",
+      "id": "code-mod-kindex-92df373f87c7",
       "title": "src/kindex/notify.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-9418152e54f2",
+      "id": "code-mod-kindex-9418152e54f2",
       "title": "src/kindex/adapters/projects.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-27T22:16:52",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-94e276789253",
+      "id": "code-mod-kindex-94e276789253",
       "title": "examples/adapter-template/kindex_adapter_csv.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-9865e2d9ecc1",
+      "id": "code-mod-kindex-9865e2d9ecc1",
       "title": "src/kindex/mode_primer.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-22T20:04:24",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-a31c7ed5d35f",
-      "title": "conftest.py",
-      "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-mod-kindex-state-resilience-af2e3463feb5",
+      "id": "code-mod-kindex-af2e3463feb5",
       "title": "src/kindex/vault.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-b1b2fdefbdd0",
+      "id": "code-mod-kindex-b1b2fdefbdd0",
       "title": "src/kindex/coordination.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-12T11:32:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-b4872208bf57",
+      "id": "code-mod-kindex-b4872208bf57",
       "title": "src/kindex/adapters/codex_sessions.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:23",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-b568a48e00e4",
+      "id": "code-mod-kindex-b568a48e00e4",
       "title": "src/kindex/dream_deep.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-27T22:16:52",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-bd222a4e378f",
+      "id": "code-mod-kindex-bd222a4e378f",
       "title": "src/kindex/hooks.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-bffe64dbd53e",
+      "id": "code-mod-kindex-bffe64dbd53e",
       "title": "src/kindex/adapters/understand_anything.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:23",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-c36798e40719",
+      "id": "code-mod-kindex-c36798e40719",
       "title": "src/kindex/adapters/code.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-c4522229e518",
+      "id": "code-mod-kindex-c4522229e518",
       "title": "src/kindex/__init__.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-c77f7cec7d57",
+      "id": "code-mod-kindex-c77f7cec7d57",
       "title": "src/kindex/sessions.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-12T11:32:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-c8ebc72bbedb",
+      "id": "code-mod-kindex-c8ebc72bbedb",
       "title": "src/kindex/schema.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-ce3301c705b3",
+      "id": "code-mod-kindex-ce3301c705b3",
       "title": "src/kindex/scoping.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-d54d2e7410ef",
+      "id": "code-mod-kindex-d54d2e7410ef",
       "title": "src/kindex/llm.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-d68e56207179",
+      "id": "code-mod-kindex-d68e56207179",
       "title": "src/kindex/retrieve.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-d7e1cc803597",
+      "id": "code-mod-kindex-d7e1cc803597",
       "title": "src/kindex/extract.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-e381cc44d87c",
+      "id": "code-mod-kindex-e381cc44d87c",
       "title": "src/kindex/code_map.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-eb0caa51072f",
+      "id": "code-mod-kindex-eb0caa51072f",
       "title": "src/kindex/locks.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:38",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-f9986c492ab2",
+      "id": "code-mod-kindex-f9986c492ab2",
       "title": "src/kindex/mcp_server.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-mod-kindex-state-resilience-fd3863146db0",
+      "id": "code-mod-kindex-fd3863146db0",
       "title": "src/kindex/adapters/git_hooks.py",
       "type": "artifact",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:23",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-027acb49b3a5",
+      "id": "code-sym-kindex-027acb49b3a5",
       "title": "ProjectsAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-27T22:16:52",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-05a1fbf0db2e",
+      "id": "code-sym-kindex-05a1fbf0db2e",
       "title": "AgentsConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-0850aa56538b",
+      "id": "code-sym-kindex-0850aa56538b",
       "title": "ProfileEntry",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-08e1ea9d3cda",
+      "id": "code-sym-kindex-08e1ea9d3cda",
       "title": "ReminderConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-0ab7c168abe0",
+      "title": "SlackChannel",
+      "type": "concept",
+      "updated_at": "2026-07-01T19:37:21",
       "weight": 0.01
     },
     {
@@ -704,65 +693,65 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-0ab7c168abe0",
-      "title": "SlackChannel",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-0c0e017eda89",
+      "id": "code-sym-kindex-0c0e017eda89",
       "title": "GitHubAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-11a0db8685d1",
+      "id": "code-sym-kindex-11a0db8685d1",
       "title": "TerminalChannel",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-126d2691006d",
+      "id": "code-sym-kindex-126d2691006d",
       "title": "EmailChannel",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-1516ffada71e",
+      "id": "code-sym-kindex-1516ffada71e",
       "title": "FilesAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-15261553fafb",
+      "id": "code-sym-kindex-15261553fafb",
       "title": "SimConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-187622f1260e",
+      "title": "NotificationChannel",
+      "type": "concept",
+      "updated_at": "2026-07-01T19:37:21",
       "weight": 0.01
     },
     {
@@ -770,76 +759,76 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-187622f1260e",
-      "title": "NotificationChannel",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-18d83f4f3d40",
+      "id": "code-sym-kindex-18d83f4f3d40",
       "title": "ClaudeWebAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-1980fbc0bfbc",
+      "id": "code-sym-kindex-1980fbc0bfbc",
       "title": "AdapterOption",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-1ca6d2b3a552",
+      "id": "code-sym-kindex-1ca6d2b3a552",
       "title": "AttentionInjection",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-1f90559c7f69",
+      "id": "code-sym-kindex-1f90559c7f69",
       "title": "AdapterMeta",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-200aad86be36",
+      "id": "code-sym-kindex-200aad86be36",
       "title": "AttentionConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-279e1c45cb06",
+      "id": "code-sym-kindex-279e1c45cb06",
       "title": "AgentInstanceConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-2c033008a200",
+      "title": "InboxItem",
+      "type": "concept",
+      "updated_at": "2026-03-16T16:20:11",
       "weight": 0.01
     },
     {
@@ -847,54 +836,32 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-2c033008a200",
-      "title": "InboxItem",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-2d0787882b30",
+      "id": "code-sym-kindex-2d0787882b30",
       "title": "SkillNode",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-352d8c9bbdba",
+      "id": "code-sym-kindex-352d8c9bbdba",
       "title": "CollabConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-36fe0270bb97",
+      "id": "code-sym-kindex-36fe0270bb97",
       "title": "ScheduleTier",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-3da712cdf5b5",
-      "title": "MemoryUnavailableError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
       "weight": 0.5
     },
     {
@@ -902,10 +869,21 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-415d46d7c508",
+      "id": "code-sym-kindex-415d46d7c508",
       "title": "RankingConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-49ac56615e1e",
+      "title": "AttentionCandidate",
+      "type": "concept",
+      "updated_at": "2026-07-01T19:37:21",
       "weight": 0.01
     },
     {
@@ -913,87 +891,76 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-4710515cacde",
-      "title": "InvalidIntervalError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-49ac56615e1e",
-      "title": "AttentionCandidate",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-539e76b9be1f",
+      "id": "code-sym-kindex-539e76b9be1f",
       "title": "Edge",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-54e91bfd8615",
+      "id": "code-sym-kindex-54e91bfd8615",
       "title": "Vault",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-552c22e16187",
+      "id": "code-sym-kindex-552c22e16187",
       "title": "WorkPolicyConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-58d630bc994a",
+      "id": "code-sym-kindex-58d630bc994a",
       "title": "ClaudeChannelConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-608ef82e510c",
+      "id": "code-sym-kindex-608ef82e510c",
       "title": "Config",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-62490d9465aa",
+      "id": "code-sym-kindex-62490d9465aa",
       "title": "TelegramChannelConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-6d1dbf76937d",
+      "title": "BudgetConfig",
+      "type": "concept",
+      "updated_at": "2026-07-15T21:37:31",
       "weight": 0.01
     },
     {
@@ -1001,32 +968,32 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-6d1dbf76937d",
-      "title": "BudgetConfig",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-73f945897039",
+      "id": "code-sym-kindex-73f945897039",
       "title": "TopicNode",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:11",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-74266f41225f",
+      "id": "code-sym-kindex-74266f41225f",
       "title": "SystemChannelConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-78b780114b82",
+      "title": "CodexSessionsAdapter",
+      "type": "concept",
+      "updated_at": "2026-05-24T14:04:22",
       "weight": 0.01
     },
     {
@@ -1034,65 +1001,54 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-77f33e03ff54",
-      "title": "TrustDecision",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-78b780114b82",
-      "title": "CodexSessionsAdapter",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-79b4f17baab3",
+      "id": "code-sym-kindex-79b4f17baab3",
       "title": "CommitsAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:22",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-7c4b42dbb2fa",
+      "id": "code-sym-kindex-7c4b42dbb2fa",
       "title": "LLMConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-7e4d614285e9",
+      "id": "code-sym-kindex-7e4d614285e9",
       "title": "SlackChannelConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-89cc5b13c9e0",
+      "id": "code-sym-kindex-89cc5b13c9e0",
       "title": "EmailChannelConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-95b10e03abe3",
+      "title": "CSVAdapter",
+      "type": "concept",
+      "updated_at": "2026-03-16T16:20:11",
       "weight": 0.01
     },
     {
@@ -1100,32 +1056,32 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-95b10e03abe3",
-      "title": "CSVAdapter",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-95b8acd87972",
+      "id": "code-sym-kindex-95b8acd87972",
       "title": "Store",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-979d447616b7",
+      "id": "code-sym-kindex-979d447616b7",
       "title": "AgentOverrideConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-9d295ea2d8a3",
+      "title": "ReinforceOutcome",
+      "type": "concept",
+      "updated_at": "2026-06-11T15:16:37",
       "weight": 0.01
     },
     {
@@ -1133,54 +1089,54 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-9d295ea2d8a3",
-      "title": "ReinforceOutcome",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-9f9f9fbe1087",
+      "id": "code-sym-kindex-9f9f9fbe1087",
       "title": "EditPolicyError",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-9fab75aee76a",
+      "id": "code-sym-kindex-9fab75aee76a",
       "title": "SessionsAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-16T16:20:26",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-a8ad139fc733",
+      "id": "code-sym-kindex-a8ad139fc733",
       "title": "LinearPolicyConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-aa2ebf2ad1ea",
+      "id": "code-sym-kindex-aa2ebf2ad1ea",
       "title": "Adapter",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-b166b6681594",
+      "title": "LockHeldError",
+      "type": "concept",
+      "updated_at": "2026-07-01T19:37:21",
       "weight": 0.01
     },
     {
@@ -1188,54 +1144,43 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-b166b6681594",
-      "title": "LockHeldError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-b37057535f7f",
-      "title": "StaleReviewError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-b3b8d9cad562",
+      "id": "code-sym-kindex-b3b8d9cad562",
       "title": "TraversalResult",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:22",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-b404f7bbed67",
+      "id": "code-sym-kindex-b404f7bbed67",
       "title": "UnderstandAnythingAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:22",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-b42e459fa446",
+      "id": "code-sym-kindex-b42e459fa446",
       "title": "DefaultsConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-b49f63b10a0f",
+      "title": "TelegramChannel",
+      "type": "concept",
+      "updated_at": "2026-07-01T19:37:21",
       "weight": 0.01
     },
     {
@@ -1243,54 +1188,32 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-b49f63b10a0f",
-      "title": "TelegramChannel",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-b4c374d6ddf4",
+      "id": "code-sym-kindex-b4c374d6ddf4",
       "title": "BudgetLedger",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-06-11T15:16:36",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-b724908147cc",
+      "id": "code-sym-kindex-b724908147cc",
       "title": "ProfileMismatchError",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-b90676bdf42f",
+      "id": "code-sym-kindex-b90676bdf42f",
       "title": "EmbeddingConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-c30edae67b27",
-      "title": "CodeIngestConfig",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
       "weight": 0.5
     },
     {
@@ -1298,10 +1221,32 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-c644dbd33873",
+      "id": "code-sym-kindex-c30edae67b27",
+      "title": "CodeIngestConfig",
+      "type": "concept",
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-c644dbd33873",
       "title": "GitPolicyConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-c663225debcc",
+      "title": "NotifyResult",
+      "type": "concept",
+      "updated_at": "2026-07-01T19:37:21",
       "weight": 0.01
     },
     {
@@ -1309,167 +1254,112 @@
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-c663225debcc",
-      "title": "NotifyResult",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-c6a95ef8e147",
+      "id": "code-sym-kindex-c6a95ef8e147",
       "title": "IngestResult",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-c6d318c35fe8",
+      "id": "code-sym-kindex-c6d318c35fe8",
       "title": "ClaudeChannel",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-cbab8b0e1faf",
+      "id": "code-sym-kindex-cbab8b0e1faf",
       "title": "ModePrimer",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-22T20:04:24",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-cdda024a8c00",
+      "id": "code-sym-kindex-cdda024a8c00",
       "title": "IngestConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T21:37:31",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-d1aead4dfe46",
-      "title": "TitleCollisionError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-d9d978ada693",
+      "id": "code-sym-kindex-d9d978ada693",
       "title": "LinearAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-e0501acf75b6",
+      "id": "code-sym-kindex-e0501acf75b6",
       "title": "ModeFingerprint",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-03-22T20:04:24",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-e0b23690c2bb",
-      "title": "CandidateStateError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-e3d3571dcdc7",
+      "id": "code-sym-kindex-e3d3571dcdc7",
       "title": "CodeAdapter",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-15T23:28:47",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-e3fc793d7353",
+      "id": "code-sym-kindex-e3fc793d7353",
       "title": "GraphStats",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-05-24T14:04:22",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-e7d77ef2ec54",
-      "title": "CaptureConfig",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-ed860a14fde8",
+      "id": "code-sym-kindex-ed860a14fde8",
       "title": "SystemChannel",
       "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
+      "updated_at": "2026-07-01T19:37:21",
+      "weight": 0.01
     },
     {
       "domains": [
         "code",
         "python"
       ],
-      "id": "code-sym-kindex-state-resilience-f23dff30a8e5",
-      "title": "CandidateNotFoundError",
-      "type": "concept",
-      "updated_at": "2026-08-18T15:51:16",
-      "weight": 0.5
-    },
-    {
-      "domains": [
-        "code",
-        "python"
-      ],
-      "id": "code-sym-kindex-state-resilience-fe4d5554b184",
+      "id": "code-sym-kindex-fe4d5554b184",
       "title": "ChannelsConfig",
       "type": "concept",
       "updated_at": "2026-08-18T15:56:07",
-      "weight": 0.01
+      "weight": 0.5
     }
   ],
-  "repo": "kindex-state-resilience",
-  "version": 1
+  "repo": "kindex",
+  "version": 2
 }

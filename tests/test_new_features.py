@@ -327,7 +327,11 @@ class TestKinIndex:
         assert result_path.parent.name == ".kin"
 
         data = json.loads(result_path.read_text())
-        assert data["version"] == 1
+        # v2 = unknown-field passthrough convention (PRD lineage-grounding
+        # item 1); writer and merge driver are single-sourced on this value.
+        from kindex.kin_merge import KIN_INDEX_SCHEMA_VERSION
+        assert data["version"] == 2
+        assert data["version"] == KIN_INDEX_SCHEMA_VERSION
         assert data["node_count"] >= 2
         assert isinstance(data["nodes"], list)
         assert any(n["title"] == "Alpha concept" for n in data["nodes"])

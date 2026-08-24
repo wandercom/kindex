@@ -1112,12 +1112,14 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
     # every regeneration, churning git history and conflicting on every concurrent
     # merge; the commit time already records snapshot freshness. The file is a pure
     # function of the node set so a structured union merge stays lossless.
+    from .kin_merge import KIN_INDEX_SCHEMA_VERSION
+
     index = {
         "domains": sorted(set(d for n in nodes for d in (n.get("domains") or []))),
         "node_count": len(nodes),
         "nodes": [_kin_index_node(n) for n in nodes],
         "repo": repo_slug,
-        "version": 1,
+        "version": KIN_INDEX_SCHEMA_VERSION,
     }
 
     output_path = output_dir / ".kin" / "index.json"

@@ -23,6 +23,36 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+# Schema version of the ``.kin/index.json`` artifact this driver understands.
+# v1: original header {domains, node_count, nodes, repo, version}.
+# v2: unknown TOP-LEVEL fields are preserved verbatim by the merge driver and
+#     nodes may carry additional fields (e.g. referent binding); consumers must
+#     ignore fields they do not understand. ``ingest.write_kin_index`` emits
+#     this version, keeping writer and merger single-sourced.
+KIN_INDEX_SCHEMA_VERSION = 2
+
+# Top-level index fields this driver recomputes or assigns itself; everything
+# else on either side passes through the 3-way field merge.
+_INDEX_OWNED_FIELDS = frozenset({"domains", "node_count", "nodes", "repo", "version"})
+
+# Legacy volatile fields old writers emitted; deliberately never resurrected
+# by the merge (they churn git history — see write_kin_index's NB comment).
+_INDEX_DROPPED_FIELDS = frozenset({"source_updated_at"})
+
+# Top-level code-map fields the code-map merger owns (recomputed/assigned).
+_CODE_MAP_OWNED_FIELDS = frozenset(
+    {"version", "project", "nodes", "edges", "layers", "tour"}
+)
+
+
+class UnsupportedKinSchemaError(ValueError):
+    """A ``.kin`` side declares a schema version newer than this driver.
+
+    Raised so the git driver can DECLINE the merge (normal conflict fallback)
+    instead of silently rewriting — and thereby corrupting — a newer-schema
+    file it cannot faithfully merge. Fail-closed by construction.
+    """
+
 
 def load_json(path: str | Path) -> dict | None:
     """Load a ``.kin`` side for merging.
@@ -91,6 +121,66 @@ def _three_way_union(
     return out
 
 
+def _index_version(doc: dict | None) -> int:
+    """Validated integer schema version of one index side (absent side -> 1).
+
+    A non-integer version or one newer than this driver raises
+    ``UnsupportedKinSchemaError``: both mean "written by something this driver
+    does not understand", and guessing would risk exactly the silent field
+    corruption the version marker exists to prevent.
+    """
+    if doc is None:
+        return 1
+    version = doc.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise UnsupportedKinSchemaError(
+            f"unrecognized .kin index schema version: {version!r}"
+        )
+    if version > KIN_INDEX_SCHEMA_VERSION:
+        raise UnsupportedKinSchemaError(
+            f".kin index schema version {version} is newer than this driver "
+            f"(understands <= {KIN_INDEX_SCHEMA_VERSION})"
+        )
+    return version
+
+
+def _merge_passthrough_fields(
+    out: dict,
+    base: dict | None,
+    ours: dict | None,
+    theirs: dict | None,
+    *,
+    owned: frozenset[str],
+    dropped: frozenset[str] = frozenset(),
+) -> None:
+    """3-way merge unknown top-level fields into ``out`` (in place).
+
+    Same semantics as the node union, applied per field: a field present on
+    both sides keeps ours unless only theirs changed it vs base; a field on
+    one side survives unless it is unchanged from base (deleted on the other
+    side). Fields in ``owned`` are the merger's own output; fields in
+    ``dropped`` are legacy volatile fields that must never resurrect.
+    """
+    o, a, b = base or {}, ours or {}, theirs or {}
+    for key in sorted((set(a) | set(b)) - owned - dropped):
+        in_ours, in_theirs = key in a, key in b
+        if in_ours and in_theirs:
+            if a[key] == b[key]:
+                out[key] = a[key]
+            elif key in o and a[key] == o[key]:
+                out[key] = b[key]  # only theirs changed it
+            else:
+                out[key] = a[key]  # ours changed (or no base): ours wins
+        elif in_ours:
+            if key in o and a[key] == o[key]:
+                continue  # unchanged on ours, deleted on theirs
+            out[key] = a[key]
+        else:
+            if key in o and b[key] == o[key]:
+                continue  # unchanged on theirs, deleted on ours
+            out[key] = b[key]
+
+
 def _newer(a: dict, b: dict) -> dict:
     """Pick the node with the later ``updated_at`` (ISO strings sort lexically).
 
@@ -104,7 +194,14 @@ def _newer(a: dict, b: dict) -> dict:
 def merge_index(
     base: dict | None, ours: dict | None, theirs: dict | None
 ) -> dict:
-    """Union ``.kin/index.json`` node sets; recompute the derived header."""
+    """Union ``.kin/index.json`` node sets; recompute the derived header.
+
+    Unknown top-level fields pass through the 3-way field merge so a newer
+    writer's fields survive this driver; a side declaring a schema version
+    newer than this driver raises ``UnsupportedKinSchemaError`` instead of
+    being silently rewritten.
+    """
+    versions = [_index_version(side) for side in (base, ours, theirs)]
     head = ours or theirs or {}
     merged = _three_way_union(
         (base or {}).get("nodes"),
@@ -114,13 +211,19 @@ def merge_index(
         pick=_newer,
     )
     nodes = [merged[k] for k in sorted(merged)]
-    return {
+    out = {
         "domains": sorted({d for n in nodes for d in (n.get("domains") or [])}),
         "node_count": len(nodes),
         "nodes": nodes,
         "repo": head.get("repo"),
-        "version": head.get("version", 1),
+        # The union carries the newer side's fields, so it is the newer schema.
+        "version": max(versions[1:]) if (ours or theirs) else 1,
     }
+    _merge_passthrough_fields(
+        out, base, ours, theirs,
+        owned=_INDEX_OWNED_FIELDS, dropped=_INDEX_DROPPED_FIELDS,
+    )
+    return out
 
 
 def merge_code_map(
@@ -186,7 +289,9 @@ def merge_code_map(
     langs |= set((b.get("project") or {}).get("languages") or [])
     project["languages"] = sorted(langs)
 
-    return {
+    out = {
+        # code-map version is the exporter-owned UA semver string (kin export
+        # code-map refreshes it); no numeric future-guard applies here.
         "version": a.get("version") or b.get("version"),
         "project": project,
         "nodes": nodes,
@@ -194,6 +299,8 @@ def merge_code_map(
         "layers": layers,
         "tour": tour,
     }
+    _merge_passthrough_fields(out, base, ours, theirs, owned=_CODE_MAP_OWNED_FIELDS)
+    return out
 
 
 # Dispatch by the in-repo filename git passes as %P. Each artifact has its own
@@ -222,16 +329,20 @@ def merge_kin_files(
     repo_path: str, base_file: str, ours_file: str, theirs_file: str
 ) -> str | None:
     """Driver entrypoint. Returns merged text to write to the ours (%A) file, or
-    ``None`` to decline (unknown file / invalid JSON) so git keeps the conflict."""
+    ``None`` to decline (unknown file / invalid JSON / newer schema version)
+    so git keeps the conflict."""
     if Path(repo_path).name not in _MERGERS:
         return None
     try:
         base = load_json(base_file)
         ours = load_json(ours_file)
         theirs = load_json(theirs_file)
+        merged = merge_for(repo_path, base, ours, theirs)
     except ValueError:
+        # Invalid JSON, or a schema version newer than this driver
+        # (UnsupportedKinSchemaError): never rewrite what we cannot
+        # faithfully merge — decline and let git keep the conflict.
         return None
-    merged = merge_for(repo_path, base, ours, theirs)
     if merged is None:
         return None
     return _SERIALIZERS[Path(repo_path).name](merged)

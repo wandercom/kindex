@@ -168,6 +168,138 @@ def test_merge_code_map_round_trips_canonical_bytes():
     assert dumps_code_map(merge_code_map(None, doc, doc)) == dumps_code_map(doc)
 
 
+# ── schema versioning + unknown-field passthrough (PRD lineage item 1) ──
+#
+# Authority: docs/prd-lineage-grounding-2026-08.md, Review outcome point 6:
+# a .kin schema-version marker and unknown-field passthrough in kin_merge.py,
+# with a mixed-version merge test — older drivers must not corrupt newer
+# fields. Falsifiability: each test names the mutation that reddens it.
+
+
+def _index_v2(nodes, **extra_fields):
+    """A v2-schema index side: v1 shape + version 2 + optional unknown fields."""
+    doc = _index(nodes)
+    doc["version"] = 2
+    doc.update(extra_fields)
+    return doc
+
+
+def test_mixed_version_merge_preserves_newer_side_fields():
+    """Old-schema side x new-schema side: nothing of the new side is dropped.
+
+    Mutation that reddens this: rebuilding the header from the fixed
+    pre-item-1 key set (the old merge_index body) drops `lineage` and fails.
+    """
+    referent_node = dict(
+        _node("r", "2026-08-01"),
+        referent={"path": "src/x.py", "content_digest": "ab" * 32,
+                  "digest_scope": "file"},
+        asserted_at="2026-08-01T00:00:00Z",
+        true_of="2026-08-01T00:00:00Z",
+    )
+    base = _index([_node("a", "2026-01-01")])
+    ours = _index([_node("a", "2026-01-01"), _node("b", "2026-02-01")])  # v1
+    theirs = _index_v2([_node("a", "2026-01-01"), referent_node],
+                       lineage={"tool": "future-kin"})
+    for old_side, new_side in ((ours, theirs), (theirs, ours)):
+        out = merge_index(base, old_side, new_side)
+        assert out["version"] == 2
+        assert out["lineage"] == {"tool": "future-kin"}
+        merged_r = next(n for n in out["nodes"] if n["id"] == "r")
+        assert merged_r["referent"]["content_digest"] == "ab" * 32
+        assert merged_r["asserted_at"] == "2026-08-01T00:00:00Z"
+        assert merged_r["true_of"] == "2026-08-01T00:00:00Z"
+        assert {n["id"] for n in out["nodes"]} == {"a", "b", "r"}
+
+
+def test_passthrough_field_three_way_semantics():
+    """Changed-vs-base wins; both-changed keeps ours (deterministic).
+
+    Mutation that reddens this: always preferring ours (ignoring base) makes
+    the only-theirs-changed case return 'old' and fails the first assert.
+    """
+    base = _index_v2([], note="old")
+    ours = _index_v2([], note="old")
+    theirs = _index_v2([], note="new")
+    assert merge_index(base, ours, theirs)["note"] == "new"
+
+    ours2 = _index_v2([], note="ours-edit")
+    assert merge_index(base, ours2, theirs)["note"] == "ours-edit"
+
+
+def test_passthrough_field_honors_deletion():
+    """A field unchanged on one side and deleted on the other stays deleted.
+
+    Mutation that reddens this: unioning fields without consulting base
+    resurrects `note` and fails.
+    """
+    base = _index_v2([], note="old")
+    ours = _index_v2([], note="old")   # unchanged
+    theirs = _index_v2([])             # deleted note
+    out = merge_index(base, ours, theirs)
+    assert "note" not in out
+
+
+def test_volatile_legacy_field_never_resurrects():
+    """`source_updated_at` stays dropped even though passthrough now exists.
+
+    Preserves the ratified intent of the pre-item-1 fixed-key-set test: the
+    legacy volatile timestamp must not churn git history. Mutation that
+    reddens this: passing through without the drop-list.
+    """
+    ours = _index_v2([], source_updated_at="2026-08-24T00:00:00Z")
+    theirs = _index_v2([], source_updated_at="2026-08-23T00:00:00Z")
+    out = merge_index(None, ours, theirs)
+    assert "source_updated_at" not in out
+
+
+def test_merge_index_v2_idempotent_with_unknown_fields():
+    """An unchanged v2 doc with unknown fields merges to identical bytes."""
+    doc = _index_v2([_node("a", "2026-01-01")], lineage={"k": "v"})
+    assert dumps_kin(merge_index(doc, doc, doc)) == dumps_kin(doc)
+
+
+def test_merge_index_rejects_newer_or_malformed_schema_version():
+    """A side newer than this driver raises; the driver declines end-to-end.
+
+    Mutation that reddens this: removing the version guard silently merges
+    the v3 file and returns non-None from merge_kin_files.
+    """
+    from kindex.kin_merge import UnsupportedKinSchemaError
+
+    v3 = _index([]); v3["version"] = 3
+    with pytest.raises(UnsupportedKinSchemaError):
+        merge_index(None, v3, _index([]))
+    stringy = _index([]); stringy["version"] = "2"
+    with pytest.raises(UnsupportedKinSchemaError):
+        merge_index(None, stringy, _index([]))
+
+
+def test_merge_kin_files_declines_newer_schema_without_rewrite(tmp_path):
+    """Driver-level fail-closed proof: newer-schema side -> None, file intact."""
+    v3 = _index([_node("a", "2026-01-01")]); v3["version"] = 3
+    base = tmp_path / "base"; ours = tmp_path / "ours"; theirs = tmp_path / "theirs"
+    base.write_text(dumps_kin(_index([])))
+    ours.write_text(dumps_kin(v3))
+    theirs.write_text(dumps_kin(_index([])))
+    before = ours.read_text()
+    assert merge_kin_files(".kin/index.json", str(base), str(ours), str(theirs)) is None
+    assert ours.read_text() == before  # decline never rewrites the work tree side
+
+
+def test_merge_code_map_passes_through_unknown_fields():
+    """Unknown top-level code-map fields survive the merge.
+
+    Mutation that reddens this: rebuilding the code-map dict from its six
+    known keys only (the old merge_code_map body).
+    """
+    ours = _code_map([{"id": "m1", "filePath": "a.py"}])
+    theirs = _code_map([{"id": "m1", "filePath": "a.py"}])
+    theirs["annotations"] = {"m1": "hot path"}
+    out = merge_code_map(None, ours, theirs)
+    assert out["annotations"] == {"m1": "hot path"}
+
+
 # ── load_json / merge_for / merge_kin_files ─────────────────────────────
 
 def test_load_json_handles_empty_missing_and_invalid(tmp_path):
