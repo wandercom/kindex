@@ -2,7 +2,7 @@
 
 All notable changes to Kindex are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.33.0] - 2026-08-24
 
 ### Added
 - **Referent binding + two clocks (R0).** A node can bind the external thing its
