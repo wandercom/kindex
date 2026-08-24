@@ -139,6 +139,32 @@ counter when a provider-token guarantee is required. The complete resume block,
 including warnings and omission notices, remains inside the selected budget;
 a non-positive budget emits an empty block.
 
+## Recover From a Bad Automated Merge
+
+Before any automated destructive merge (`graph_merge`, dream-cycle
+auto-merges), Kindex snapshots the live SQLite database with the SQLite backup
+API to `$XDG_STATE_HOME/kindex/snapshots/<db>-<hash>/` (default
+`~/.local/state/kindex/snapshots/`), keeping the ten newest per database. The
+merge is fail-closed: if the snapshot cannot be written, the merge is refused
+or skipped rather than run unprotected. Each snapshot is also recorded as a
+`db_snapshot` entry in `kin changelog` with its path.
+
+To restore after a false merge:
+
+```bash
+# 1. Stop anything holding the DB (daemon, MCP server, open CLI sessions)
+# 2. Find the snapshot taken just before the bad merge
+ls ~/.local/state/kindex/snapshots/*/
+# 3. Copy it back over the live DB (default ~/.kindex/kindex.db) and restart
+cp ~/.local/state/kindex/snapshots/<db-dir>/<stamp>-graph-merge.sqlite3 \
+   ~/.kindex/kindex.db
+```
+
+Restoring rolls the whole graph back to the snapshot instant; re-apply any
+wanted changes made after it. Reversible per-merge receipts (restore just the
+merged node) are the R3 line item in
+`docs/prd-lineage-grounding-2026-08.md`.
+
 ## Use Reminders
 
 Reminders are stored in Kindex and fired by a checker. Creating a reminder does

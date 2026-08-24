@@ -1202,6 +1202,9 @@ def graph_heal() -> str:
     Use this to understand what needs attention, then use `link`, `add`,
     or other tools to fix issues.
     """
+    # Read-only by design: graph_heal performs no merges today. If a merge
+    # is ever added here, it must call snapshots.snapshot_db first
+    # (PRD lineage item 2 — pre-merge snapshot stopgap).
     store, _ = _get_store()
     from .graph import store_bridges, store_stats
 
@@ -1319,6 +1322,16 @@ def graph_merge(source_id: str, target_id: str, keep: str = "target",
     except LockHeldError as e:
         return f"Error: {e}"
 
+    # Reviewed stopgap (PRD lineage item 2): snapshot the DB before any
+    # automated destructive merge so a false merge is recoverable.
+    # Fail-closed: no snapshot, no merge.
+    from .snapshots import snapshot_db
+    try:
+        snapshot_path = snapshot_db(store, "graph-merge")
+    except Exception as exc:
+        return (f"Error: pre-merge DB snapshot failed ({exc}); merge refused "
+                f"(fail-closed). Free the snapshot directory and retry.")
+
     # Move edges from source to target
     moved = 0
     for edge in store.edges_from(source_id):
@@ -1365,7 +1378,8 @@ def graph_merge(source_id: str, target_id: str, keep: str = "target",
     store.conn.commit()
 
     return (f"Merged '{source['title']}' into '{target['title']}': "
-            f"{moved} edges moved, source archived.")
+            f"{moved} edges moved, source archived. "
+            f"Pre-merge snapshot: {snapshot_path}")
 
 
 @_tool()

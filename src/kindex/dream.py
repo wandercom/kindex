@@ -413,12 +413,32 @@ def dream_lightweight(
     # Fuzzy dedup
     dupes = find_duplicates(store)
 
-    # Auto-merge high-confidence pairs
+    # Auto-merge high-confidence pairs. Reviewed stopgap (PRD lineage
+    # item 2): snapshot the DB before any automated destructive merge so a
+    # false merge is recoverable. Fail-closed: if the snapshot cannot be
+    # taken, the merges are skipped — housekeeping never proceeds
+    # unprotected.
     merged = 0
-    for source_id, target_id, score in dupes["merge"]:
+    merges_skipped_unprotected = 0
+    merge_pairs = dupes["merge"]
+    snapshot_ok = True
+    if merge_pairs and not dry_run:
+        try:
+            from .snapshots import snapshot_db
+            snapshot_db(store, "dream-merge")
+        except Exception as exc:
+            snapshot_ok = False
+            merges_skipped_unprotected = len(merge_pairs)
+            logger.warning(
+                "pre-merge snapshot failed (%s); skipping %d auto-merge(s)",
+                exc, len(merge_pairs),
+            )
+    for source_id, target_id, score in merge_pairs:
         if dry_run:
             logger.info("Would merge %s -> %s (score=%.3f)", source_id, target_id, score)
             merged += 1
+            continue
+        if not snapshot_ok:
             continue
         if merge_nodes(store, source_id, target_id):
             merged += 1
@@ -465,6 +485,7 @@ def dream_lightweight(
         applied = auto_apply_suggestions(store)
 
     results["merged"] = merged
+    results["merges_skipped_unprotected"] = merges_skipped_unprotected
     results["suggested"] = suggested
     results["suggestion_candidates"] = suggestion_candidates
     results["suggestion_existing"] = existing_suggestions

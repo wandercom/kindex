@@ -27,6 +27,18 @@ _PROVIDER_KEY_ENVS = tuple(sorted({
 
 
 @pytest.fixture(autouse=True)
+def hermetic_state_dir(tmp_path, monkeypatch):
+    """Point XDG_STATE_HOME at a per-test temp dir.
+
+    Pre-merge DB snapshots (kindex.snapshots) default to
+    ``$XDG_STATE_HOME/kindex/snapshots``; without this, any test exercising
+    dream auto-merges or graph_merge would write the developer's real
+    ``~/.local/state``.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+
+
+@pytest.fixture(autouse=True)
 def hermetic_provider_env(monkeypatch):
     """Keep the test suite hermetic.
 
