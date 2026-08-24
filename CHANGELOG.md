@@ -2,6 +2,45 @@
 
 All notable changes to Kindex are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **Referent binding + two clocks (R0).** A node can bind the external thing its
+  claim describes — `{path|url, content_digest, digest_scope}` — plus
+  `asserted_at` (claim time) and `true_of` (when the referent was observed in
+  the digested state). `kin add --referent` / MCP `add(referent=...)` bind at
+  capture; `kin stale` / MCP `stale_check` re-hash file-scope referents, demote
+  moved-or-missing referents from `trusted_only` recall (new machine reason
+  `stale_referent`), mark them `[stale-referent]` in search/context, and list
+  them as re-verification candidates; `--rebind` re-verifies (moves `true_of`,
+  never re-dates the claim). Detection never deletes or rewrites content.
+  Export/import and the `.kin` index carry the binding (absolute local paths
+  redacted from the git-tracked projection, digest kept).
+- **Pre-merge DB snapshots.** Every automated destructive merge (`graph_merge`,
+  dream-cycle auto-merges) first copies the SQLite store via the backup API to
+  `$XDG_STATE_HOME/kindex/snapshots/` (ten kept per database) and logs a
+  `db_snapshot` changelog entry with a restore hint. Fail-closed: no snapshot,
+  no merge.
+- **`.kin` schema versioning.** `.kin/index.json` advances to schema v2:
+  unknown top-level fields now pass through the `kin merge-kin` driver via a
+  3-way field merge, and a side declaring a newer schema version makes the
+  driver decline (normal git conflict) instead of silently rewriting it.
+
+### Changed
+- The SQLite schema advances from v8 to v9 (atomic, rollback-safe): nodes gain
+  nullable `referent`, `asserted_at`, `true_of`.
+
+### Fixed
+- `_migrate_v8` stamped the code's current `SCHEMA_VERSION` instead of the
+  literal `8`, which would have marked v9+ migrations applied before they ran
+  on any multi-step upgrade.
+
+### Documentation
+- `docs/spec-contradiction-check.md`: reviewed v1 contract for the
+  `contradiction_check` tool (spec only). `docs/prd-lineage-grounding-2026-08.md`:
+  the reviewed PRD behind this line of work. Human/MCP guides and README cover
+  referent binding, staleness, and snapshot restore.
+
 ## [0.32.0] - 2026-08-18
 
 ### Added

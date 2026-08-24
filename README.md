@@ -70,7 +70,7 @@ Or add `.mcp.json` to any repo for project-scope access:
 { "mcpServers": { "kindex": { "command": "kin-mcp" } } }
 ```
 
-The MCP server exposes 50+ native tools to supported clients: `search`, `add`, `context`, `show`, `ask`, `learn`, `link`, `edit`, `supersede`, `list_nodes`, `status`, `suggest`, `candidate_*`, `verify`, `invalidate`, `graph_stats`, `graph_merge`, `dream`, `changelog`, `ingest`, `tag_start`, `tag_update`, `tag_resume`, `task_claim`, `coord_*`, `lock_acquire`, `lock_release`, `remind_*`, `mode_*`, and more.
+The MCP server exposes 50+ native tools to supported clients: `search`, `add`, `context`, `show`, `ask`, `learn`, `link`, `edit`, `supersede`, `list_nodes`, `status`, `suggest`, `candidate_*`, `verify`, `invalidate`, `stale_check`, `graph_stats`, `graph_merge`, `dream`, `changelog`, `ingest`, `tag_start`, `tag_update`, `tag_resume`, `task_claim`, `coord_*`, `lock_acquire`, `lock_release`, `remind_*`, `mode_*`, and more.
 
 For coding agents, install both the MCP server and the instruction file. The
 instruction file tells the model how to use kindex: start a session tag, read
@@ -440,6 +440,37 @@ option is an exact UTF-8 byte budget by default; direct library callers can pass
 a provider's exact token counter when they require a provider-token guarantee.
 Non-positive resume budgets return no output.
 
+### Referent Binding and Verifiable Staleness
+
+A node can bind the external thing its claim describes — a file, URL, or repo
+state — with a content digest and two clocks: `asserted_at` (when the claim was
+made) and `true_of` (when the referent was observed in the digested state).
+Staleness then stops being a heuristic and becomes a measurement:
+
+```bash
+# Bind at capture time (file paths are hashed now; binding implies direct
+# creation, so the exact claim text is what gets bound)
+kin add "The parser in src/parse.py handles escapes" --referent src/parse.py
+
+# Re-hash every bound claim; a moved or missing referent demotes the node
+# from trusted recall and lists it as a re-verification candidate
+kin stale
+
+# After confirming a claim still holds for the new state, rebind it
+# (true_of moves to now; the claim is never re-dated)
+kin stale --rebind <node-id>
+```
+
+Detection never deletes or rewrites content: a stale claim stays recallable,
+visibly marked `[stale-referent]` in search and context output, and drops out
+of `--trusted-only` projections until re-verified. URL and repo-scope bindings
+are recorded with explicit digests (`--referent-digest`) and surfaced but never
+auto-fetched.
+
+Kindex also snapshots the SQLite store (rotating, ten per database) before any
+automated destructive merge, so a false `graph_merge` or dream-cycle merge is
+recoverable — see the human guide's restore section.
+
 Automatic candidates expire after seven days by default. Configure a positive
 retention period in global or project config:
 
@@ -756,6 +787,7 @@ Code structure lives in the same graph as your decisions, watches, and constrain
 | `kin candidate [action]` | Quarantined capture review: list, show, accept, reject, prune, erase |
 | `kin verify <node>` | Assert verification and optional RFC 3339 valid interval |
 | `kin invalidate <node>` | Record asserted invalidation actor, code, and exclusive end time |
+| `kin stale` | Re-hash referent-bound nodes; demote stale ones from trusted recall (--rebind) |
 | `kin remind [action]` | Reminders: create, list, show, snooze, done, cancel, check, exec |
 | `kin mode [action]` | Conversation modes: activate, list, show, create, export, import, seed |
 

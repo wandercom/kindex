@@ -23,6 +23,8 @@ pytest tests/ --cov=kindex --cov-report=term-missing
 |------|---------|
 | `src/kindex/cli.py` | CLI entry point and all `kin` subcommands |
 | `src/kindex/dream.py` | Dream cycle: fuzzy dedup, suggestion auto-apply, domain edges |
+| `src/kindex/referent.py` | R0 referent binding: digest validation, staleness sweep, rebind |
+| `src/kindex/snapshots.py` | Pre-merge SQLite snapshots (rotating, fail-closed) to XDG state dir |
 | `src/kindex/dream_deep.py` | LLM-powered cluster consolidation (--deep mode only) |
 | `src/kindex/store.py` | SQLite + FTS5 storage layer |
 | `src/kindex/config.py` | Configuration loading and `Config` model |
@@ -61,6 +63,7 @@ When working in this codebase, follow these practices:
 - **Record constraints**: Use `kin add "<rule>" --type constraint --trigger <event> --action <verify|warn|block>` for invariants.
 - **Flag attention items**: Use `kin add "<item>" --type watch --owner <person> --expires <date>` for things that need monitoring.
 - **Search before adding**: Use `kin search <term>` or `kin search <term> --tags <domain>` to check if knowledge already exists before duplicating.
+- **Bind claims about code**: `kin add "<claim>" --referent <path>` hashes the referent so `kin stale` can later demote claims whose referent moved (re-verify with `kin stale --rebind <id>`).
 - **Edit, don't re-add**: Use `kin edit <id-or-title> --content "..."` to correct an existing node instead of creating a near duplicate. Additive types (decision, constraint, directive, checkpoint, watch) only accept `--append` and `--expires`; use `kin supersede <id> "<new text>" --reason "..."` to replace them with history. `kin changelog` shows per-field diffs.
 - **Coordinate multi-agent work**: Use `kin coord join <name>` to become a member (unread tracking), `kin coord attach <name> <node>` for shared resources, `kin coord inject <name> set "<msg>" [--to <agent>]` for standing messages, and `kin lock <id> --ttl <min> --note "<why>"` / `kin unlock <id>` for advisory locks before editing contested nodes.
 - **Profiles**: When `profiles:` are configured in `~/.config/kindex/kin.yaml`, the active graph resolves by `--profile` flag > `KIN_PROFILE` env > `.kin` chain `profile:` key > cwd roots match > `default_profile`. `kin profile which` shows the resolution; `kin whoami` shows the agent identity used for locks/claims/collabs.

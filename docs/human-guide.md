@@ -139,6 +139,36 @@ counter when a provider-token guarantee is required. The complete resume block,
 including warnings and omission notices, remains inside the selected budget;
 a non-positive budget emits an empty block.
 
+## Bind Claims to What They Describe
+
+A claim about code (or any external referent) can carry a content digest of the
+thing it describes, plus two clocks: `asserted_at` (when you made the claim)
+and `true_of` (when the referent was observed in that state). The moment the
+referent moves, the claim is *verifiably* stale instead of heuristically old:
+
+```bash
+# Bind at capture (the file is hashed now; binding implies direct creation)
+kin add "auth middleware validates JWT audience" --referent src/auth/mw.py
+
+# URL or repo-state claims carry an explicit digest
+kin add "The v2 API paginates by cursor" \
+  --referent https://api.example.com/docs --referent-digest <sha256> \
+  --referent-scope url
+
+# Sweep: re-hash every bound claim
+kin stale
+
+# A stale/missing referent demotes the node from --trusted-only recall and
+# marks it [stale-referent] in ordinary search/context. Content is never
+# deleted or rewritten. After re-checking the claim against the new state:
+kin stale --rebind <node-id>
+```
+
+Rebinding moves `true_of` to now and records the new digest; `asserted_at`
+never changes — the divergence between the two clocks stays honest. If the
+file returns to its recorded state, the next sweep clears the demotion by
+itself.
+
 ## Recover From a Bad Automated Merge
 
 Before any automated destructive merge (`graph_merge`, dream-cycle
