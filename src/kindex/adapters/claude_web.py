@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Must match fetch_conversations.py's DEFAULT_OUTPUT. These two drifted once
+# (fetcher -> ~/Downloads/_Claude, adapter -> ~/_Claude) and a bare
+# `kin ingest claude-web` silently ingested a stale store and reported success.
 DEFAULT_DIR = Path.home() / "_Claude" / "conversations"
 
 

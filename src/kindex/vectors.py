@@ -935,8 +935,17 @@ def _vector_row_node(store: Store, vector_id: str) -> tuple[str, int | None]:
     return vector_id, None
 
 
-def vector_search(store: Store, query: str, top_k: int = 10) -> list[dict]:
-    """Search for similar nodes using vector similarity."""
+def vector_search(store: Store, query: str, top_k: int = 10,
+                  min_similarity: float | None = None) -> list[dict]:
+    """Search for similar nodes using vector similarity.
+
+    `min_similarity`, when given, drops rows whose cosine similarity falls
+    below it. Without a floor this returns the top-k nearest neighbours for any
+    query however nonsensical, which is how a near-null query used to pull real
+    nodes into an agent's context — the floor is the only thing that lets the
+    graph say it knows nothing. The floor is supplied by the caller from a
+    calibration record; this function does not invent one.
+    """
     if not ensure_vec_table(store):
         return []
 
@@ -967,13 +976,21 @@ def vector_search(store: Store, query: str, top_k: int = 10) -> list[dict]:
                     "vector_id": vector_id,
                 }
 
+        from .grounding import similarity_from_distance
+
         results = []
         for node_id, match in sorted(best.items(), key=lambda item: item[1]["distance"]):
+            similarity = similarity_from_distance(match["distance"])
+            if min_similarity is not None and similarity < min_similarity:
+                # Rows arrive best-first, so the first row under the floor
+                # means every remaining row is too.
+                break
             node = store.get_node(node_id)
             # Skip superseded nodes — their embeddings are deleted on
             # supersede now, but rows from older DBs may linger.
             if node and node.get("status") != "superseded":
                 node["vec_distance"] = match["distance"]
+                node["vec_similarity"] = similarity
                 if match["chunk_index"] is not None:
                     node["vec_chunk_index"] = match["chunk_index"]
                 results.append(node)

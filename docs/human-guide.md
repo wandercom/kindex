@@ -169,6 +169,85 @@ never changes — the divergence between the two clocks stays honest. If the
 file returns to its recorded state, the next sweep clears the demotion by
 itself.
 
+## Calibrate the Grounding Floor
+
+Vector search returns the nearest neighbours for any query, however unrelated.
+Without a floor, a question your graph knows nothing about still pulls real
+nodes into an agent's context — and the graph has no way to say "I don't know."
+
+Calibrate once per embedding model, and again after any large backfill:
+
+```bash
+# Measure the null-query similarity distribution against your own corpus
+kin embed calibrate
+
+# Read the current record without recalibrating
+kin embed calibrate --show
+```
+
+The floor is stored as an immutable, versioned record keyed by
+`provider:model`, carrying the corpus it was measured against. That is what
+makes staleness detectable: a floor calibrated when 2% of your graph was
+embedded describes a distribution that no longer exists after a backfill, and
+Kindex reports `uncalibrated` rather than quietly trusting it. Your config
+holds the policy only — never the number:
+
+```yaml
+grounding:
+  enabled: true
+  enforce: false          # shadow mode
+  floor_percentile: 95.0
+  weak_margin: 1.15
+  recalibrate_coverage_delta: 0.25
+```
+
+**Leave `enforce: false` until you have watched it.** Today's failure mode is
+loud and self-correcting — you see an irrelevant result and ignore it.
+Enforcing creates the quiet one: an empty context and an agent proceeding
+without knowledge that was actually in the graph. Run shadow mode, read the
+`[grounding: UNGROUNDED …]` notes on real queries, then decide.
+
+If a refusal ever looks wrong, the verdict records the near-miss scores that
+produced it, so you can compare them against the floor instead of guessing.
+
+## Tune Retrieval Reach
+
+Graph expansion honours `--hops` with per-hop decay and a mandatory beam:
+
+```yaml
+ranking:
+  hop_decay: 0.5      # a 2-hop neighbour cannot outrank a 1-hop one
+  graph_beam: 200     # required: real graphs have 800+ fan-out hubs
+```
+
+The beam ordering is total and stable, so the same query returns the same
+neighbourhood — adding an edge elsewhere in a hub's neighbourhood cannot
+silently change a result.
+
+## Choose an Extraction Engine
+
+Automatic extraction is an input, not an authority: engine output goes to the
+`capture_candidates` quarantine for review and never writes nodes directly.
+
+```bash
+kin extract engines                                  # what is available
+kin extract eval --engines keyword,llm --limit 200   # score them on YOUR corpus
+```
+
+The gate is two-part — grounding precision as a floor (don't invent) and title
+recall as the discriminator (find what a curator would record). Either metric
+alone is gameable, so both must clear.
+
+An optional LLM-free deterministic engine installs separately:
+
+```bash
+pip install 'kindex[talon]'   # ~2.5 GB; excluded from kindex[all] by design
+```
+
+Measure before enabling it. An engine that cannot beat keyword extraction on
+your own corpus has not earned the install size, whatever its own benchmark
+reports.
+
 ## Recover From a Bad Automated Merge
 
 Before any automated destructive merge (`graph_merge`, dream-cycle

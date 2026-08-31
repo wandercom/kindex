@@ -4,8 +4,19 @@
     "python",
     "shell"
   ],
-  "node_count": 123,
+  "node_count": 150,
   "nodes": [
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-mod-kindex-0156971f69e3",
+      "title": "src/kindex/snapshots.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
     {
       "domains": [
         "code",
@@ -25,7 +36,7 @@
       "id": "code-mod-kindex-086378eea6e0",
       "title": "src/kindex/attention.py",
       "type": "artifact",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -69,7 +80,7 @@
       "id": "code-mod-kindex-119a6050feb3",
       "title": "src/kindex/adapters/claude_web.py",
       "type": "artifact",
-      "updated_at": "2026-03-16T16:20:11",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -80,7 +91,7 @@
       "id": "code-mod-kindex-13363db31233",
       "title": "src/kindex/kin_merge.py",
       "type": "artifact",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -91,7 +102,7 @@
       "id": "code-mod-kindex-1668da8a23a5",
       "title": "src/kindex/daemon.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T23:28:47",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -146,7 +157,7 @@
       "id": "code-mod-kindex-1cc1824729d5",
       "title": "src/kindex/ingest.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T23:28:47",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -168,7 +179,7 @@
       "id": "code-mod-kindex-21dd45af3575",
       "title": "src/kindex/scheduling.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T23:28:47",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -209,6 +220,17 @@
         "code",
         "python"
       ],
+      "id": "code-mod-kindex-416c0a5d982b",
+      "title": "src/kindex/grounding.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-mod-kindex-42ecd8f0766c",
       "title": "src/kindex/adapters/files.py",
       "type": "artifact",
@@ -220,10 +242,21 @@
         "code",
         "python"
       ],
+      "id": "code-mod-kindex-4506c94e9fe5",
+      "title": "src/kindex/trust.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-mod-kindex-46a31493a160",
       "title": "src/kindex/store.py",
       "type": "artifact",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -245,8 +278,19 @@
       "id": "code-mod-kindex-4d774506f9e3",
       "title": "src/kindex/reinforce.py",
       "type": "artifact",
-      "updated_at": "2026-06-11T15:16:38",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-mod-kindex-5445e879d317",
+      "title": "src/kindex/extract_eval.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
     },
     {
       "domains": [
@@ -267,7 +311,7 @@
       "id": "code-mod-kindex-5aa57e096c49",
       "title": "src/kindex/dream.py",
       "type": "artifact",
-      "updated_at": "2026-06-12T11:32:26",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -278,7 +322,7 @@
       "id": "code-mod-kindex-62731532a556",
       "title": "src/kindex/setup.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T23:28:47",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -289,7 +333,7 @@
       "id": "code-mod-kindex-66df7720eed6",
       "title": "src/kindex/cli.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T23:28:47",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -300,7 +344,7 @@
       "id": "code-mod-kindex-6a3142a46050",
       "title": "src/kindex/config.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -311,7 +355,7 @@
       "id": "code-mod-kindex-6a374a6f7fce",
       "title": "src/kindex/vectors.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -440,6 +484,17 @@
         "code",
         "python"
       ],
+      "id": "code-mod-kindex-a31c7ed5d35f",
+      "title": "conftest.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-mod-kindex-af2e3463feb5",
       "title": "src/kindex/vault.py",
       "type": "artifact",
@@ -484,10 +539,21 @@
         "code",
         "python"
       ],
+      "id": "code-mod-kindex-b73cd67cf905",
+      "title": "src/kindex/referent.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-mod-kindex-bd222a4e378f",
       "title": "src/kindex/hooks.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -520,7 +586,7 @@
       "id": "code-mod-kindex-c4522229e518",
       "title": "src/kindex/__init__.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -531,7 +597,7 @@
       "id": "code-mod-kindex-c77f7cec7d57",
       "title": "src/kindex/sessions.py",
       "type": "artifact",
-      "updated_at": "2026-06-12T11:32:26",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -542,7 +608,7 @@
       "id": "code-mod-kindex-c8ebc72bbedb",
       "title": "src/kindex/schema.py",
       "type": "artifact",
-      "updated_at": "2026-06-11T15:16:38",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -575,7 +641,7 @@
       "id": "code-mod-kindex-d68e56207179",
       "title": "src/kindex/retrieve.py",
       "type": "artifact",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -586,7 +652,7 @@
       "id": "code-mod-kindex-d7e1cc803597",
       "title": "src/kindex/extract.py",
       "type": "artifact",
-      "updated_at": "2026-03-16T16:20:11",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -597,8 +663,19 @@
       "id": "code-mod-kindex-e381cc44d87c",
       "title": "src/kindex/code_map.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-mod-kindex-e9e9ed192a7f",
+      "title": "src/kindex/extractors.py",
+      "type": "artifact",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
     },
     {
       "domains": [
@@ -619,7 +696,7 @@
       "id": "code-mod-kindex-f9986c492ab2",
       "title": "src/kindex/mcp_server.py",
       "type": "artifact",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -652,7 +729,18 @@
       "id": "code-sym-kindex-05a1fbf0db2e",
       "title": "AgentsConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-0707d0c210b4",
+      "title": "EngineScore",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -663,7 +751,7 @@
       "id": "code-sym-kindex-0850aa56538b",
       "title": "ProfileEntry",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -674,7 +762,7 @@
       "id": "code-sym-kindex-08e1ea9d3cda",
       "title": "ReminderConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -740,7 +828,18 @@
       "id": "code-sym-kindex-15261553fafb",
       "title": "SimConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-1742278b5925",
+      "title": "ReferentError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -762,7 +861,7 @@
       "id": "code-sym-kindex-18d83f4f3d40",
       "title": "ClaudeWebAdapter",
       "type": "concept",
-      "updated_at": "2026-03-16T16:20:11",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -784,8 +883,19 @@
       "id": "code-sym-kindex-1ca6d2b3a552",
       "title": "AttentionInjection",
       "type": "concept",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-1d3c3cf4f865",
+      "title": "LLMExtractor",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
     },
     {
       "domains": [
@@ -806,7 +916,29 @@
       "id": "code-sym-kindex-200aad86be36",
       "title": "AttentionConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-206068442308",
+      "title": "CalibrationRecord",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-219563924e7c",
+      "title": "GroundingConfig",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -817,7 +949,7 @@
       "id": "code-sym-kindex-279e1c45cb06",
       "title": "AgentInstanceConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -850,7 +982,7 @@
       "id": "code-sym-kindex-352d8c9bbdba",
       "title": "CollabConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -861,7 +993,18 @@
       "id": "code-sym-kindex-36fe0270bb97",
       "title": "ScheduleTier",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-3da712cdf5b5",
+      "title": "MemoryUnavailableError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -872,7 +1015,18 @@
       "id": "code-sym-kindex-415d46d7c508",
       "title": "RankingConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-4710515cacde",
+      "title": "InvalidIntervalError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -883,8 +1037,19 @@
       "id": "code-sym-kindex-49ac56615e1e",
       "title": "AttentionCandidate",
       "type": "concept",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-4ad370312e30",
+      "title": "ReferentCheck",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
     },
     {
       "domains": [
@@ -916,7 +1081,7 @@
       "id": "code-sym-kindex-552c22e16187",
       "title": "WorkPolicyConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -927,7 +1092,18 @@
       "id": "code-sym-kindex-58d630bc994a",
       "title": "ClaudeChannelConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-6065a188c39c",
+      "title": "Extractor",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -938,7 +1114,7 @@
       "id": "code-sym-kindex-608ef82e510c",
       "title": "Config",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -949,7 +1125,18 @@
       "id": "code-sym-kindex-62490d9465aa",
       "title": "TelegramChannelConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-658345dd71d1",
+      "title": "DeterministicExtractor",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -960,7 +1147,7 @@
       "id": "code-sym-kindex-6d1dbf76937d",
       "title": "BudgetConfig",
       "type": "concept",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -982,7 +1169,29 @@
       "id": "code-sym-kindex-74266f41225f",
       "title": "SystemChannelConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-74e41dbe4692",
+      "title": "UnsupportedKinSchemaError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-77f33e03ff54",
+      "title": "TrustDecision",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1015,7 +1224,7 @@
       "id": "code-sym-kindex-7c4b42dbb2fa",
       "title": "LLMConfig",
       "type": "concept",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -1026,7 +1235,7 @@
       "id": "code-sym-kindex-7e4d614285e9",
       "title": "SlackChannelConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1037,7 +1246,7 @@
       "id": "code-sym-kindex-89cc5b13c9e0",
       "title": "EmailChannelConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1059,7 +1268,7 @@
       "id": "code-sym-kindex-95b8acd87972",
       "title": "Store",
       "type": "concept",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -1070,7 +1279,7 @@
       "id": "code-sym-kindex-979d447616b7",
       "title": "AgentOverrideConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1081,7 +1290,7 @@
       "id": "code-sym-kindex-9d295ea2d8a3",
       "title": "ReinforceOutcome",
       "type": "concept",
-      "updated_at": "2026-06-11T15:16:37",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -1092,7 +1301,7 @@
       "id": "code-sym-kindex-9f9f9fbe1087",
       "title": "EditPolicyError",
       "type": "concept",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -1111,10 +1320,21 @@
         "code",
         "python"
       ],
+      "id": "code-sym-kindex-a05b2beb3d63",
+      "title": "ExtractionResult",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-sym-kindex-a8ad139fc733",
       "title": "LinearPolicyConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1133,11 +1353,44 @@
         "code",
         "python"
       ],
+      "id": "code-sym-kindex-aced1fc3143a",
+      "title": "RetrievalVerdict",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-sym-kindex-b166b6681594",
       "title": "LockHeldError",
       "type": "concept",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-b29226f27eca",
+      "title": "KeywordExtractor",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-b37057535f7f",
+      "title": "StaleReviewError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
     },
     {
       "domains": [
@@ -1169,7 +1422,7 @@
       "id": "code-sym-kindex-b42e459fa446",
       "title": "DefaultsConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1202,7 +1455,7 @@
       "id": "code-sym-kindex-b724908147cc",
       "title": "ProfileMismatchError",
       "type": "concept",
-      "updated_at": "2026-07-01T19:37:21",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -1213,7 +1466,7 @@
       "id": "code-sym-kindex-b90676bdf42f",
       "title": "EmbeddingConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1224,7 +1477,7 @@
       "id": "code-sym-kindex-c30edae67b27",
       "title": "CodeIngestConfig",
       "type": "concept",
-      "updated_at": "2026-07-15T21:37:31",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.01
     },
     {
@@ -1235,7 +1488,7 @@
       "id": "code-sym-kindex-c644dbd33873",
       "title": "GitPolicyConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     },
     {
@@ -1298,6 +1551,17 @@
         "code",
         "python"
       ],
+      "id": "code-sym-kindex-d1aead4dfe46",
+      "title": "TitleCollisionError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-sym-kindex-d9d978ada693",
       "title": "LinearAdapter",
       "type": "concept",
@@ -1314,6 +1578,17 @@
       "type": "concept",
       "updated_at": "2026-03-22T20:04:24",
       "weight": 0.01
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-e0b23690c2bb",
+      "title": "CandidateStateError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
     },
     {
       "domains": [
@@ -1342,6 +1617,17 @@
         "code",
         "python"
       ],
+      "id": "code-sym-kindex-e7d77ef2ec54",
+      "title": "CaptureConfig",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-sym-kindex-ed860a14fde8",
       "title": "SystemChannel",
       "type": "concept",
@@ -1353,10 +1639,21 @@
         "code",
         "python"
       ],
+      "id": "code-sym-kindex-f23dff30a8e5",
+      "title": "CandidateNotFoundError",
+      "type": "concept",
+      "updated_at": "2026-08-31T18:00:39",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-sym-kindex-fe4d5554b184",
       "title": "ChannelsConfig",
       "type": "concept",
-      "updated_at": "2026-08-18T15:56:07",
+      "updated_at": "2026-08-31T18:00:39",
       "weight": 0.5
     }
   ],

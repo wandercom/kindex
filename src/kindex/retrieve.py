@@ -13,6 +13,7 @@ Auto-selects based on estimated available token budget when level is not specifi
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -20,6 +21,8 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from .agent_adapters import adapter_scoped_out
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .store import Store
@@ -198,6 +201,42 @@ def _learned_pheromone_weight(store: Store) -> float:
         return 0.0
 
 
+def _learned_coactivation_weight(store: Store) -> float:
+    """Auto-ramped pair co-activation weight (0 until the channel is warm)."""
+    try:
+        from .reinforce import learned_coactivation_weight
+        return learned_coactivation_weight(store)
+    except Exception:
+        return 0.0
+
+
+def _coactivation_scores(store: Store, node_ids: set[str]) -> list[tuple[str, float]]:
+    """Learned pair co-activation per node — a channel of its OWN.
+
+    Deliberately separate from both the graph channel (asserted topology) and
+    the pheromone channel (node-level usefulness). Keeping the raw signal and
+    this applied correction apart is what lets the channel be retired without
+    rewriting history.
+    """
+    acfg = getattr(store.config, "attention", None)
+    half_life = getattr(acfg, "coactivation_half_life_days", 14.0)
+    min_events = getattr(acfg, "coactivation_min_events", 3)
+    project_path = getattr(store.config, "_project_path", None)
+    context = ""
+    if project_path:
+        import os
+        context = os.path.basename(str(project_path).rstrip("/")) or ""
+    scores = store.coactivation_scores(
+        node_ids, context=context, half_life_days=half_life,
+        min_events=min_events)
+    if not scores and context:
+        # Fall back to the global trail while a per-project trail is cold.
+        scores = store.coactivation_scores(
+            node_ids, context="", half_life_days=half_life,
+            min_events=min_events)
+    return scores
+
+
 def _pheromone_scores(store: Store, node_ids: set[str]) -> list[tuple[str, float]]:
     """Decayed injection-usefulness pheromone per node, conditioned on project."""
     acfg = getattr(store.config, "attention", None)
@@ -266,6 +305,7 @@ def hybrid_search(
     fence_stats: dict | None = None,
     trusted_only: bool = False,
     evaluation_time: str | datetime | None = None,
+    grounding: dict | None = None,
 ) -> list[dict]:
     """Hybrid search combining FTS5 + graph expansion + vector search.
 
@@ -290,6 +330,12 @@ def hybrid_search(
             verification, valid-time, and contradiction predicate as resume.
             False preserves ordinary recall behavior for legacy callers.
         evaluation_time: One RFC 3339/datetime instant used by trusted filtering.
+        grounding: Optional dict the caller owns; on return its "verdict" key
+            holds the RetrievalVerdict describing how confident retrieval is in
+            its own vector results (grounded / weak / ungrounded /
+            uncalibrated). Retrieval is authoritative about its own confidence,
+            not about what the caller should do with it — so this is reported,
+            and enforcement is separately gated by config.grounding.enforce.
 
     Candidate window: FTS5 fetches up to 3*top_k candidates, graph expansion
     walks 1 hop from the top 5 FTS hits, and vector search fetches up to
@@ -312,27 +358,32 @@ def hybrid_search(
         except Exception:
             continue
 
-    # Mode 2: Graph expansion from FTS hits (same per-edge tolerance)
+    # Mode 2: Graph expansion from FTS hits.
+    # Was one hop from the top five FTS hits — shallow for no reason: measured
+    # on 113,355 edges, 3 hops costs the same wall-clock as 1. `graph_hops`
+    # now actually controls depth, with a mandatory, deterministically-ordered
+    # beam (max out-fanout is 849, so an uncapped walk from a hub explodes).
     graph_ranked: list[tuple[str, float]] = []
     if expand_graph and fts_ranked:
-        seen = {nid for nid, _ in fts_ranked}
-        for nid, fts_score in fts_ranked[:5]:  # expand top 5 FTS hits
-            edges = store.edges_from(nid)
-            for edge in edges:
-                try:
-                    target = edge["to_id"]
-                    edge_score = (edge["weight"] or 0) * fts_score
-                except Exception:
-                    continue
-                if target not in seen:
-                    seen.add(target)
-                    graph_ranked.append((target, edge_score))
+        seeds = {nid: score for nid, score in fts_ranked[:5]}
+        try:
+            graph_ranked = store.expand_multihop(
+                seeds,
+                max_hops=max(1, graph_hops),
+                hop_decay=getattr(store.config.ranking, "hop_decay", 0.5),
+                beam=getattr(store.config.ranking, "graph_beam", 200),
+            )
+        except Exception:
+            graph_ranked = []
 
     # Mode 3: Vector search (if available)
     # Transmogrifier normalizes register for embeddings only — FTS5 stays raw
     vec_ranked: list[tuple[str, float]] = []
+    verdict = None
     try:
-        from .vectors import is_available, vector_search
+        from .grounding import evaluate as _evaluate_grounding
+        from .grounding import similarity_from_distance
+        from .vectors import _resolve_embedding_config, is_available, vector_search
         if is_available():
             vec_query = query
             try:
@@ -343,11 +394,37 @@ def hybrid_search(
                     vec_query = result.output_text
             except (ImportError, Exception):
                 pass
+            # Fetch unfiltered, then judge. Judging the full set is what makes
+            # shadow mode possible and what gives the verdict its near-misses:
+            # filtering first would destroy the evidence for the decision.
             vec_results = vector_search(store, vec_query, top_k=top_k)
+            vec_hits = [(r["id"], similarity_from_distance(r.get("vec_distance")))
+                        for r in vec_results]
+            try:
+                provider, model, _, _ = _resolve_embedding_config(store.config)
+                verdict = _evaluate_grounding(
+                    store, store.config, vec_hits, provider=provider, model=model)
+            except Exception:
+                verdict = None
+            # Enforcement is a separate act from judgement, and it is opt-in.
+            # Shadow mode reports the verdict while every row still flows, so
+            # the gate can be measured against real traffic before it is
+            # allowed to withhold anything.
+            if (verdict is not None and verdict.enforced
+                    and verdict.floor is not None):
+                vec_results = [r for r in vec_results
+                               if similarity_from_distance(r.get("vec_distance"))
+                               >= verdict.floor]
+            if verdict is not None and verdict.should_warn:
+                _log.info("grounding %s for query %r: %s",
+                          verdict.verdict, query[:80], verdict.reason)
             vec_ranked = [(r["id"], 1.0 / (1.0 + r.get("vec_distance", 1.0)))
                           for r in vec_results]
     except Exception:
         pass
+
+    if grounding is not None and verdict is not None:
+        grounding["verdict"] = verdict
 
     # Read ranking config from store (falls back to defaults if unavailable)
     rcfg = getattr(store.config, "ranking", None)
@@ -387,6 +464,18 @@ def hybrid_search(
                     if phero:
                         sources["pheromone"] = phero
                         cfg_weights = {**cfg_weights, "pheromone": phero_weight}
+            except Exception:
+                pass
+            # Learned pair co-activation — its own channel with its own ramp,
+            # never folded into edge weight.
+            try:
+                co_weight = (cfg_weights.get("coactivation", 0)
+                             or _learned_coactivation_weight(store))
+                if co_weight > 0:
+                    co = _coactivation_scores(store, all_ids)
+                    if co:
+                        sources["coactivation"] = co
+                        cfg_weights = {**cfg_weights, "coactivation": co_weight}
             except Exception:
                 pass
 
@@ -618,6 +707,7 @@ def format_context_block(
     adapter: str | None = None,
     trusted_only: bool = False,
     evaluation_time: str | datetime | None = None,
+    grounding: dict | None = None,
 ) -> str:
     """Format search results as a context block for CLAUDE.md injection.
 
@@ -629,6 +719,13 @@ def format_context_block(
     When ``adapter`` names a client, operational nodes scoped to a different
     client are dropped from the full/abridged tiers; with no adapter every node
     surfaces (the right default for human-facing ``kin context``).
+
+    ``grounding`` is the dict a caller passed to ``hybrid_search``. This is the
+    single place rows become text destined for a context window, so the verdict
+    is stamped onto the block HERE rather than in each caller. Contamination is
+    text entering context, not intent — and a verdict every caller must
+    remember to honour is a comment, not a gate. Callers that omit it get the
+    legacy behaviour, so the note is additive, never a silent drop.
     """
     if not results:
         return "## Kindex: No relevant context found.\n"
@@ -654,18 +751,30 @@ def format_context_block(
         # callers that provide a compatible custom tier formatter.
         formatter = partial(formatter_fn, adapter=adapter)
 
+    # The grounding note is prepended to whichever body wins the budget loop,
+    # and its own cost is charged against the budget — a warning that gets
+    # trimmed away is worse than no warning.
+    note = ""
+    verdict = (grounding or {}).get("verdict")
+    if verdict is not None:
+        try:
+            note = verdict.note()
+        except Exception:
+            note = ""
+    prefix = f"{note}\n\n" if note else ""
+
     # Try with all results, then progressively trim until within budget
     for n in range(len(results), 0, -1):
         output = formatter(store, results[:n], query)
-        if _estimate_tokens(output) <= budget:
-            return output
+        if _estimate_tokens(prefix + output) <= budget:
+            return prefix + output
 
     # Even one result exceeds budget — return truncated
     output = formatter(store, results[:1], query)
-    max_chars = budget * 4
+    max_chars = budget * 4 - len(prefix)
     if len(output) > max_chars:
         output = output[:max_chars] + "\n\n*[truncated to fit token budget]*"
-    return output
+    return prefix + output
 
 
 def _gather_domains(results: list[dict]) -> set[str]:

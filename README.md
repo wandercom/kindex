@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![v0.33.0](https://img.shields.io/badge/version-0.33.0-purple.svg)](https://github.com/jmcentire/kindex/releases)
+[![v0.34.0](https://img.shields.io/badge/version-0.34.0-purple.svg)](https://github.com/jmcentire/kindex/releases)
 [![PyPI](https://img.shields.io/pypi/v/kindex.svg)](https://pypi.org/project/kindex/)
 [![MCP Market](https://img.shields.io/badge/MCP%20Market-kindex-blue.svg)](https://mcpmarket.com/server/kindex)
 [![Tests](https://img.shields.io/badge/tests-1659%20passing-brightgreen.svg)](#)
@@ -478,6 +478,89 @@ retention period in global or project config:
 capture:
   candidate_ttl_days: 7
 ```
+
+### Grounded Retrieval — When the Graph Knows Nothing
+
+Vector search returns the nearest neighbours for *any* query, however
+unrelated. Without a floor a near-null question still pulls real nodes into an
+agent's context, and the graph can never say "I don't know."
+
+Kindex calibrates a similarity floor against your own corpus and reports a
+verdict with every result set:
+
+```bash
+# Measure the null-query similarity distribution and record the floor
+kin embed calibrate
+
+# Inspect the current record without recalibrating
+kin embed calibrate --show
+```
+
+The floor is never a config value. It is an immutable, versioned record keyed
+by `provider:model` that carries the corpus it was measured against — node
+count, embedding count, sample size, timestamp — so a floor calibrated when 2%
+of your graph was embedded is *detected* as stale rather than silently trusted.
+Config holds only the policy:
+
+```yaml
+grounding:
+  enabled: true
+  enforce: false          # shadow mode: report the verdict, drop nothing
+  floor_percentile: 95.0
+  weak_margin: 1.15
+  recalibrate_coverage_delta: 0.25
+```
+
+Verdicts are `grounded`, `weak`, `ungrounded`, and `uncalibrated` — the last
+kept deliberately distinct, because "we have no yardstick" is a different fact
+from "we measured and found nothing."
+
+**Shadow mode is the default on purpose.** Enforcing turns a visible,
+self-correcting problem (irrelevant results in context) into a silent one (an
+agent proceeding without knowledge that was actually there). Run it in shadow
+first, see what it *would* have dropped, then set `enforce: true`.
+
+### Multi-Hop Reach
+
+Graph expansion honours `--hops`, with per-hop score decay and a mandatory
+beam. The beam's ordering is total and stable, so traversal is reproducible:
+adding an edge elsewhere in a hub's neighbourhood cannot silently change what a
+query returns.
+
+```yaml
+ranking:
+  hop_decay: 0.5      # a 2-hop neighbour cannot outrank a 1-hop one
+  graph_beam: 200     # required — real graphs have 800+ fan-out hubs
+```
+
+### Extraction Engines
+
+Extraction is an **input**, never an authority. Engine output lands in the
+`capture_candidates` quarantine and never writes nodes or edges directly.
+
+```bash
+# Which engines are available here
+kin extract engines
+
+# Score them against your own corpus
+kin extract eval --engines keyword,llm --limit 200
+```
+
+The gate is two-part: grounding precision is a floor (don't invent), title
+recall is the discriminator (actually find what a curator would record). Either
+alone is gameable — an engine that only copies verbatim scores perfect
+grounding while finding nothing.
+
+An optional LLM-free deterministic engine is available behind an extra:
+
+```bash
+pip install 'kindex[talon]'   # ~2.5 GB — never a core dependency
+```
+
+It is excluded from `kindex[all]` by design, and degrades to keyword extraction
+with a warning when absent. Measure it with `kin extract eval` before enabling
+it; an engine that cannot beat regexes on your corpus has not earned the
+install size.
 
 ## Editing & Superseding
 

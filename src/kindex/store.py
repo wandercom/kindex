@@ -500,6 +500,12 @@ class Store:
         if current_version < 9:
             self._migrate_v9()
 
+        if current_version < 10:
+            self._migrate_v10()
+
+        if current_version < 11:
+            self._migrate_v11()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -668,6 +674,162 @@ class Store:
         except BaseException:
             c.rollback()
             raise
+
+    def _migrate_v10(self) -> None:
+        """Repair ``injection_pheromone.missed`` on stores that ran v7 early.
+
+        The ``missed`` column (counterfactual deposits) was added to the v7
+        block's ``CREATE TABLE IF NOT EXISTS`` after v7 had already shipped.
+        For a store that ran v7 before that edit, the CREATE is a no-op and the
+        column never arrives — while ``schema_version`` still reads current, so
+        nothing flags it. ``deposit_pheromone`` then raises ``no such column:
+        missed`` on every call, the attention hook swallows it, and the whole
+        stigmergic channel is silently dead. Adding a column is the only way to
+        reach those stores.
+
+        Idempotent: stores created after that edit already have the column, so
+        a duplicate-column error is the success case, not a failure. Atomic and
+        verified against ``PRAGMA table_info`` (v8/v9 pattern); ``BaseException``
+        so cancellation rolls back as reliably as a SQLite error.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            has_table = c.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='injection_pheromone'"
+            ).fetchone() is not None
+            if has_table:
+                cols = {
+                    row["name"]
+                    for row in c.execute(
+                        "PRAGMA table_info(injection_pheromone)").fetchall()
+                }
+                if "missed" not in cols:
+                    c.execute(
+                        "ALTER TABLE injection_pheromone "
+                        "ADD COLUMN missed INTEGER NOT NULL DEFAULT 0"
+                    )
+                cols = {
+                    row["name"]
+                    for row in c.execute(
+                        "PRAGMA table_info(injection_pheromone)").fetchall()
+                }
+                if "missed" not in cols:
+                    raise RuntimeError(
+                        "v10 migration verification failed: "
+                        "injection_pheromone.missed"
+                    )
+            c.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                ("10",),
+            )
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
+    def _migrate_v11(self) -> None:
+        """Learned pair co-activation channel (W4).
+
+        Creates ``node_coactivation`` — a third retrieval channel, separate
+        from both ``edges.weight`` (asserted topology) and node-level
+        ``injection_pheromone``. Atomic and verified against
+        ``sqlite_master``/``PRAGMA table_info`` (v8-v10 pattern), and the
+        column check is what v10 exists to teach: a table present with the
+        wrong shape is invisible to an existence check.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS node_coactivation (
+                    node_a TEXT NOT NULL REFERENCES nodes(id),
+                    node_b TEXT NOT NULL REFERENCES nodes(id),
+                    context TEXT NOT NULL DEFAULT '',
+                    strength REAL NOT NULL DEFAULT 0.0,
+                    events INTEGER NOT NULL DEFAULT 0,
+                    last_event TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_decay TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (node_a, node_b, context)
+                );
+                CREATE INDEX IF NOT EXISTS idx_coactivation_a
+                    ON node_coactivation(node_a);
+                CREATE INDEX IF NOT EXISTS idx_coactivation_b
+                    ON node_coactivation(node_b);
+                CREATE INDEX IF NOT EXISTS idx_coactivation_strength
+                    ON node_coactivation(strength DESC);
+            """)
+            cols = {
+                row["name"]
+                for row in c.execute(
+                    "PRAGMA table_info(node_coactivation)").fetchall()
+            }
+            required = {"node_a", "node_b", "context", "strength", "events",
+                        "last_event", "last_decay"}
+            if not required <= cols:
+                raise RuntimeError(
+                    "v11 migration verification failed: node_coactivation "
+                    f"missing {sorted(required - cols)}")
+            c.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                ("11",),
+            )
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
+    # Columns each table must carry for the code that queries it to work.
+    # Checked by `kin doctor`, which is the only place that catches the failure
+    # class v10 repairs: a table that exists with the right name and the wrong
+    # shape, on a store whose schema_version reads current. Table-existence
+    # checks are blind to it — every migration verifier here asserts columns.
+    REQUIRED_COLUMNS: dict[str, set[str]] = {
+        "injection_pheromone": {
+            "node_id", "context", "strength", "deposits",
+            "reinforcements", "missed", "last_deposit", "last_decay",
+        },
+        "nodes": {
+            "id", "title", "content", "type", "weight", "status",
+            "audience", "referent", "asserted_at", "true_of",
+        },
+        "edges": {"from_id", "to_id", "type", "weight"},
+        "capture_candidates": {"payload_digest", "status"},
+        "node_coactivation": {
+            "node_a", "node_b", "context", "strength",
+            "events", "last_event", "last_decay",
+        },
+    }
+
+    def schema_drift(self) -> dict[str, set[str]]:
+        """Report columns the code requires that this store is missing.
+
+        Returns ``{table: {missing columns}}`` — empty when the store's shape
+        matches what the code queries. A table absent altogether is not drift
+        (a migration will create it); a table present with missing columns is,
+        because ``CREATE TABLE IF NOT EXISTS`` will never repair it.
+        """
+        drift: dict[str, set[str]] = {}
+        for table, required in self.REQUIRED_COLUMNS.items():
+            try:
+                exists = self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    continue
+                cols = {
+                    row["name"]
+                    for row in self.conn.execute(
+                        f"PRAGMA table_info({table})").fetchall()
+                }
+                missing = required - cols
+                if missing:
+                    drift[table] = missing
+            except Exception:
+                continue
+        return drift
 
     def close(self) -> None:
         if self._conn:
@@ -2410,6 +2572,81 @@ class Store:
         self._log("add_edge", f"{from_id}->{to_id}", "",
                   details={"type": edge_type, "weight": weight})
 
+    def expand_multihop(
+        self,
+        seeds: dict[str, float],
+        *,
+        max_hops: int = 2,
+        hop_decay: float = 0.5,
+        beam: int = 200,
+    ) -> list[tuple[str, float]]:
+        """Walk `max_hops` out from weighted seeds, returning (node_id, score).
+
+        Replaces a hand-rolled single-hop loop. Depth was the real limit, not
+        speed: measured on a 113,355-edge graph, a 3-hop recursive CTE runs in
+        the same wall-clock as 1 hop (both inside sqlite3 process-startup
+        noise), so reach was being left on the table for no gain.
+
+        Two properties matter more than the depth:
+
+        * **The beam is mandatory.** Max observed out-fanout is 849, so an
+          uncapped 3-hop walk from a hub explodes.
+        * **The beam ordering is total and stable** — score desc, then node id
+          asc. A beam filled by whatever SQLite happened to return first would
+          make traversal nondeterministic: adding one edge anywhere in a hub's
+          neighbourhood would silently change what a 2-hop query returns, with
+          no changelog entry and no way to explain it. For a graph whose value
+          is auditable provenance, a nondeterministic walk is a worse defect
+          than a slow one.
+
+        Seeds are excluded from the result — the caller already has them. Each
+        node keeps its BEST score across all paths that reach it, and score
+        attenuates by ``hop_decay`` per hop so a 2-hop neighbour cannot
+        outrank a 1-hop one on edge weight alone.
+        """
+        if not seeds or max_hops < 1:
+            return []
+
+        best: dict[str, float] = {}
+        frontier: dict[str, float] = dict(seeds)
+        seen: set[str] = set(seeds)
+
+        for _ in range(max_hops):
+            if not frontier:
+                break
+            placeholders = ",".join("?" for _ in frontier)
+            try:
+                rows = self.conn.execute(
+                    f"""SELECT from_id, to_id, weight FROM edges
+                        WHERE from_id IN ({placeholders})""",
+                    tuple(frontier),
+                ).fetchall()
+            except Exception:
+                break
+
+            next_scores: dict[str, float] = {}
+            for row in rows:
+                try:
+                    target = row["to_id"]
+                    if target in seen:
+                        continue
+                    score = frontier[row["from_id"]] * (row["weight"] or 0.0) * hop_decay
+                except (KeyError, TypeError):
+                    continue
+                if score > next_scores.get(target, 0.0):
+                    next_scores[target] = score
+
+            # Total, stable ordering — see the docstring. Ties break on id so
+            # the beam contents cannot depend on row order.
+            ranked = sorted(next_scores.items(), key=lambda kv: (-kv[1], kv[0]))
+            frontier = dict(ranked[:beam])
+            seen.update(frontier)
+            for nid, score in frontier.items():
+                if score > best.get(nid, 0.0):
+                    best[nid] = score
+
+        return sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))
+
     def edges_from(self, node_id: str) -> list[dict]:
         rows = self.conn.execute(
             """SELECT e.*, n.title as to_title FROM edges e
@@ -2706,6 +2943,152 @@ class Store:
         if days <= 0:
             return strength
         return strength * (0.5 ** (days / half_life_days))
+
+    # ── Learned pair co-activation ─────────────────────────────────────
+
+    def deposit_coactivation(self, node_a: str, node_b: str, context: str = "",
+                             eta: float = 0.15, half_life_days: float = 14.0) -> float:
+        """Strengthen a pair that proved useful TOGETHER. Returns new strength.
+
+        Bounded Hebbian update, ``w <- w + eta * (1 - w)``: this is the one
+        piece of Hillock's math worth taking. It approaches 1.0 asymptotically
+        and can never run away, unlike the unbounded additive deposit used for
+        node-level pheromone — a pair confirmed a hundred times should saturate,
+        not dominate.
+
+        Prior decay is folded in before the update so the accumulator stays
+        current. Callers must gate on CONFIRMED USE: co-retrieval is not
+        usefulness, and depositing on it would teach the graph the retriever's
+        own biases and then present the result as evidence.
+        """
+        a = self._live_node_id(node_a)
+        b = self._live_node_id(node_b)
+        if a == b:
+            return 0.0
+        if a > b:
+            a, b = b, a  # canonical order — one row per pair
+        now = _now()
+        row = self.conn.execute(
+            "SELECT strength, events, last_decay FROM node_coactivation "
+            "WHERE node_a = ? AND node_b = ? AND context = ?",
+            (a, b, context),
+        ).fetchone()
+
+        current = 0.0
+        events = 0
+        if row is not None:
+            current = self._decayed_strength(
+                row["strength"], row["last_decay"], half_life_days)
+            events = row["events"]
+
+        new = current + eta * (1.0 - current)
+        new = max(0.0, min(1.0, new))
+        self.conn.execute(
+            """INSERT INTO node_coactivation
+                   (node_a, node_b, context, strength, events, last_event, last_decay)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(node_a, node_b, context) DO UPDATE SET
+                   strength = excluded.strength,
+                   events = excluded.events,
+                   last_event = excluded.last_event,
+                   last_decay = excluded.last_decay""",
+            (a, b, context, round(new, 6), events + 1, now, now),
+        )
+        self.conn.commit()
+        return new
+
+    def coactivation_scores(self, node_ids: set[str], context: str = "",
+                            half_life_days: float = 14.0,
+                            min_events: int = 3) -> list[tuple[str, float]]:
+        """Decayed co-activation score per node, summed over its partners.
+
+        Read-only: decay is applied lazily here so a read is always current
+        without needing a write. ``min_events`` suppresses pairs seen too few
+        times to be signal — a single co-occurrence is an anecdote.
+        """
+        if not node_ids:
+            return []
+        placeholders = ",".join("?" for _ in node_ids)
+        params = list(node_ids) + list(node_ids) + [context, min_events]
+        try:
+            rows = self.conn.execute(
+                f"""SELECT node_a, node_b, strength, last_decay
+                    FROM node_coactivation
+                    WHERE (node_a IN ({placeholders}) OR node_b IN ({placeholders}))
+                      AND context = ? AND events >= ?""",
+                params,
+            ).fetchall()
+        except Exception:
+            return []
+
+        totals: dict[str, float] = {}
+        for row in rows:
+            decayed = self._decayed_strength(
+                row["strength"], row["last_decay"], half_life_days)
+            if decayed <= 0:
+                continue
+            # Credit only the endpoints the caller asked about; a pair whose
+            # other end is outside the candidate set still counts for the end
+            # that is inside it.
+            for nid in (row["node_a"], row["node_b"]):
+                if nid in node_ids:
+                    totals[nid] = totals.get(nid, 0.0) + decayed
+        return sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def decay_coactivation(self, half_life_days: float = 14.0,
+                           floor: float = 0.02) -> int:
+        """Write back decayed co-activation; prune pairs below `floor`.
+
+        Mirrors ``decay_pheromone``. Returns rows pruned.
+        """
+        now = datetime.now()
+        try:
+            rows = self.conn.execute(
+                "SELECT node_a, node_b, context, strength, last_decay "
+                "FROM node_coactivation").fetchall()
+        except Exception:
+            return 0
+        pruned = 0
+        for row in rows:
+            strength = self._decayed_strength(
+                row["strength"], row["last_decay"], half_life_days, now)
+            key = (row["node_a"], row["node_b"], row["context"])
+            if strength < floor:
+                self.conn.execute(
+                    "DELETE FROM node_coactivation "
+                    "WHERE node_a = ? AND node_b = ? AND context = ?", key)
+                pruned += 1
+            elif abs(strength - row["strength"]) > 0.001:
+                self.conn.execute(
+                    "UPDATE node_coactivation SET strength = ?, last_decay = ? "
+                    "WHERE node_a = ? AND node_b = ? AND context = ?",
+                    (round(strength, 6), now.isoformat(timespec="seconds"), *key))
+        self.conn.commit()
+        return pruned
+
+    def coactivation_stats(self, half_life_days: float = 14.0,
+                           warm_floor: float = 0.3) -> dict:
+        """Decayed signal summary used to decide if the channel is mature.
+
+        Mirrors ``pheromone_stats``: the channel stays inert in ranking until
+        it has enough warm signal to be worth trusting.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT strength, last_decay FROM node_coactivation").fetchall()
+        except Exception:
+            return {"pairs": 0, "warm_pairs": 0, "signal": 0.0}
+        now = datetime.now()
+        warm = 0
+        signal = 0.0
+        for row in rows:
+            decayed = self._decayed_strength(
+                row["strength"], row["last_decay"], half_life_days, now)
+            signal += decayed
+            if decayed >= warm_floor:
+                warm += 1
+        return {"pairs": len(rows), "warm_pairs": warm,
+                "signal": round(signal, 4)}
 
     def _live_node_id(self, node_id: str, max_hops: int = 10) -> str:
         """Follow extra['superseded_by'] to the live successor (bounded, cycle-safe).
@@ -3014,6 +3397,24 @@ class Store:
             (key, value),
         )
         self.conn.commit()
+
+    def bump_meta_counter(self, key: str, amount: int = 1) -> int:
+        """Increment a durable counter in the meta table; return the new value.
+
+        Used by recovery paths that must leave a trace: a handled failure still
+        emits a signal, so a rising count is visible to `kin doctor` instead of
+        vanishing into a caught exception. A non-integer stored value is
+        treated as zero rather than raising — a counter must never become the
+        thing that breaks the path it is instrumenting.
+        """
+        raw = self.get_meta(key)
+        try:
+            current = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            current = 0
+        new = current + amount
+        self.set_meta(key, str(new))
+        return new
 
     # ── Skill tracking ─────────────────────────────────────────────────
 

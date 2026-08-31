@@ -362,13 +362,15 @@ def search(query: str, top_k: int = 10, tags: str = "",
     from .retrieve import hybrid_search
 
     fence_stats: dict = {}
+    grounding: dict = {}
     fetch_k = top_k * 3 if tags else top_k
     evaluation_time = operation_now() if trusted_only else None
     results = hybrid_search(store, query, top_k=fetch_k,
                             include_archived=include_archived,
                             fence_stats=fence_stats,
                             trusted_only=trusted_only,
-                            evaluation_time=evaluation_time)
+                            evaluation_time=evaluation_time,
+                            grounding=grounding)
 
     # The tag filter applies identically to results and fenced candidates
     # so the fence note reflects the same filter set the results use.
@@ -394,13 +396,24 @@ def search(query: str, top_k: int = 10, tags: str = "",
         from .retrieve import build_trust_note
         trust_note = build_trust_note(fence_stats.get("trusted_omissions"))
 
+    ground_note = ""
+    verdict = grounding.get("verdict")
+    if verdict is not None:
+        try:
+            ground_note = verdict.note()
+        except Exception:
+            ground_note = ""
+
     if not results:
-        notes = [note for note in (fence_note, trust_note) if note]
+        notes = [note for note in (fence_note, trust_note, ground_note) if note]
         return "No results found." + (f"\n{' '.join(notes)}" if notes else "")
 
     from .retrieve import _node_age_str, _staleness_caveat
 
-    lines = [f"Found {len(results)} results for '{query}':\n"]
+    lines = []
+    if ground_note:
+        lines.append(ground_note)
+    lines.append(f"Found {len(results)} results for '{query}':\n")
     for i, r in enumerate(results, 1):
         score = r.get("rrf_score", 0) or r.get("confidence", 0)
         age = _node_age_str(r)
@@ -1046,13 +1059,19 @@ def ask(question: str) -> str:
 
     top_k = {"factual": 5, "procedural": 8, "decision": 10, "exploratory": 12}.get(qtype, 10)
     client = _mcp_client()
-    results = _scope_results(hybrid_search(store, question, top_k=top_k), client)
+    grounding: dict = {}
+    results = _scope_results(
+        hybrid_search(store, question, top_k=top_k, grounding=grounding), client)
 
     if not results:
         return f"[{qtype}] No relevant knowledge found for: {question}"
 
+    # The verdict rides through format_context_block, which is the single place
+    # rows become context text — so `ask` does not re-implement the gate, it
+    # just hands the verdict to the canonical renderer.
     level = "full" if qtype in ("procedural", "decision") else "abridged"
-    block = format_context_block(store, results, query=question, level=level, adapter=client)
+    block = format_context_block(store, results, query=question, level=level,
+                                 adapter=client, grounding=grounding)
     return f"[{qtype} question]\n\n{block}"
 
 
