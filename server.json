@@ -3,7 +3,7 @@
   "name": "io.github.jmcentire/kindex",
   "title": "Kindex",
   "description": "Persistent knowledge graph and MCP server for AI workflows with git-tracked project context.",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "repository": {
     "url": "https://github.com/jmcentire/kindex",
     "source": "github"
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "kindex",
-      "version": "0.33.0",
+      "version": "0.34.0",
       "runtimeHint": "pipx",
       "transport": {
         "type": "stdio"

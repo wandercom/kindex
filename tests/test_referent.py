@@ -24,6 +24,7 @@ from kindex.referent import (
     stale_sweep,
     validate_referent,
 )
+from kindex.schema import SCHEMA_VERSION
 from kindex.store import Store
 from kindex.trust import TRUST_REASONS, node_trust_decision
 
@@ -140,11 +141,15 @@ def test_add_node_rejects_malformed_binding(store):
 
 
 def test_v8_database_migrates_to_v9(tmp_path):
-    """A stamped-v8 database gains the three columns and the v9 stamp,
+    """A stamped-v8 database gains the three columns and is stamped current,
     preserving legacy rows.
 
     Mutation that reddens this: dropping the v9 block from _migrate_schema
-    leaves the stamp at 8 and no referent column.
+    leaves no referent column and the stamp below current.
+
+    The stamp is asserted against SCHEMA_VERSION rather than a literal "9":
+    every migration after v9 also runs on this store, so a literal would
+    fail on each later version bump for a reason unrelated to referents.
     """
     db = tmp_path / "kindex.db"
     conn = sqlite3.connect(db)
@@ -168,7 +173,8 @@ def test_v8_database_migrates_to_v9(tmp_path):
         assert {"referent", "asserted_at", "true_of"} <= cols
         stamp = store.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        assert stamp[0] == "9"
+        assert stamp[0] == str(SCHEMA_VERSION)
+        assert int(stamp[0]) >= 9
         row = store.conn.execute(
             "SELECT content, referent FROM nodes WHERE id='legacy'").fetchone()
         assert row[0] == "preserve me" and row[1] is None

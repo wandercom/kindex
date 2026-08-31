@@ -9,6 +9,7 @@ Core docs:
 - GitHub repo: https://github.com/jmcentire/kindex
 - PyPI package: https://pypi.org/project/kindex/
 - GitHub Pages docs build: https://jmcentire.github.io/kindex/
+- Changelog: https://github.com/jmcentire/kindex/blob/main/CHANGELOG.md
 
 Install:
 

@@ -46,6 +46,28 @@ DEFAULT_MERGE_THRESHOLD = 0.95
 DEFAULT_SUGGEST_THRESHOLD = 0.85
 DEFAULT_MAX_NEW_SUGGESTIONS = 100
 
+# Runaway-merge guards.
+#
+# Merging appends source content into the target, so a target can absorb
+# without bound. On machine-generated content the similarity test is nearly
+# always a false positive — minified symbols (`class Ha`, `class Za`), the same
+# handler class defined in twenty files, a vendored LICENSE, generated Prisma
+# schemas are all mutually similar by construction, and `content_overlap`
+# compares only the first 500 chars, where generated files are identical.
+# Unguarded, that produced a 35 MB "concept" node holding a merged pile of
+# minified Astro build output, and five such nodes held 86% of the graph's
+# content by bytes.
+#
+# Both caps are refusals, not truncations: an oversized or heavily-absorbed
+# target is evidence the cluster is generated noise rather than a real
+# duplicate, so the source stays its own node. Nothing is lost, and the graph
+# stops growing. Refusals are counted in meta so the condition is visible to
+# `kin doctor` instead of being silently tolerated.
+MAX_MERGE_RESULT_CHARS = 100_000
+MAX_MERGE_ABSORPTIONS = 25
+MERGE_MARKER = "[Merged from:"
+MERGE_REFUSAL_COUNTER = "dream.merge_refusals"
+
 LAST_DREAM_STARTED_META = "last_dream_started"
 LAST_DREAM_RUN_META = "last_dream_run"
 LAST_DREAM_MODE_META = "last_dream_mode"
@@ -242,6 +264,33 @@ def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
             or target.get("type", "concept") in PROTECTED_TYPES):
         return False
 
+    # Runaway guards, checked BEFORE any mutation so a refusal leaves both
+    # nodes exactly as they were. This is the single choke point every merge
+    # path goes through, so the caps hold no matter which caller asked.
+    source_content = source.get("content", "") or ""
+    target_content = target.get("content", "") or ""
+    absorptions = target_content.count(MERGE_MARKER)
+    would_be = len(target_content) + len(source_content)
+    refusal = None
+    if absorptions >= MAX_MERGE_ABSORPTIONS:
+        refusal = (f"target has already absorbed {absorptions} merges "
+                   f"(cap {MAX_MERGE_ABSORPTIONS})")
+    elif would_be > MAX_MERGE_RESULT_CHARS:
+        refusal = (f"merged content would be {would_be} chars "
+                   f"(cap {MAX_MERGE_RESULT_CHARS})")
+    if refusal:
+        try:
+            store.bump_meta_counter(MERGE_REFUSAL_COUNTER)
+        except Exception:
+            pass
+        logger.warning(
+            "dream merge refused: %s -> %s: %s. Repeated refusals usually mean "
+            "generated or minified content was ingested and is being matched "
+            "against itself.",
+            source_id, target_id, refusal,
+        )
+        return False
+
     # Move edges from source to target
     for edge in store.edges_from(source_id):
         if edge["to_id"] != target_id:
@@ -261,8 +310,6 @@ def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
             )
 
     # Merge content if source has unique content
-    source_content = source.get("content", "") or ""
-    target_content = target.get("content", "") or ""
     if source_content and source_content not in target_content:
         merged = f"{target_content}\n\n[Merged from: {source['title']}]\n{source_content}"
         store.update_node(target_id, content=merged)

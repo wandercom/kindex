@@ -15,8 +15,14 @@ from .llm import _estimate_cost
 
 
 def _get_client(config: Config):
-    import os
-    key = os.environ.get(config.llm.api_key_env)
+    # Key resolution has ONE authority: llm.resolve_api_key. This used to do a
+    # bare os.environ.get(config.llm.api_key_env), which silently broke every
+    # install using the comma-separated fallback syntax that llm.py has always
+    # supported — a config of "JMC_OPENAI_API_KEY,OPENAI_API_KEY" looked up an
+    # env var of that literal name, found nothing, and fell back to keyword
+    # extraction forever. Two resolvers for one fact is how that happened.
+    from .llm import get_client, resolve_api_key
+    key, tried = resolve_api_key(config)
     # Auto-enable: if the API key exists in the environment, use LLM regardless
     # of config.llm.enabled.  Only skip when there's no key AND not explicitly enabled.
     if not key and not config.llm.enabled:
@@ -24,17 +30,18 @@ def _get_client(config: Config):
     if not key:
         # Explicitly enabled but no key
         import sys
-        print(f"Warning: LLM enabled but {config.llm.api_key_env} not set. "
+        print(f"Warning: LLM enabled but none of {tried} are set. "
               f"Falling back to keyword extraction.", file=sys.stderr)
         return None
-    try:
-        import anthropic
-        return anthropic.Anthropic(api_key=key)
-    except ImportError:
-        import sys
-        print("Warning: 'anthropic' package not installed. "
-              "Install with: pip install kindex[llm]", file=sys.stderr)
-        return None
+    if config.llm.enabled:
+        return get_client(config)
+    # Auto-enable path: llm.get_client refuses when `enabled` is false, so
+    # build the same provider-aware client against a temporary enabled copy
+    # rather than reimplementing provider dispatch here. This module used to
+    # hardcode `import anthropic`, which sent an OpenAI key to Anthropic's SDK
+    # whenever provider was openai.
+    return get_client(config.model_copy(update={
+        "llm": config.llm.model_copy(update={"enabled": True})}))
 
 
 # ── LLM extraction ─────────────────────────────────────────────────────

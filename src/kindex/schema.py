@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 # Audience scopes for tenancy model
 AUDIENCES = ("private", "team", "org", "public")
@@ -272,4 +272,31 @@ CREATE TABLE IF NOT EXISTS injection_pheromone (
 
 CREATE INDEX IF NOT EXISTS idx_pheromone_node ON injection_pheromone(node_id);
 CREATE INDEX IF NOT EXISTS idx_pheromone_strength ON injection_pheromone(strength DESC);
+
+-- Learned PAIR co-activation: nodes that proved useful together in the same
+-- session. A THIRD channel, separate from both edge.weight and node-level
+-- pheromone. It must never be folded into edges.weight: that column is
+-- topology ASSERTED by a human or an agent, and merging a learned correction
+-- into it destroys the told/inferred distinction — after which the graph can
+-- no longer tell you what it was told from what it inferred.
+--
+-- Deposits are gated on CONFIRMED USE, not co-retrieval. Co-occurrence in a
+-- result set is not evidence of usefulness; strengthening on it would teach
+-- the graph the retriever's own biases and then call the result evidence.
+-- node_a < node_b always, so a pair has exactly one row.
+CREATE TABLE IF NOT EXISTS node_coactivation (
+    node_a TEXT NOT NULL REFERENCES nodes(id),
+    node_b TEXT NOT NULL REFERENCES nodes(id),
+    context TEXT NOT NULL DEFAULT '',
+    strength REAL NOT NULL DEFAULT 0.0,
+    events INTEGER NOT NULL DEFAULT 0,
+    last_event TEXT NOT NULL DEFAULT (datetime('now')),
+    last_decay TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (node_a, node_b, context)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coactivation_a ON node_coactivation(node_a);
+CREATE INDEX IF NOT EXISTS idx_coactivation_b ON node_coactivation(node_b);
+CREATE INDEX IF NOT EXISTS idx_coactivation_strength
+    ON node_coactivation(strength DESC);
 """

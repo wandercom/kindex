@@ -36,12 +36,15 @@ stay tunable and not LLM-decided):
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .attention import injection_node_id, pheromone_context
 from .budget import BudgetLedger
 from .config import Config
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .store import Store
@@ -406,6 +409,14 @@ def reinforce_session(
                 reason=f"Would have helped this session but no node covers it: {str(item.get('evidence',''))[:160]}",
                 source=f"reinforce:{conversation_id}")
 
+    # ── Learned PAIR co-activation ──────────────────────────────────────
+    # Only nodes the grader CONFIRMED were used, and only from ARM A (things
+    # actually injected). Co-retrieval is not usefulness — depositing on it
+    # would teach the graph the retriever's own biases and call that evidence.
+    # Counterfactual "missed" outcomes are excluded: they were never injected
+    # together, so there is no co-activation to observe.
+    coactivated = _deposit_coactivation(store, config, outcomes, ctx)
+
     state["reinforced_at"] = _now()
     state["reinforce_counts"] = {
         "observed": sum(1 for o in outcomes if o.injected),
@@ -416,6 +427,7 @@ def reinforce_session(
 
     # New signal just landed — re-evaluate maturity and ramp the ranking weight.
     ramp = auto_ramp_pheromone_weight(store, config)
+    co_ramp = auto_ramp_coactivation_weight(store, config)
 
     return {
         "status": "ok",
@@ -424,6 +436,9 @@ def reinforce_session(
         "injected_count": len(injected),
         "pheromone_weight": ramp.get("weight"),
         "pheromone_ramped": ramp.get("ramped"),
+        "coactivated_pairs": coactivated,
+        "coactivation_weight": co_ramp.get("weight"),
+        "coactivation_ramped": co_ramp.get("ramped"),
     }
 
 
@@ -451,6 +466,85 @@ def _deposit(store: "Store", config: Config, node_id: str, ctx: str,
             store.deposit_pheromone(node_id, context=ctx, **kwargs)
     except Exception:
         pass
+
+
+def _deposit_coactivation(store: "Store", config: Config,
+                          outcomes: list["ReinforceOutcome"], ctx: str) -> int:
+    """Deposit pair co-activation across CONFIRMED-USED injected nodes.
+
+    Returns the number of pairs deposited. Only ``injected=True`` outcomes in
+    the reinforce categories qualify: a counterfactual "this would have helped"
+    node was never injected, so there is no co-activation to observe, and
+    co-retrieval alone is not evidence of anything.
+
+    Pair count is quadratic in the confirmed set, so it is capped — a session
+    that used thirty nodes should not write 435 rows and swamp the channel.
+    """
+    if not getattr(config.attention, "coactivation_enabled", False):
+        return 0
+
+    used = [o.node_id for o in outcomes
+            if o.injected and _CATEGORY_RULES.get(o.category, ("", ""))[1] == "reinforce"]
+    # Deterministic order so a capped session always deposits the same pairs.
+    used = sorted(set(used))
+    if len(used) < 2:
+        return 0
+
+    eta = config.attention.coactivation_eta
+    half = config.attention.coactivation_half_life_days
+    cap = config.attention.coactivation_max_pairs
+
+    deposited = 0
+    for i, a in enumerate(used):
+        for b in used[i + 1:]:
+            if deposited >= cap:
+                return deposited
+            try:
+                store.deposit_coactivation(a, b, context="", eta=eta,
+                                           half_life_days=half)
+                if ctx:
+                    store.deposit_coactivation(a, b, context=ctx, eta=eta,
+                                               half_life_days=half)
+                deposited += 1
+            except Exception:
+                log.warning(
+                    "co-activation deposit failed for pair (%s, %s) — the "
+                    "learned pair channel is not recording", a, b)
+    return deposited
+
+
+def auto_ramp_coactivation_weight(store: "Store", config: Config) -> dict:
+    """Lift co-activation into ranking once the channel is warm.
+
+    Mirrors the pheromone ramp, and keeps the same separation it does: the
+    RAW signal lives in ``node_coactivation``; the APPLIED correction is this
+    ranking weight. Keeping them apart is what lets you retire the channel
+    without rewriting history, and what stops a learned weight from hiding the
+    thing it measures.
+    """
+    acfg = config.attention
+    if not getattr(acfg, "coactivation_autoramp_enabled", False):
+        return {"weight": 0.0, "ramped": False}
+    stats = store.coactivation_stats(
+        half_life_days=acfg.coactivation_half_life_days)
+    if (stats["warm_pairs"] < acfg.coactivation_min_warm_pairs
+            or stats["signal"] < acfg.coactivation_min_signal):
+        store.set_meta("coactivation.learned_weight", "0")
+        return {"weight": 0.0, "ramped": False, **stats}
+
+    span = max(1e-9, acfg.coactivation_full_signal - acfg.coactivation_min_signal)
+    frac = min(1.0, (stats["signal"] - acfg.coactivation_min_signal) / span)
+    weight = round(acfg.coactivation_target_weight * frac, 4)
+    store.set_meta("coactivation.learned_weight", str(weight))
+    return {"weight": weight, "ramped": weight > 0, **stats}
+
+
+def learned_coactivation_weight(store: "Store") -> float:
+    """Read the auto-ramped co-activation ranking weight (0 when immature)."""
+    try:
+        return float(store.get_meta("coactivation.learned_weight") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _match_missing(store: "Store", query: str, top_k: int) -> list[dict]:

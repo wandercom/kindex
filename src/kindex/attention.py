@@ -6,6 +6,7 @@ import datetime as _dt
 import fnmatch
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -27,6 +28,8 @@ from .config import Config
 
 if False:  # pragma: no cover - type checking without runtime imports
     from .store import Store
+
+log = logging.getLogger(__name__)
 
 
 ATTENTION_PURPOSE = "attention"
@@ -389,11 +392,20 @@ def injection_node_id(injection_id: str) -> str | None:
 
 
 def _deposit_injection_pheromone(store: "Store", config: Config, node_id: str,
-                                 context: str) -> None:
-    """Lay a deposit on the global trail and (if known) the conditioned trail."""
+                                 context: str) -> bool:
+    """Lay a deposit on the global trail and (if known) the conditioned trail.
+
+    Returns True when the store accepted the deposit. Pheromone stays advisory
+    — a failure never breaks the hook — but it is not silent: a swallowed
+    exception here once hid a missing ``injection_pheromone.missed`` column for
+    three months, during which every deposit failed while the session state
+    recorded success. Recovery is a disposition that emits a signal, never one
+    that routes to silence, and the caller must not record what the store
+    refused.
+    """
     bare = injection_node_id(node_id)
     if not bare:
-        return
+        return False
     try:
         store.deposit_pheromone(
             bare, context="",
@@ -406,8 +418,19 @@ def _deposit_injection_pheromone(store: "Store", config: Config, node_id: str,
                 amount=config.attention.pheromone_deposit,
                 half_life_days=config.attention.pheromone_half_life_days,
             )
-    except Exception:
-        pass  # pheromone is advisory — never break the hook
+        return True
+    except Exception as exc:
+        log.warning(
+            "pheromone deposit failed for node %s (context=%r): %s: %s — "
+            "the stigmergic channel is not recording. Run `kin doctor` to "
+            "check for schema drift.",
+            bare, context, type(exc).__name__, exc,
+        )
+        try:
+            store.bump_meta_counter("pheromone.deposit_failures")
+        except Exception:
+            pass
+        return False
 
 
 def parse_hook_payload(raw: str) -> dict[str, Any]:
@@ -1019,10 +1042,13 @@ def _record_attention_delivery(
     for injection in injections:
         injected[injection.id] = now
         # Stigmergic trace: the injection itself is the deposit. Lay on both
-        # the coarse global trail and the context-conditioned trail.
+        # the coarse global trail and the context-conditioned trail. Record the
+        # deposit in state ONLY if the store took it — state that claims a
+        # deposit the store refused is how the missing-column defect stayed
+        # invisible, and Phase 2 reinforcement reads this map as ground truth.
         if config.attention.pheromone_enabled:
-            _deposit_injection_pheromone(store, config, injection.id, ctx)
-            deposit[injection.id] = {"at": now, "context": ctx}
+            if _deposit_injection_pheromone(store, config, injection.id, ctx):
+                deposit[injection.id] = {"at": now, "context": ctx}
     state["last_injection_at"] = now
     _save_state(store, conversation_id, state)
 

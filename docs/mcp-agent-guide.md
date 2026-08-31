@@ -186,6 +186,26 @@ After a human (or you, with evidence) confirms a stale claim still holds for
 the new referent state, `stale_check(rebind=<node-id>)` re-hashes and rebinds:
 `true_of` moves to now, `asserted_at` never changes.
 
+### Trust the Grounding Verdict
+
+Search and context results may carry a grounding note:
+
+```
+[grounding: UNGROUNDED — best similarity 0.166 is below the floor 0.215;
+the graph likely knows nothing about this (shadow mode — results still shown)]
+```
+
+Treat it as information about *retrieval's own confidence*, not an instruction.
+When the verdict is `ungrounded`, the rows shown are the nearest neighbours of
+a query your graph has no real answer for — say so rather than synthesising an
+answer from them. `weak` means the results only just cleared the floor: use
+them, but hedge. `uncalibrated` means no floor exists yet for the active
+embedding model; ask the human to run `kin embed calibrate`.
+
+This is the difference between "I found nothing relevant" and "here is
+something loosely adjacent" — and it is the one signal that lets you tell a
+human the graph does not know, instead of guessing on its behalf.
+
 ### Learn From Large Text
 
 Use `learn` after reading long files, logs, design docs, transcripts, or command

@@ -265,6 +265,39 @@ class EmbeddingConfig(BaseModel):
     drain_time_budget: int = 120  # wall-clock seconds cap per cron embedding drain
 
 
+class GroundingConfig(BaseModel):
+    """Policy for the retrieval-confidence gate.
+
+    This holds POLICY ONLY — never the floor itself. The floor is a derived
+    fact about an external system (the embedding provider's similarity
+    distribution over this corpus), so it lives as an immutable, versioned
+    calibration record keyed by ``provider:model``, not as a config value a
+    stale edit can quietly falsify. `kin embed calibrate` writes the record;
+    retrieval reads the newest one for the active model.
+
+    A borrowed constant is a guess wearing a number's clothes — and so is a
+    computed constant with no record of the corpus it was computed against.
+    """
+
+    enabled: bool = True
+    # Shadow mode is the default ON PURPOSE. Enforcing turns "irrelevant
+    # results contaminate context" — annoying, visible, self-correcting — into
+    # "empty context, agent proceeds without knowledge that was actually
+    # there". Silent false negatives are strictly worse than loud false
+    # positives for a tool whose value is that you can trust it. So the verdict
+    # is computed and reported first, and only enforced once a real query log
+    # shows what it would have dropped.
+    enforce: bool = False
+    # Percentile of the null-query similarity distribution the floor sits at.
+    floor_percentile: float = 95.0
+    # Verdict boundary: results clearing the floor but bunched near it are
+    # `weak`, not `grounded`. Expressed as a multiplier on the floor.
+    weak_margin: float = 1.15
+    # Refuse to trust a calibration taken against a materially different
+    # corpus. Coverage drifting past this fraction re-opens the question.
+    recalibrate_coverage_delta: float = 0.25
+
+
 class LLMConfig(BaseModel):
     enabled: bool = False
     provider: str = "anthropic"
@@ -347,6 +380,21 @@ class AttentionConfig(BaseModel):
     # so users never flip a bit. Measured on GRADED, decayed signal (not bare
     # deposits) so it ramps down when the work moves on. Writes a learned weight
     # to meta; ranking.pheromone_weight (if >0) is a manual override that wins.
+    # Learned PAIR co-activation (W4). Deposited only when session grading
+    # CONFIRMS the injected nodes were used — co-retrieval is not usefulness.
+    # Bounded update w <- w + eta*(1-w), so a pair saturates instead of
+    # running away. Kept in its own table and its own ensemble channel; it is
+    # never folded into edges.weight, which is asserted topology.
+    coactivation_enabled: bool = True
+    coactivation_eta: float = 0.15
+    coactivation_half_life_days: float = 14.0
+    coactivation_min_events: int = 3
+    coactivation_max_pairs: int = 45   # cap pairs per session: 10 nodes choose 2
+    coactivation_autoramp_enabled: bool = True
+    coactivation_target_weight: float = 0.08
+    coactivation_min_warm_pairs: int = 12
+    coactivation_min_signal: float = 6.0
+    coactivation_full_signal: float = 30.0
     pheromone_autoramp_enabled: bool = True
     pheromone_target_weight: float = 0.12    # mature target weight in the ensemble
     pheromone_min_nodes: int = 8             # distinct warm graded nodes before any ramp
@@ -410,6 +458,15 @@ class RankingConfig(BaseModel):
     node_weight: float = 0.10     # Stored node weight signal
     recency_weight: float = 0.05  # Recency decay signal weight
     pheromone_weight: float = 0.0  # Injection-usefulness signal — opt-in: accumulate trails, then enable once warm
+    # Graph expansion. Score attenuates by hop_decay per hop so a 2-hop
+    # neighbour cannot outrank a 1-hop one on edge weight alone. graph_beam is
+    # mandatory, not tuning: observed max out-fanout is 849, so an uncapped
+    # multi-hop walk from a hub explodes.
+    hop_decay: float = 0.5
+    graph_beam: int = 200
+    # Learned pair co-activation — opt-in like pheromone: accumulate first,
+    # rank later, and never fold into edge weight.
+    coactivation_weight: float = 0.0
 
     @property
     def ensemble_weights(self) -> dict[str, float]:
@@ -422,6 +479,8 @@ class RankingConfig(BaseModel):
         }
         if self.pheromone_weight > 0:
             weights["pheromone"] = self.pheromone_weight
+        if self.coactivation_weight > 0:
+            weights["coactivation"] = self.coactivation_weight
         return weights
 
 
@@ -582,6 +641,7 @@ class Config(BaseModel):
     sim: SimConfig = Field(default_factory=SimConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
+    grounding: GroundingConfig = Field(default_factory=GroundingConfig)
     reminders: ReminderConfig = Field(default_factory=ReminderConfig)
     work_policy: WorkPolicyConfig = Field(default_factory=WorkPolicyConfig)
     code_ingest: CodeIngestConfig = Field(default_factory=CodeIngestConfig)

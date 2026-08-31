@@ -1119,6 +1119,80 @@ def cmd_migrate(args):
     store.close()
 
 
+def cmd_extract(args):
+    """Extraction engine tools: compare engines against the local corpus."""
+    action = getattr(args, "extract_action", None) or "eval"
+    store = _store(args)
+    cfg = _config(args)
+
+    if action == "engines":
+        from .extractors import DeterministicExtractor
+        from .llm import resolve_api_key
+        rows = [
+            ("keyword", True, "pure Python, always available — the baseline"),
+            ("llm", bool(resolve_api_key(cfg)[0]),
+             f"{cfg.llm.provider} {cfg.llm.model}"),
+            ("deterministic", DeterministicExtractor.available(),
+             "optional kindex[talon] extra (~2.5 GB)"),
+        ]
+        if args.json:
+            print(_dumps([{"engine": n, "available": a, "detail": d}
+                          for n, a, d in rows], indent=2))
+        else:
+            for name, available, detail in rows:
+                mark = "available" if available else "not installed"
+                print(f"  {name:<15} {mark:<15} {detail}")
+        store.close()
+        return
+
+    # eval
+    from .budget import BudgetLedger
+    from .extract_eval import run_eval
+
+    engines = tuple(
+        e.strip() for e in (getattr(args, "engines", None)
+                            or "keyword,deterministic").split(",") if e.strip())
+    result = run_eval(store, cfg, engines=engines,
+                      limit=getattr(args, "limit", 200),
+                      ledger=BudgetLedger(cfg.ledger_path, cfg.budget))
+
+    if args.json:
+        print(_dumps(result, indent=2))
+    elif result.get("status") != "ok":
+        print(f"{result.get('status')}: {result.get('detail', '')}")
+    else:
+        print(f"Sample: {result['sample_size']} curated nodes "
+              f"(title match >= {result['match_threshold']})\n")
+        print(f"  {'engine':<16}{'grounded':>10}{'title recall':>14}"
+              f"{'items/doc':>12}{'errors':>9}")
+        for name, sc in result["scores"].items():
+            print(f"  {name:<16}{sc['grounding_precision']:>10.1%}"
+                  f"{sc['recall']:>14.1%}"
+                  f"{sc['noise_items_per_doc']:>12.1f}{sc['errors']:>9}")
+        print("\n  grounded = share of proposed items that really occur in the "
+              "source (the precision question).\n  title recall = share of docs "
+              "where the engine reproduced the curator's own title (harsh on "
+              "this corpus).")
+        gate = result.get("gate") or {}
+        if gate:
+            print()
+            for name, g in gate.items():
+                verdict = "PASSES" if g["beats_baseline"] else "FAILS"
+                floor = "ok" if g["clears_grounding_floor"] else "BELOW"
+                disc = "ok" if g["beats_title_recall"] else "no gain"
+                print(f"  {name}: {verdict} the gate")
+                print(f"      grounding floor: {floor} "
+                      f"({g['grounding_delta']:+.1%} vs baseline)")
+                print(f"      title recall:    {disc} "
+                      f"({g['recall_delta']:+.1%} vs baseline)")
+                print(f"      review cost:     {g['noise_delta']:+.1f} items/doc")
+            if not result.get("passes_gate"):
+                print("\n  No candidate engine cleared both parts of the gate. "
+                      "An engine that cannot beat regexes has not earned its "
+                      "dependencies.")
+    store.close()
+
+
 def cmd_doctor(args):
     """Comprehensive health check with graph invariants."""
     store = _store(args)
@@ -1171,6 +1245,66 @@ def cmd_doctor(args):
             f"{len(degraded_events)} degraded hook event(s) in last 7 days — "
             f"last: {last.get('cmd', '?')} ({last.get('error_class', '?')}); "
             f"see degraded.jsonl")
+
+    # ── Schema drift ──
+    # A table can exist with the right name and the wrong shape while
+    # schema_version reads current, because `CREATE TABLE IF NOT EXISTS` never
+    # repairs an existing table. That is invisible to a table-existence check
+    # and it silently killed the pheromone channel for three months, so this
+    # asserts COLUMNS. --fix reopens the store, which replays migrations.
+    drift = store.schema_drift()
+    if drift:
+        detail = "; ".join(
+            f"{table} missing {', '.join(sorted(cols))}"
+            for table, cols in sorted(drift.items())
+        )
+        issues.append(f"Schema drift: {detail} — run `kin doctor --fix`")
+        if do_fix:
+            store.close()
+            store = _store(args)
+            remaining = store.schema_drift()
+            if remaining:
+                issues[-1] += " (FIX FAILED — migration did not add the columns)"
+            else:
+                fixes_applied += 1
+                issues[-1] += " (FIXED: migrations replayed)"
+
+    # ── Silently-recovered failures ──
+    # Counters bumped by recovery paths. A handled failure still emits a
+    # signal; a rising count here is the leading indicator that a subsystem is
+    # degraded but not complaining.
+    failures = store.get_meta("pheromone.deposit_failures")
+    if failures and failures != "0":
+        warnings.append(
+            f"{failures} pheromone deposit failure(s) recorded — the stigmergic "
+            f"channel is degraded; check schema drift above")
+
+    refusals = store.get_meta("dream.merge_refusals")
+    if refusals and refusals != "0":
+        warnings.append(
+            f"{refusals} dream merge(s) refused by the runaway guards — usually "
+            f"generated or minified content being matched against itself; "
+            f"run `kin doctor --oversized` to see the targets")
+
+    # ── Oversized nodes ──
+    # A knowledge node past this size is not knowledge; it is ingested build
+    # output or a runaway merge. They dominate embedding cost and poison
+    # vector-space neighbourhoods.
+    try:
+        oversized = store.conn.execute(
+            "SELECT id, substr(title,1,50) AS title, LENGTH(content) AS chars "
+            "FROM nodes WHERE status='active' AND LENGTH(content) > 100000 "
+            "ORDER BY LENGTH(content) DESC LIMIT 20"
+        ).fetchall()
+        if oversized:
+            total_mb = sum(r["chars"] for r in oversized) / 1_048_576
+            warnings.append(
+                f"{len(oversized)} oversized node(s) holding {total_mb:.1f} MB — "
+                f"largest: {oversized[0]['title']!r} at "
+                f"{oversized[0]['chars'] // 1024} KB; archive with "
+                f"`kin set-state <id> status archived`")
+    except Exception:
+        pass
 
     # ── FTS5 sync check ──
     try:
@@ -3016,6 +3150,20 @@ def cmd_embed(args):
         )
         if action == "status":
             result = embedding_status(store)
+        elif action == "calibrate":
+            from .grounding import calibrate, load_calibration
+            from .vectors import _resolve_embedding_config
+            provider, model, _, _ = _resolve_embedding_config(store.config)
+            if getattr(args, "show", False):
+                record = load_calibration(store, provider, model)
+                result = (record.to_dict() if record else
+                          {"status": "uncalibrated",
+                           "provider": provider, "model": model})
+            else:
+                result = calibrate(
+                    store, store.config,
+                    percentile=getattr(args, "percentile", None),
+                ).to_dict()
         elif action == "plan":
             result = plan_embedding_reindex(store, **_filters())
         elif action == "enqueue":
@@ -3053,6 +3201,22 @@ def cmd_embed(args):
             print(f"Indexed nodes: {result.get('indexed_nodes')}")
             print(f"Vector rows: {result.get('vector_rows')}")
             print(f"Queue pending: {result['queue_pending']}")
+        elif action == "calibrate":
+            if result.get("status") == "uncalibrated":
+                print(f"No calibration record for "
+                      f"{result['provider']}:{result['model']}. "
+                      f"Run `kin embed calibrate` to create one.")
+            else:
+                print(f"Provider: {result['provider']} / {result['model']}")
+                print(f"Floor: {result['floor']:.6f} "
+                      f"(p{result['percentile']:g} of {result['sample_size']} "
+                      f"null-query similarities)")
+                print(f"Corpus at calibration: {result['corpus_node_count']} "
+                      f"active nodes, {result['embedding_count']} embedded")
+                print(f"Calibrated at: {result['calibrated_at']}")
+                enforce = store.config.grounding.enforce
+                print(f"Enforcement: {'ON' if enforce else 'SHADOW MODE '
+                      '(verdict reported, no rows dropped)'}")
         elif action == "plan":
             print(f"Nodes: {result['nodes']}")
             print(f"Chunks: {result['chunks']}")
@@ -6744,8 +6908,40 @@ def build_parser() -> argparse.ArgumentParser:
     _common(es)
     es.set_defaults(func=cmd_embed)
 
+    es = embed_sub.add_parser(
+        "calibrate",
+        help="Measure the null-query similarity floor for the active model")
+    es.add_argument("--percentile", type=float,
+                    help="Percentile of the null-query distribution to use as "
+                         "the floor (default: grounding.floor_percentile)")
+    es.add_argument("--show", action="store_true",
+                    help="Show the current calibration record without recalibrating")
+    _common(es)
+    es.set_defaults(func=cmd_embed)
+
     _common(s)
     s.set_defaults(func=cmd_embed)
+
+    # extract
+    s = sub.add_parser("extract", help="Extraction engine tools")
+    extract_sub = s.add_subparsers(dest="extract_action")
+
+    es = extract_sub.add_parser(
+        "eval", help="Score extraction engines against the local corpus")
+    es.add_argument("--engines", default="keyword,deterministic",
+                    help="Comma-separated engines to score "
+                         "(keyword, llm, deterministic)")
+    es.add_argument("--limit", type=int, default=200,
+                    help="Sample size of curated nodes")
+    _common(es)
+    es.set_defaults(func=cmd_extract)
+
+    es = extract_sub.add_parser("engines", help="List extraction engines")
+    _common(es)
+    es.set_defaults(func=cmd_extract)
+
+    _common(s)
+    s.set_defaults(func=cmd_extract)
 
     # ask
     s = sub.add_parser("ask", help="Query the knowledge graph")

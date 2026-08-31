@@ -2,6 +2,79 @@
 
 All notable changes to Kindex are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.34.0] - 2026-08-31
+
+### Added
+- **Retrieval grounding — the graph can now say it knows nothing.** `vector_search`
+  returned the top-k nearest neighbours for any query however nonsensical, and
+  `ask()` could only reach its "no relevant knowledge" branch when the result list
+  was empty — which vector search made unreachable. New `kindex.grounding` emits a
+  `RetrievalVerdict` (`grounded` / `weak` / `ungrounded` / `uncalibrated`) that
+  `hybrid_search` reports via a `grounding=` out-param and `format_context_block`
+  stamps onto the block — the single place rows become context text, so the verdict
+  is a gate rather than something each caller must remember. The similarity floor is
+  an **immutable versioned calibration record** keyed by `provider:model` carrying
+  the corpus it was measured against; config holds only the percentile policy, never
+  the number. New `kin embed calibrate [--show] [--percentile]`. **Shadow mode is the
+  default** (`grounding.enforce: false`): the verdict is computed and reported while
+  every row still flows, because silent false negatives are worse than loud false
+  positives. Near-misses are recorded so a disputed refusal has evidence.
+- **Bounded multi-hop graph expansion.** `hybrid_search` walked exactly one hop from
+  the top five FTS hits regardless of `graph_hops`. New `Store.expand_multihop`
+  honours the requested depth with per-hop score decay and a **mandatory beam** whose
+  ordering is total and stable (score desc, then node id asc) — an unspecified beam
+  makes traversal nondeterministic, which in a provenance-first graph is worse than
+  slow. Measured on a 113k-edge graph: 3 hops in 0.7 ms, 4.8x the reach of 1 hop.
+  New `ranking.hop_decay`, `ranking.graph_beam`.
+- **Learned pair co-activation** (schema v11, `node_coactivation`). A third retrieval
+  channel with its own table, its own auto-ramp, and a bounded update
+  `w <- w + eta*(1-w)` that saturates instead of running away. Deposits are gated on
+  **confirmed use**, never co-retrieval. It is never folded into `edges.weight`,
+  which is asserted topology — merging a learned correction there would destroy the
+  told/inferred distinction.
+- **Extraction engines and an eval gate.** New `kindex.extractors` defines an
+  `Extractor` protocol with a shared `ExtractionResult`; `stage_candidates` is the
+  only sanctioned path from an extractor into storage and writes to
+  `capture_candidates`, never `nodes`/`edges`. New `kin extract eval|engines` scores
+  engines against the local corpus with a **two-part gate**: grounding precision as a
+  hallucination floor, title recall as the discriminator — either alone is gameable.
+  New optional `kindex[talon]` extra for LLM-free deterministic extraction, excluded
+  from `all` and degrading to keyword extraction with a warning when absent.
+- `kin doctor` now reports **column-level schema drift**, oversized nodes, and
+  silently-recovered failure counters.
+- `Store.bump_meta_counter`, `Store.schema_drift`.
+
+### Fixed
+- **The stigmergic pheromone channel was dead on every upgraded install.** The
+  `missed` column was added to the v7 `CREATE TABLE IF NOT EXISTS` after v7 shipped,
+  so any store that had already run v7 never received it and never would — while
+  `schema_version` still read current. `deposit_pheromone` raised
+  `no such column: missed`, the attention hook swallowed it with
+  `except Exception: pass`, and session state recorded the deposit as successful
+  anyway. Fixed by schema v10 (idempotent, atomic, `PRAGMA`-verified), a
+  **column-level** drift check (a table-existence check is blind to this failure
+  class), a logged and counted failure in place of the silent swallow, and a caller
+  that records only what the store accepted.
+- **Unbounded dream-cycle merge growth.** `merge_nodes` appended source content into
+  the target with no cap, and `content_overlap` compares only the first 500 chars —
+  where machine-generated files are identical. Minified symbols, one class defined in
+  twenty files, a vendored LICENSE and generated schemas are mutually similar by
+  construction, so each merge was a false positive that grew the target without
+  bound. Added size and absorption caps that **refuse rather than truncate**, with
+  refusals counted for `kin doctor`.
+- **LLM extraction was silently disabled on multi-key configs.** `extract.py` did a
+  bare `os.environ.get(config.llm.api_key_env)` while `llm.py` correctly parses the
+  comma-separated fallback list the config documents, so a config naming two env vars
+  matched nothing and fell back to keyword extraction forever. It also hardcoded the
+  Anthropic SDK while ignoring `llm.provider`. Both now delegate to `llm.py`.
+- `vector_search` accepts `min_similarity` and exposes `vec_similarity`.
+
+### Changed
+- SQLite schema v9 -> v11.
+- `similarity_from_distance` uses the L2 identity `cos = 1 - d^2/2`. `sqlite-vec`'s
+  `vec0` returns **L2 distance, not cosine**; the naive `1 - d` collapses the entire
+  useful range to zero and calibrates a floor that can never fire.
+
 ## [0.33.0] - 2026-08-24
 
 ### Added

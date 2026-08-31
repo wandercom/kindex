@@ -73,6 +73,40 @@ uses that trusted admission by default and is bounded by deterministic
 character accounting, with an optional tokenizer callback for provider-token
 guarantees.
 
+## Grounded Retrieval
+
+Vector search returns nearest neighbours for any query, so without a floor a
+question the graph knows nothing about still pulls real nodes into context.
+Kindex calibrates a similarity floor against the local corpus and reports a
+verdict with every result set: `grounded`, `weak`, `ungrounded`, or
+`uncalibrated`.
+
+```bash
+kin embed calibrate          # measure the null-query distribution, record the floor
+kin embed calibrate --show   # read the current record
+```
+
+The floor is an immutable versioned record keyed by `provider:model` carrying
+the corpus it was measured against, so a floor taken at low embedding coverage
+is detected as stale rather than trusted. Config holds policy only
+(`grounding.floor_percentile`, `grounding.enforce`), never the number.
+Enforcement is opt-in: shadow mode reports the verdict while every row still
+flows, because a miscalibrated floor produces silent false negatives, which are
+worse than the visible false positives it replaces.
+
+Agents should read an `ungrounded` verdict as "the graph does not know this"
+and say so, rather than synthesising an answer from loosely adjacent rows.
+
+## Extraction Engines
+
+Extraction is an input, never an authority: engine output is staged into the
+`capture_candidates` quarantine and never writes nodes or edges directly.
+`kin extract engines` lists what is available; `kin extract eval` scores engines
+against the local corpus behind a two-part gate (grounding precision as a
+hallucination floor, title recall as the discriminator). An optional LLM-free
+deterministic engine ships behind the `kindex[talon]` extra, excluded from
+`kindex[all]` and degrading to keyword extraction when absent.
+
 ## Client Setup
 
 ```bash
