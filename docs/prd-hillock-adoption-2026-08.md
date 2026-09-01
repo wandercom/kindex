@@ -1,6 +1,6 @@
 # Hillock adoption plan for Kindex
 
-**Status:** IMPLEMENTED on `feat/hillock-adoption` · **Date:** 2026-08-31 · **Baseline:** kindex 0.33.0 (`676214f`)
+**Status:** SHIPPED in v0.34.0 · **Date:** 2026-08-31 · **Baseline:** kindex 0.33.0 (`676214f`)
 **Subject:** [Hillock](https://github.com/roandejager/Hillock) v0.6.0 — TALON extraction, HYDRA gating, VSA hypervectors, Hebbian plasticity
 
 ---
@@ -51,6 +51,11 @@ left for a measured decision (see W2). Tests: **1,926 passing**.
 | W2 | Gate + boundary shipped; the 2.5 GB engine deliberately **not** built |
 | W5 panel models | Constrain → `claude-opus-5`; Simulacrum → sonnet-5/opus-5; retired pin removed |
 | W6 remote | Confirmed clean — nothing to resolve |
+
+Released as **v0.34.0**: PyPI, GitHub release, Pages mirror, kindex.tools, and the
+official MCP Registry all report 0.34.0. Schema v9 → v11 applies automatically on
+open; run `kin doctor` afterwards to confirm no drift, then `kin embed calibrate`
+once per embedding model.
 
 ### Four defects found along the way
 
