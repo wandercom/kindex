@@ -24,11 +24,36 @@ adversarial demolition and rates everything high, which would make the threshold
 meaningless. The prompt pins Sim to a default-silent, high-bar supervisor whose
 common answer is "nothing to flag" and who only speaks when something would
 MATERIALLY change the direction of the work.
+
+The review weighs four lenses — DIRECTION (is the work itself sound), ALIGNMENT
+(does it still serve what the USER actually asked, spirit over letter, a newer
+input can supersede an older one but an aside shouldn't redirect the whole plan),
+TRAJECTORY (if this continues, does it reach the goal or diverge; what are the
+side-effects; should the STRATEGY update), and ARCHITECTURE (judged against Pat
+Helland's doctrine — one authority per fact — with a calibration guardrail so it
+doesn't over-fire on mere layering).
+
+Effort is GRADUATED and self-calibrated by reading the window (Jeremy's
+incident-response rule: match spend to confirmed stakes, round up when unsure):
+
+  Tier 0  banter/small-talk  -> a cheap SQLite-only triage (_looks_trivial) skips
+                                it at enqueue; no memory/Sim/Advocate spend at all.
+  Tier 1  ordinary code/task -> the grounded single-persona review above, anchored
+                                on the session's stated focus (captured at enqueue
+                                so intent survives window-scroll).
+  Tier 2  high-impact moves  -> the review self-rates `stakes` and sets `escalate`;
+    (money, big workflow,       by default the note carries a light RECOMMENDATION
+     irreversible/architecture) to run a deeper review. Only when sim.advocate is
+                                enabled does it actually invoke ~/Code/advocate (the
+                                multi-persona engine incl. the Helland seat), verify
+                                the findings against the window (drop hallucinations),
+                                and fold the survivors in — gated + cooldown-capped.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -52,11 +77,136 @@ SIM_PENDING_META = "sim.pending"      # graded injections awaiting a cheap picku
 
 _TAIL_CHARS = 700  # the recent slice Sim is most likely reacting to (used for staleness)
 
+# ── Tier 0 triage: skip confident banter before it costs anything ────────────
+_TRIAGE_TAIL = 1200        # judge triviality on the recent tail, not the whole window
+_TRIVIAL_MAX_CHARS = 400   # a short tail with no work signal reads as banter
+
+# Concrete work signals: code, files, and the verbs of building/deciding/spending.
+# Presence of any of these in the recent tail means there is real work in flight —
+# never triage it away. Deliberately excludes soft words ("plan", "should") that
+# show up in banter too, so the skip stays conservative (round UP when unsure).
+_WORK_SIGNAL_RE = re.compile(
+    r"""(?ix)
+      ```                                          # fenced code
+    | \b(?:def|class|import|return|async|await|function|const|let|var)\b
+    | [\w./~-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|c|cpp|h|json|ya?ml|toml|md|sh|sql|html|css)\b
+    | (?:^|\s)/[\w./-]+                             # absolute paths
+    | \b(?:error|exception|traceback|failed|failing|bug|test|tests|deploy|
+          migrat|refactor|implement|build|compile|commit|merge|rebase|branch|
+          schema|database|query|api|endpoint|module|config|architect|
+          design|decision|spec|contract|workflow|budget|cost|spend|money|
+          payment|invoice|release|publish|delete|drop|rollback|revert)\w*
+    """,
+    re.VERBOSE,
+)
+
+# Confident small-talk markers: if a longer tail carries NO work signal but reads
+# like this, it is banter and can be skipped even mid-session.
+_BANTER_RE = re.compile(
+    r"(?i)\b(?:hi|hey|hello|yo|thanks|thank you|thx|cheers|lol|haha|"
+    r"good (?:morning|afternoon|evening|night)|how are you|nice|cool|awesome|"
+    r"sounds good|no worries|you're welcome|np|great job|well done)\b"
+)
+
+# Decisive / irreversible verbs. A terse approval of an expensive-to-reverse move
+# ("sure, ship it", "yeah just drop the table", "go ahead") carries no work-signal
+# token and reads like banter — but it is exactly a Tier-2 moment. If any of these
+# appear in the tail, NEVER triage the window away, regardless of length or chatter.
+_IRREVERSIBLE_RE = re.compile(
+    r"(?i)\b(?:ship it|ship|launch|deploy|release|publish|merge|push|"
+    r"drop|delete|remove|wipe|erase|purge|reset|overwrite|truncate|"
+    r"migrat\w*|rollback|revert|force|approve|sign[ -]?off|"
+    r"pay|purchase|buy|send it|go ahead|kick ?off|prod|production|"
+    r"terminate|tear ?down|nuke)\b"
+)
+
+
+def _looks_trivial(window: str) -> bool:
+    """True when the recent tail is confident banter with nothing at stake.
+
+    Conservative by design (Jeremy's graduated-response rule: round UP when unsure).
+    Skips only when there is no work signal, no decisive/irreversible verb, AND the
+    tail is either short or clearly small-talk; a long, ambiguous tail — or any tail
+    that names an expensive-to-reverse action — is reviewed, not skipped.
+    """
+    tail = (window or "").strip()[-_TRIAGE_TAIL:]
+    if not tail:
+        return True  # nothing to review
+    if _IRREVERSIBLE_RE.search(tail):
+        return False  # a decisive/irreversible move — never triage away, even if terse
+    if _WORK_SIGNAL_RE.search(tail):
+        return False  # real work in the recent tail — never triage away
+    if len(tail) < _TRIVIAL_MAX_CHARS:
+        return True  # short + no work signal = banter
+    return bool(_BANTER_RE.search(tail))  # long but chatty; otherwise review it
+
+
+def _capture_intent(store: "Store") -> str:
+    """Snapshot the active session's stated focus as an intent anchor.
+
+    Captured at ENQUEUE time (when this conversation is the one in flight) and
+    carried in the job, so the alignment lens still knows what the user set out to
+    do even after the original ask has scrolled out of the window. Point-in-time
+    input, not authority — the user's live inputs in the window can supersede it.
+    Fail-safe: returns '' on any error.
+    """
+    try:
+        from .sessions import get_active_tag
+
+        tag = get_active_tag(store)
+        if not tag:
+            return ""
+        extra = tag.get("extra") or {}
+        focus = (extra.get("focus") or "").strip()
+        segments = extra.get("segments") or []
+        if isinstance(segments, list) and segments:
+            latest = segments[-1] or {}
+            focus = (latest.get("focus") or focus).strip()
+        return focus[:500]
+    except Exception:
+        return ""
+
 
 def _now() -> str:
     from .store import _now as store_now
 
     return store_now()
+
+
+# ── observability: count the SILENT suppression paths ───────────────────────
+# The expansion adds paths that suppress without a user-visible symptom (triage
+# skips, sub-threshold reviews, verify drops, focus-stale drops, escalation
+# failures). Without a counter, "the feature went quiet for the wrong reason" is
+# invisible. These are cheap best-effort tallies surfaced by `kin sim status`.
+
+_SIM_COUNTERS_META = "sim.counters"
+_SIM_COUNTER_KEYS = (
+    "triaged_skips", "sub_threshold", "verify_drops",
+    "focus_stale_drops", "escalation_failures",
+)
+
+
+def _bump_counter(store: "Store", key: str, n: int = 1) -> None:
+    try:
+        raw = store.get_meta(_SIM_COUNTERS_META)
+        data = json.loads(raw) if raw else {}
+        if not isinstance(data, dict):
+            data = {}
+        data[key] = int(data.get(key, 0)) + n
+        store.set_meta(_SIM_COUNTERS_META, json.dumps(data))
+    except Exception:
+        pass
+
+
+def sim_counters(store: "Store") -> dict:
+    try:
+        raw = store.get_meta(_SIM_COUNTERS_META)
+        data = json.loads(raw) if raw else {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    return {k: int(data.get(k, 0)) for k in _SIM_COUNTER_KEYS}
 
 
 # ── runtime enable/disable (the `kin sim` kill switch) ──────────────────────
@@ -102,8 +252,16 @@ def sim_status(store: "Store", config: Config) -> dict:
         "model": config.sim.model or config.llm.model,
         "command": config.sim.command or "(LLM supervisor)",
         "guidance": get_sim_guidance(store) or "(none)",
+        "triage_banter": bool(config.sim.triage_banter),
+        "advocate": (
+            "on" if (config.sim.advocate.enabled and config.sim.advocate.command)
+            else "recommend-only"
+        ),
         "pending": len(_read_meta_list(store, SIM_PENDING_META)),
         "queued": len(_read_meta_list(store, SIM_QUEUE_META)),
+        # Visibility into the silent-suppression paths the expansion added, so a
+        # feature that has gone quiet for the WRONG reason is observable.
+        "suppressed": sim_counters(store),
     }
 
 
@@ -206,7 +364,13 @@ def build_sim_grounding(store: "Store", window: str, config: Config) -> str:
     return "\n".join(parts)
 
 
-def build_supervisor_prompt(window: str, max_chars: int, guidance: str = "", grounding: str = "") -> str:
+def build_supervisor_prompt(
+    window: str,
+    max_chars: int,
+    guidance: str = "",
+    grounding: str = "",
+    intent: str = "",
+) -> str:
     guidance_block = ""
     if guidance.strip():
         guidance_block = (
@@ -224,16 +388,31 @@ def build_supervisor_prompt(window: str, max_chars: int, guidance: str = "", gro
             "decision being contradicted — not to nitpick. Same bar: stay silent unless it "
             f"would materially change the direction.\n{grounding.strip()}\n"
         )
-    return f"""You are glancing in as a supervisor on an IN-PROGRESS work session between an agent and a user. This is low-stakes: the work is unfinished and the people are competent. Your DEFAULT action is to say NOTHING — most windows deserve silence.
-{guidance_block}{grounding_block}
+    intent_block = ""
+    if intent.strip():
+        intent_block = (
+            "\nWHAT THE USER SET OUT TO DO (the session's stated focus — an intent anchor that "
+            "may have scrolled out of the window). The user's ACTUAL inputs in the window are "
+            "authoritative and a newer instruction can supersede this; use it only to judge "
+            f"whether the work still serves the user's real goal.\n  >>> {intent.strip()}\n"
+        )
+    return f"""You are glancing in as a supervisor on an IN-PROGRESS work session between an agent and a user. This is low-stakes by default: the work is unfinished and the people are competent. Your DEFAULT action is to say NOTHING — most windows deserve silence.
+{guidance_block}{grounding_block}{intent_block}
+The single most valuable thing you can catch is an agent COMPETENTLY DOING THE WRONG THING — executing well, but on a goal that has drifted from what the user actually wants, or heading somewhere the user won't like. Agents lose track of the goal and leap from a conclusion straight to implementation; your job is to make them PAUSE AND CONSIDER, not to hand down verdicts.
 
-Speak ONLY if you notice something that would MATERIALLY CHANGE THE DIRECTION of the work:
-  - a frame being locked in that shouldn't be,
-  - a claim about to be committed that is wrong,
-  - a contradiction the work hasn't noticed,
-  - a materially better path that isn't being considered.
+CALIBRATE YOUR SCRUTINY TO WHAT IS ACTUALLY AT STAKE — decide this by reading the window:
+  - Light back-and-forth, banter, or small talk: nothing is at stake. Return rating 0.0 and an empty note.
+  - Ordinary code or task work: engage normally and hold it to the bar below.
+  - A heavy, hard-to-reverse, or expensive move (spending money, kicking off a large workflow, a migration, a public or irreversible action, a decision costly to unwind): look hardest here, and route it to a deeper review (see ESCALATE).
 
-Do NOT nitpick wording, demand definitions for their own sake, or manufacture criticism to seem useful. Comment on the DIRECTION of the work, not any single sentence — your note may be read several messages later, so it must survive the conversation moving on.
+Speak ONLY if something would MATERIALLY CHANGE THE DIRECTION of the work. Weigh three lenses; if you speak, your rating is the rating of the SINGLE MOST CONSEQUENTIAL lens — do NOT average across them:
+  DIRECTION — the work itself: a claim about to be committed that is wrong, a contradiction the work hasn't noticed, a materially better path not being considered.
+  ALIGNMENT — does the work still serve what the USER actually asked? Judge intent and goals, not the letter: a newer instruction can supersede an older one, but tell a real course-change from a passing aside that shouldn't redirect the whole plan. Ask WHY the user wants this, and whether the current actions still serve that why. Hold this lens to a HIGHER bar before firing: a wrong "you've drifted" note is corrosive — it makes a correct read look doubtful — so fire it only when you are fairly sure the agent has actually left the user's goal.
+  TRAJECTORY — if this course continues, where does it land? Will it actually reach the goal, or is it divergent or counter-productive? Name the after-effects, side-effects, and implications; if they are undesired, the STRATEGY — not just the next step — should change.
+
+ESCALATE is a TRIP-WIRE you trip, not a verdict you render. When a decision that is EXPENSIVE TO REVERSE is being locked in — an entity/identity/boundary choice, a wire format, a migration, a spend, a large workflow — you usually CANNOT judge it from this window alone, because the constraints that make it right or wrong (scale, latency, lifetime, what is already committed elsewhere) are not in front of you. Do NOT render the architectural verdict yourself. Instead set stakes "high" and escalate true and name what a fully-framed deeper review — the Advocate panel including the Pat Helland architecture seat — should scrutinize. Detecting that an expensive-to-reverse decision is in play is your job; judging it is theirs.
+
+Do NOT nitpick wording, demand definitions for their own sake, or manufacture criticism to seem useful. Comment on the DIRECTION of the work, not any single sentence — your note may be read several messages later, so it must survive the conversation moving on. Whatever you say is a CONSIDERATION for the agent to weigh, not a fact — it may be wrong.
 
 Rate how strongly this warrants interrupting the people:
   0.0 = nothing to flag (the common case — return this and an empty note)
@@ -241,11 +420,17 @@ Rate how strongly this warrants interrupting the people:
   0.8 = would likely change their next move
   1.0 = they are about to make a real mistake; speak now
 
+Also report:
+  - "dimension": the lens that drove your rating — "direction", "alignment", "trajectory", or "" if nothing. Use "reversibility" only when you are escalating.
+  - "stakes": how consequential the current move is — "low", "medium", or "high" ("high" = money, a large workflow, or an expensive-to-reverse decision).
+  - "escalate": true ONLY to route an expensive-to-reverse decision to the deeper Advocate/Helland review — never to render your own architectural verdict.
+  - "escalate_reason": one phrase naming what that deeper review should scrutinize; "" if not escalating.
+
 CONVERSATION WINDOW:
 {(window or "")[:max_chars]}
 
 Return JSON only:
-{{"rating": 0.0, "note": "<one or two sentences, directional; empty if rating is low>", "basis": "<what in the window triggered this, brief>"}}
+{{"rating": 0.0, "note": "<one or two sentences, directional; empty if rating is low>", "basis": "<what in the window triggered this, brief>", "dimension": "", "stakes": "low", "escalate": false, "escalate_reason": ""}}
 """
 
 
@@ -256,6 +441,10 @@ class _SimResult:
     rating: float
     note: str
     basis: str
+    dimension: str = ""
+    stakes: str = "low"
+    escalate: bool = False
+    escalate_reason: str = ""
     cost: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -276,6 +465,7 @@ def call_sim(
     client: Any | None = None,
     guidance: str = "",
     grounding: str = "",
+    intent: str = "",
 ) -> tuple[_SimResult | None, dict]:
     """Run one supervisory review. Returns (result, accounting).
 
@@ -286,7 +476,9 @@ def call_sim(
     """
     sc = config.sim
     model = sc.model or config.llm.model
-    prompt = build_supervisor_prompt(window, sc.window_chars, guidance=guidance, grounding=grounding)
+    prompt = build_supervisor_prompt(
+        window, sc.window_chars, guidance=guidance, grounding=grounding, intent=intent
+    )
 
     if not ledger.can_spend():
         return None, {"status": "over_global_budget"}
@@ -369,7 +561,17 @@ def _result_from_parsed(parsed: dict[str, Any]) -> _SimResult | None:
         rating = 0.0
     note = str(parsed.get("note") or "").strip()
     basis = str(parsed.get("basis") or "").strip()
-    return _SimResult(rating=rating, note=note, basis=basis)
+    dimension = str(parsed.get("dimension") or "").strip().lower()
+    stakes = str(parsed.get("stakes") or "low").strip().lower()
+    if stakes not in ("low", "medium", "high"):
+        stakes = "low"
+    escalate = bool(parsed.get("escalate", False)) and stakes == "high"
+    escalate_reason = str(parsed.get("escalate_reason") or "").strip()
+    return _SimResult(
+        rating=rating, note=note, basis=basis,
+        dimension=dimension, stakes=stakes,
+        escalate=escalate, escalate_reason=escalate_reason,
+    )
 
 
 # ── queue (enqueue cheap, drain in daemon) ──────────────────────────────────
@@ -402,6 +604,11 @@ def enqueue_sim_review(
     interval = max(1, int(config.sim.tick_interval or 1))
     if tick % interval != 0:
         return False
+    # Tier 0: confident banter is skipped before it costs anything (round UP when
+    # unsure — only a confidently-trivial window is dropped).
+    if config.sim.triage_banter and _looks_trivial(window):
+        _bump_counter(store, "triaged_skips")
+        return False
 
     queue = [j for j in _read_meta_list(store, SIM_QUEUE_META)
              if j.get("conversation_id") != conversation_id]
@@ -409,6 +616,7 @@ def enqueue_sim_review(
         "conversation_id": conversation_id,
         "window": window[-config.sim.window_chars:],
         "fingerprint": _tail_fingerprint(window),
+        "intent": _capture_intent(store),
         "tick": tick,
         "at": _now(),
     })
@@ -456,8 +664,9 @@ def drain_sim_queue(
         if not conv or not window.strip():
             continue  # nothing to grade — drop, don't wedge the queue
         grounding = build_sim_grounding(store, window, config)
+        intent = job.get("intent") or ""
         result, acct = call_sim(config, ledger, window, conv, client=client,
-                                guidance=guidance, grounding=grounding)
+                                guidance=guidance, grounding=grounding, intent=intent)
         if acct.get("status") in (
             "over_global_budget", "llm_unavailable",
             "estimate_exceeds_review_budget", "estimate_exceeds_conversation_budget",
@@ -466,16 +675,41 @@ def drain_sim_queue(
             continue
         reviewed += 1
         if result and result.note and result.rating >= config.sim.threshold:
-            pending[conv] = {
+            item = {
                 "conversation_id": conv,
                 "note": result.note,
                 "basis": result.basis,
                 "rating": round(result.rating, 3),
+                "dimension": result.dimension,
+                "stakes": result.stakes,
+                "escalate": result.escalate,
+                "escalate_reason": result.escalate_reason,
+                "intent": intent,  # enqueue-time goal, for the focus-staleness drop at pickup
                 "fingerprint": job.get("fingerprint") or [],
                 "tick": job.get("tick", 0),
                 "at": _now(),
             }
+            # Tier 2: a high-stakes escalation may run the deeper Advocate/Helland
+            # review (gated + verified). Off by default → ran=False → the light
+            # recommendation path in pop_pending_sim_injection handles it instead.
+            if result.escalate and _advocate_gate_open(store, config, conv, job.get("tick", 0)):
+                ran, survivors = maybe_escalate_to_advocate(
+                    store, config, ledger, window, grounding, intent, result, conv,
+                    client=client,
+                )
+                # Cooldown advances whenever Advocate actually RAN — a run that then
+                # yields no survivors (verify unavailable or nothing held up) must NOT
+                # re-pay for the same expensive call on the next high-stakes tick.
+                if ran:
+                    _mark_advocate_run(store, conv, int(job.get("tick", 0)))
+                    if survivors:
+                        item["advocate"] = survivors
+                    else:
+                        _bump_counter(store, "escalation_failures")
+            pending[conv] = item
             flagged += 1
+        elif result and (not result.note or result.rating < config.sim.threshold):
+            _bump_counter(store, "sub_threshold")
 
     try:
         store.set_meta(SIM_QUEUE_META, json.dumps(remaining))
@@ -486,7 +720,339 @@ def drain_sim_queue(
             "pending": len(pending)}
 
 
+# ── Tier 2: deep escalation to Advocate (opt-in, gated, verified) ───────────
+#
+# The default path is LIGHT: a high-stakes review sets `escalate` and the note
+# carries a recommendation. Only when sim.advocate.enabled is turned on does a
+# high-stakes escalation actually invoke ~/Code/advocate (the multi-persona
+# adversarial engine, including the Helland seat). Because Advocate is multi-call,
+# its findings are run through an adversarial verify pass before surfacing — the
+# 2026-06-09 head-to-head experiment showed an unverified multi-call path smuggles
+# in confident hallucinations the worth-gate misses.
+
+_SIM_ADVOCATE_META = "sim.advocate.last"  # {conversation_id: tick} cooldown ledger
+
+
+def _advocate_last_ticks(store: "Store") -> dict[str, int]:
+    try:
+        raw = store.get_meta(_SIM_ADVOCATE_META)
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _advocate_gate_open(store: "Store", config: Config, conversation_id: str, tick: int) -> bool:
+    """True when a deep escalation is permitted: enabled, wired, and off cooldown."""
+    ac = config.sim.advocate
+    if not ac.enabled or not ac.command or not conversation_id:
+        return False
+    last = _advocate_last_ticks(store).get(conversation_id)
+    if last is not None and int(tick) - int(last) < ac.cooldown_ticks:
+        return False
+    return True
+
+
+def _mark_advocate_run(store: "Store", conversation_id: str, tick: int) -> None:
+    try:
+        ledger = _advocate_last_ticks(store)
+        ledger[conversation_id] = int(tick)
+        # keep the cooldown ledger bounded
+        if len(ledger) > 50:
+            ledger = dict(sorted(ledger.items(), key=lambda kv: kv[1])[-50:])
+        store.set_meta(_SIM_ADVOCATE_META, json.dumps(ledger))
+    except Exception:
+        pass
+
+
+def build_advocate_prompt(window: str, grounding: str, intent: str, result: _SimResult) -> str:
+    """The brief handed to Advocate for a deep architectural review. Ships the FULL
+    frame (window + kindex grounding + intent + what Sim flagged) so the reviewers
+    are never context-starved — the root cause of the WanderOTA over-fire — and
+    carries the Helland calibration guardrail so the Helland seat does not treat
+    every service that touches a value as a claimant."""
+    parts = [
+        "Deep adversarial review requested by the supervisor because this looks "
+        "high-stakes and hard to reverse. Scrutinize the DIRECTION being locked in.",
+        f"\nWHAT THE SUPERVISOR FLAGGED: {result.note}",
+    ]
+    if result.escalate_reason:
+        parts.append(f"WHAT A DEEPER REVIEW SHOULD SCRUTINIZE: {result.escalate_reason}")
+    if intent.strip():
+        parts.append(f"\nWHAT THE USER SET OUT TO DO: {intent.strip()}")
+    if grounding.strip():
+        parts.append(f"\nWHAT KINDEX ALREADY KNOWS:\n{grounding.strip()}")
+    parts.append(
+        "\nARCHITECTURAL STANDARD: Pat Helland's doctrine — one authority per fact, "
+        "references point inward, reconcile in settlement. CALIBRATE: 'one authority "
+        "per fact' is a forcing function, not a generative principle; it constrains "
+        "WHO OWNS a fact, not what counts as one fact versus two. A service that USES "
+        "a value to compute is not a claimant on it. Flag genuine two-owner / unnamed-"
+        "authority problems, not mere layering."
+    )
+    parts.append(f"\nCONVERSATION WINDOW:\n{window}")
+    return "\n".join(parts)
+
+
+_ADVOCATE_DROP_SEVERITIES = {"low", "info"}  # keep only what could change direction
+
+
+def _parse_advocate_findings(text: str) -> list[str]:
+    """Pull short finding strings out of Advocate's JSON output.
+
+    Matches the REAL ~/Code/advocate schema (verified 2026-09-02): `advocate
+    review -o <file>` writes a full Review model dump — findings are NESTED under
+    `persona_reports[].findings[]`, each {persona, severity, dimension, title,
+    detail, evidence, recommendation}. Low/info findings are dropped (they don't
+    clear the "materially change direction" bar). Also accepts the simpler shapes
+    (a bare list, or {"findings": [...]}) so a wrapper can pre-flatten if it wants.
+
+    Robust to a leading banner (the wrapper is expected to emit JSON only, but the
+    tool's human report can leak in): if a straight parse fails, retry on the
+    substring from the first '{' to the last '}'. Returns [] on anything
+    unparseable — fail-closed, never surface garbage."""
+    data = _loads_lenient(text)
+    if data is None:
+        return []
+
+    def _fmt(obj: dict) -> str:
+        sev = str(obj.get("severity") or "").strip().lower()
+        if sev in _ADVOCATE_DROP_SEVERITIES:
+            return ""
+        persona = str(obj.get("persona") or "").strip()
+        title = str(
+            obj.get("title") or obj.get("summary")
+            or obj.get("detail") or obj.get("finding") or obj.get("message") or ""
+        ).strip()
+        if not title:
+            return ""
+        label = " · ".join(x for x in (sev, persona) if x)
+        return (f"[{label}] {title}" if label else title)[:240]
+
+    out: list[str] = []
+
+    # Real Advocate Review: dig persona_reports[].findings[].
+    if isinstance(data, dict) and isinstance(data.get("persona_reports"), list):
+        for report in data["persona_reports"]:
+            if not isinstance(report, dict):
+                continue
+            for f in report.get("findings") or []:
+                if isinstance(f, dict):
+                    s = _fmt(f)
+                    if s:
+                        out.append(s)
+        return out
+
+    # Simpler shapes: {"findings": [...]} / {"results": [...]} / a bare list.
+    if isinstance(data, dict):
+        data = data.get("findings") or data.get("results") or []
+    if not isinstance(data, list):
+        return []
+    for item in data:
+        if isinstance(item, str):
+            s = item.strip()[:240]
+        elif isinstance(item, dict):
+            s = _fmt(item)
+        else:
+            s = ""
+        if s:
+            out.append(s)
+    return out
+
+
+def _loads_lenient(text: str) -> Any:
+    """json.loads, falling back to the first '{'..last '}' slice if a banner leaked
+    in ahead of the JSON. Returns None on failure."""
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def _normalize(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _verify_findings(
+    config: Config,
+    ledger: BudgetLedger,
+    window: str,
+    grounding: str,
+    findings: list[str],
+    conversation_id: str,
+    *,
+    client: Any | None = None,
+    store: "Store | None" = None,
+) -> list[str]:
+    """Adversarial verify pass with a GROUNDING check, not a vibe check.
+
+    The verifier must, for each finding it keeps, cite a verbatim QUOTE from the
+    conversation window that supports it; we mechanically drop any kept finding
+    whose quote does not actually appear in the window. This is the answer to the
+    "verify launders authority" failure — a second skeptical LLM is just another
+    generator, so we require it to point at evidence and we check the citation.
+
+    One batched LLM call. Fail-CLOSED: if verification can't run, return [] rather
+    than surface unverified claims."""
+    if not findings:
+        return []
+    if not ledger.can_spend():
+        return []
+    sc = config.sim
+    model = sc.model or config.llm.model
+    numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(findings))
+    prompt = (
+        "You are verifying findings from a deep review before they interrupt the "
+        "people. For EACH finding, decide whether it genuinely holds against the "
+        "conversation and the known context below — a real problem in THIS work, not "
+        "a plausible-sounding generic concern and not a hallucination. Be skeptical; "
+        "when a finding is not clearly supported, DROP it. To KEEP a finding you must "
+        "cite a short VERBATIM quote copied from the CONVERSATION WINDOW that "
+        "demonstrates the problem — if you cannot quote the window, drop it.\n\n"
+        f"KNOWN CONTEXT:\n{grounding.strip() or '(none)'}\n\n"
+        f"CONVERSATION WINDOW:\n{window[:sc.window_chars]}\n\n"
+        f"FINDINGS:\n{numbered}\n\n"
+        'Return JSON only: {"keep": [{"i": <finding index>, '
+        '"quote": "<verbatim span copied from the window>"}]}'
+    )
+    if client is None:
+        from .llm import get_client
+
+        client = get_client(config)
+    if client is None:
+        return []
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=sc.max_output_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        from .llm import calculate_cost
+
+        cost = calculate_cost(model, response.usage)
+        ledger.record(
+            cost["amount"], model=model, purpose=SIM_PURPOSE,
+            tokens_in=cost["tokens_in"], tokens_out=cost["tokens_out"],
+            cache_creation_tokens=cost.get("cache_creation_tokens", 0),
+            cache_read_tokens=cost.get("cache_read_tokens", 0),
+            conversation_id=conversation_id, estimate=0.0,
+        )
+        parsed = _parse_sim(response.content[0].text)
+    except Exception:
+        return []
+    keep = parsed.get("keep")
+    if not isinstance(keep, list):
+        return []
+    win_norm = _normalize(window)
+    survivors: list[str] = []
+    for entry in keep:
+        # Accept the grounded shape {"i","quote"}; tolerate a bare index too, but a
+        # bare index has no citation to check, so it is dropped (fail-closed).
+        if not isinstance(entry, dict):
+            continue
+        try:
+            idx = int(entry.get("i"))
+            finding = findings[idx]
+        except (ValueError, TypeError, IndexError):
+            continue
+        quote = _normalize(str(entry.get("quote") or ""))
+        if len(quote) >= 8 and quote in win_norm:
+            survivors.append(finding)
+    dropped = len(findings) - len(survivors)
+    if dropped > 0 and store is not None:
+        _bump_counter(store, "verify_drops", dropped)
+    return survivors
+
+
+def maybe_escalate_to_advocate(
+    store: "Store",
+    config: Config,
+    ledger: BudgetLedger,
+    window: str,
+    grounding: str,
+    intent: str,
+    result: _SimResult,
+    conversation_id: str,
+    *,
+    client: Any | None = None,
+) -> tuple[bool, list[str]]:
+    """Run the deep Advocate/Helland review and return (ran, verified_survivors).
+
+    `ran` is True once the Advocate subprocess actually executed (and thus spent on
+    its persona calls), so the caller can advance the cooldown and NOT re-pay for
+    the same expensive call on the next high-stakes tick — even when verification
+    then drops everything. `ran` is False on the light/no-op paths (disabled,
+    unaffordable, launch error) where nothing was spent and a retry is fine.
+
+    Admission gate: `max_cost` is enforced as "don't START unless today's remaining
+    budget covers a worst-case run" — it is NOT a hard cap on the opaque subprocess
+    (we only learn Advocate's real cost after it returns). The global BudgetLedger
+    is the one authority on whether there is money to spend. Never raises.
+    """
+    ac = config.sim.advocate
+    if not ac.command:
+        return False, []
+    # Admission gate against the one spend authority: don't start a run we can't
+    # afford at worst case. (Post-hoc accounting reconciles the real figure.)
+    if not ledger.can_spend() or ledger.remaining_today < ac.max_cost:
+        return False, []
+    prompt = build_advocate_prompt(window, grounding, intent, result)
+    try:
+        import os
+
+        proc = subprocess.run(
+            os.path.expanduser(ac.command),
+            shell=True, input=prompt, capture_output=True, text=True,
+            timeout=ac.timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False, []  # launch/timeout error — treat as no spend, allow retry
+    # From here Advocate executed and spent on its persona calls: ran=True even if
+    # the exit code is non-zero (partial persona failure still writes findings) or
+    # verification later drops everything.
+    findings = _parse_advocate_findings(proc.stdout)
+    if not findings:
+        return True, []
+    survivors = _verify_findings(
+        config, ledger, window, grounding, findings, conversation_id,
+        client=client, store=store,
+    )
+    return True, survivors[: ac.max_findings]
+
+
 # ── pickup (cheap, on the tick) ─────────────────────────────────────────────
+
+def _compose_sim_message(mine: dict) -> str:
+    """Build the surfaced message: the directional note, plus — when the review was
+    high-stakes — either the verified Advocate survivors (deep path ran) or a light
+    recommendation to run one (default path). The pure note stays untouched for any
+    caller that just wants the signal."""
+    note = str(mine.get("note") or "").strip()
+    advocate = mine.get("advocate") or []
+    if isinstance(advocate, list) and advocate:
+        # Provenance intact and framed as claims to check, not confirmed facts —
+        # so a "verified" finding doesn't launder its way past the agent's judgment.
+        lines = "\n".join(f"  - {f}" for f in advocate)
+        return (
+            f"{note}\n\nAdvocate (incl. Helland seat) raised these to CHECK against "
+            f"the actual design — claims, not confirmed facts:\n{lines}"
+        )
+    if mine.get("escalate") and str(mine.get("stakes")) == "high":
+        reason = str(mine.get("escalate_reason") or "").strip()
+        tail = f" ({reason})" if reason else ""
+        return (
+            f"{note}\n[Looks expensive to reverse{tail} — consider an Advocate/Helland "
+            f"review before you commit to it.]"
+        )
+    return note
+
 
 def pop_pending_sim_injection(
     store: "Store",
@@ -526,10 +1092,21 @@ def pop_pending_sim_injection(
     if overlap < config.sim.min_overlap:
         return None
 
+    # Focus-staleness drop: if the user's stated goal changed between enqueue and
+    # now, an alignment note judged against the DEAD goal would fight the user's
+    # (correct, newly-redirected) work. The note was reasoned from a superseded
+    # intent — drop it rather than surface a directive pointing back at the old goal.
+    enqueue_intent = _normalize(str(mine.get("intent") or ""))
+    if enqueue_intent:
+        current_intent = _normalize(_capture_intent(store))
+        if current_intent and current_intent != enqueue_intent:
+            _bump_counter(store, "focus_stale_drops")
+            return None
+
     injection = AttentionInjection(
         id=f"sim:{conversation_id}",
         title="Sim (supervisory)",
-        message=mine.get("note", ""),
+        message=_compose_sim_message(mine),
         reason=mine.get("basis", ""),
         confidence=float(mine.get("rating", 0.0)),
     )
@@ -570,13 +1147,16 @@ def format_sim_injection(
         return []
     note = injection.message.strip()
     if display == "quiet":
-        # Agent-facing and invisible to the user. The agent routes it: act on it
-        # silently if it can, and surface it to the user ONLY if it genuinely
+        # Agent-facing and invisible to the user. Framed as a CONSIDERATION to weigh
+        # (a guess that may be wrong), not a verdict — so it prompts the agent to
+        # pause and consider rather than obey. The agent routes it: act on it
+        # silently if it holds up, and surface it to the user ONLY if it genuinely
         # needs their decision.
         return [
-            "[SIM — supervisory note for you, the agent; the user does NOT see this. "
-            "If you can act on it yourself, do so silently. Surface it to the user "
-            f"only if it genuinely needs their judgment.] {note}"
+            "[SIM — a supervisory consideration for you, the agent; the user does NOT "
+            "see this. It's a guess and may be wrong — weigh it, don't obey it. If you "
+            "can act on it yourself, do so silently. Surface it to the user only if it "
+            f"genuinely needs their judgment.] {note}"
         ]
     if display == "minimal":
         return [f"Sim: {note}"]

@@ -440,6 +440,27 @@ def test_kin_index_auto_registers_merge_driver(tmp_path):
     subprocess.run(["which", "git"], capture_output=True).returncode != 0,
     reason="git not available",
 )
+def test_kin_index_anchors_at_git_root_from_subdirectory(tmp_path):
+    """`kin index` run from a subdirectory must write ONE `.kin/` at the git root,
+    not in the cwd subdir — kindex actively finds the repo being worked on."""
+    repo = tmp_path / "repo"; _init_repo(repo)
+    data = tmp_path / "data"
+    subdir = repo / "packages" / "deep"
+    subdir.mkdir(parents=True)
+    r = subprocess.run(
+        [sys.executable, "-m", "kindex.cli", "index",
+         "--data-dir", str(data), "--no-merge-driver"],
+        cwd=str(subdir), capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    assert (repo / ".kin" / "index.json").exists()      # anchored at the git root
+    assert not (subdir / ".kin").exists()               # NOT in the cwd subdir
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "git"], capture_output=True).returncode != 0,
+    reason="git not available",
+)
 def test_kin_index_respects_no_merge_driver_flag(tmp_path):
     repo = tmp_path / "repo"; _init_repo(repo)
     data = tmp_path / "data"

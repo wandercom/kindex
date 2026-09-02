@@ -197,6 +197,62 @@ def test_export_understand_anything_normalizes_absolute_provenance(tmp_path):
     assert [n["filePath"] for n in graph["nodes"]] == ["src/app.py:22"]
 
 
+def test_export_recovers_in_repo_absolute_and_never_emits_absolute(tmp_path):
+    """The Wander bug: nodes with an absolute prov_source INSIDE the repo were
+    either leaked as absolute (old serializer) or dropped (no root). Given the
+    git root, they must be RECOVERED as repo-relative — and no emitted filePath
+    may ever be absolute."""
+    cfg = Config(data_dir=str(tmp_path / "data"))
+    store = Store(cfg)
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    try:
+        # in-repo absolute provenance (the 294-node Wander pattern) -> recovered
+        store.add_node(
+            "InRepo", node_id="code-sym-demo-in", node_type="concept",
+            domains=["code"], prov_source=f"{repo}/src/a.py:1",
+            extra={"repo_root": str(repo), "kind": "class"},
+        )
+        # absolute provenance OUTSIDE the repo -> dropped, never leaked
+        store.add_node(
+            "OutRepo", node_id="code-sym-demo-out", node_type="concept",
+            domains=["code"], prov_source=f"{tmp_path}/other/b.py:2",
+            extra={"repo_root": str(repo), "kind": "class"},
+        )
+        # already-relative, no repo_root -> a portable node, kept under the filter
+        store.add_node(
+            "Rel", node_id="code-mod-demo-rel", node_type="artifact",
+            domains=["code"], extra={"relative_path": "src/c.py"},
+        )
+        graph = export_understand_anything(store, directory=repo)
+    finally:
+        store.close()
+
+    paths = [n["filePath"] for n in graph["nodes"]]
+    assert all(not p.startswith("/") for p in paths), paths       # THE INVARIANT
+    assert "src/a.py:1" in paths      # in-repo absolute recovered as repo-relative
+    assert "src/c.py" in paths        # portable relative node kept under root filter
+    assert not any("other" in p for p in paths)   # out-of-repo absolute dropped
+
+
+def test_export_keeps_portable_relative_node_under_root_filter(tmp_path):
+    """A node already in portable form (relative_path, no repo_root) must not be
+    dropped just because a root filter is active — it carries no evidence of
+    belonging to another repo and is already the exact shape we require."""
+    cfg = Config(data_dir=str(tmp_path / "data"))
+    store = Store(cfg)
+    repo = tmp_path / "repo"
+    try:
+        store.add_node(
+            "App", node_id="code-mod-demo-app", node_type="artifact",
+            domains=["code"], extra={"relative_path": "src/app.py"},  # no repo_root
+        )
+        graph = export_understand_anything(store, directory=repo)
+    finally:
+        store.close()
+    assert [n["filePath"] for n in graph["nodes"]] == ["src/app.py"]
+
+
 def test_export_understand_anything_omits_unresolved_absolute_provenance(tmp_path):
     cfg = Config(data_dir=str(tmp_path / "data"))
     store = Store(cfg)

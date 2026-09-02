@@ -7,44 +7,10 @@
       "Python"
     ],
     "frameworks": [],
-    "analyzedAt": "2026-08-24T03:22:13-05:00",
-    "gitCommitHash": "676214ff81d0089baad53364e5d3facc3b232d26"
+    "analyzedAt": "2026-08-31T19:20:24-05:00",
+    "gitCommitHash": "7089ce594c8d996d5b88d0f3bb2f2132536452a5"
   },
   "nodes": [
-    {
-      "id": "code-mod-kindex-a31c7ed5d35f",
-      "type": "file",
-      "name": "conftest.py",
-      "filePath": "conftest.py",
-      "summary": "Language: Python | Path: conftest.py | ~23 lines ## Functions - pytest_configure(config)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-94e276789253",
-      "type": "file",
-      "name": "examples/adapter-template/kindex_adapter_csv.py",
-      "filePath": "examples/adapter-template/kindex_adapter_csv.py",
-      "summary": "Language: Python | Path: examples/adapter-template/kindex_adapter_csv.py | ~96 lines ## Classes - CSVAdapter",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
     {
       "id": "code-mod-kindex-c4522229e518",
       "type": "file",
@@ -73,23 +39,6 @@
         "python"
       ],
       "complexity": 12,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-7c7bbd6990da",
-      "type": "file",
-      "name": "src/kindex/adapters/__init__.py",
-      "filePath": "src/kindex/adapters/__init__.py",
-      "summary": "Language: Python | Path: src/kindex/adapters/__init__.py | ~23 lines",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -175,23 +124,6 @@
         "python"
       ],
       "complexity": 36,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-42ecd8f0766c",
-      "type": "file",
-      "name": "src/kindex/adapters/files.py",
-      "filePath": "src/kindex/adapters/files.py",
-      "summary": "Language: Python | Path: src/kindex/adapters/files.py | ~177 lines ## Classes - FilesAdapter",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 4,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -294,40 +226,6 @@
         "python"
       ],
       "complexity": 6,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-05f34125a9ba",
-      "type": "file",
-      "name": "src/kindex/adapters/sessions.py",
-      "filePath": "src/kindex/adapters/sessions.py",
-      "summary": "Language: Python | Path: src/kindex/adapters/sessions.py | ~36 lines ## Classes - SessionsAdapter",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-8a94356fd973",
-      "type": "file",
-      "name": "src/kindex/analytics.py",
-      "filePath": "src/kindex/analytics.py",
-      "summary": "Language: Python | Path: src/kindex/analytics.py | ~79 lines ## Functions - activity_heatmap(config: \"Config\", days: int = 90) -> dict",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 3,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -760,23 +658,6 @@
       }
     },
     {
-      "id": "code-sym-kindex-e7d77ef2ec54",
-      "type": "class",
-      "name": "CaptureConfig",
-      "filePath": "src/kindex/config.py",
-      "summary": "class CaptureConfig(BaseModel) (src/kindex/config.py:317)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
       "id": "code-sym-kindex-fe4d5554b184",
       "type": "class",
       "name": "ChannelsConfig",
@@ -1151,23 +1032,6 @@
       }
     },
     {
-      "id": "code-sym-kindex-3da712cdf5b5",
-      "type": "class",
-      "name": "MemoryUnavailableError",
-      "filePath": "src/kindex/mcp_server.py",
-      "summary": "class MemoryUnavailableError(RuntimeError) (src/kindex/mcp_server.py:128)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
       "id": "code-mod-kindex-f9986c492ab2",
       "type": "file",
       "name": "src/kindex/mcp_server.py",
@@ -1224,23 +1088,6 @@
       "name": "src/kindex/mode_primer.py",
       "filePath": "src/kindex/mode_primer.py",
       "summary": "Language: Python | Path: src/kindex/mode_primer.py | ~204 lines ## Classes - ModeFingerprint",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 4,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-177b370455a7",
-      "type": "file",
-      "name": "src/kindex/models.py",
-      "filePath": "src/kindex/models.py",
-      "summary": "Language: Python | Path: src/kindex/models.py | ~94 lines ## Classes - Edge(BaseModel)",
       "tags": [
         "code",
         "python"
@@ -1457,23 +1304,6 @@
       }
     },
     {
-      "id": "code-sym-kindex-4710515cacde",
-      "type": "class",
-      "name": "InvalidIntervalError",
-      "filePath": "src/kindex/store.py",
-      "summary": "class InvalidIntervalError(ValueError) (src/kindex/store.py:72)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
       "id": "code-sym-kindex-95b8acd87972",
       "type": "class",
       "name": "Store",
@@ -1484,74 +1314,6 @@
         "python"
       ],
       "complexity": 74,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
-      "id": "code-sym-kindex-b37057535f7f",
-      "type": "class",
-      "name": "StaleReviewError",
-      "filePath": "src/kindex/store.py",
-      "summary": "class StaleReviewError(ValueError) (src/kindex/store.py:64)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
-      "id": "code-sym-kindex-d1aead4dfe46",
-      "type": "class",
-      "name": "TitleCollisionError",
-      "filePath": "src/kindex/store.py",
-      "summary": "class TitleCollisionError(ValueError) (src/kindex/store.py:68)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
-      "id": "code-sym-kindex-e0b23690c2bb",
-      "type": "class",
-      "name": "CandidateStateError",
-      "filePath": "src/kindex/store.py",
-      "summary": "class CandidateStateError(ValueError) (src/kindex/store.py:60)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
-      "id": "code-sym-kindex-f23dff30a8e5",
-      "type": "class",
-      "name": "CandidateNotFoundError",
-      "filePath": "src/kindex/store.py",
-      "summary": "class CandidateNotFoundError(ValueError) (src/kindex/store.py:56)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
       "languageNotes": {
         "language": "Python",
         "kindexType": "concept",
@@ -1593,23 +1355,6 @@
       }
     },
     {
-      "id": "code-sym-kindex-77f33e03ff54",
-      "type": "class",
-      "name": "TrustDecision",
-      "filePath": "src/kindex/trust.py",
-      "summary": "class TrustDecision (src/kindex/trust.py:37)",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 1,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "concept",
-        "toolTier": ""
-      }
-    },
-    {
       "id": "code-mod-kindex-4506c94e9fe5",
       "type": "file",
       "name": "src/kindex/trust.py",
@@ -1620,23 +1365,6 @@
         "python"
       ],
       "complexity": 8,
-      "languageNotes": {
-        "language": "Python",
-        "kindexType": "artifact",
-        "toolTier": "C"
-      }
-    },
-    {
-      "id": "code-mod-kindex-af2e3463feb5",
-      "type": "file",
-      "name": "src/kindex/vault.py",
-      "filePath": "src/kindex/vault.py",
-      "summary": "Language: Python | Path: src/kindex/vault.py | ~155 lines ## Classes - Vault",
-      "tags": [
-        "code",
-        "python"
-      ],
-      "complexity": 3,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -1726,13 +1454,6 @@
       "weight": 0.5
     },
     {
-      "source": "code-mod-kindex-7c7bbd6990da",
-      "target": "code-mod-kindex-c4522229e518",
-      "type": "related",
-      "direction": "outbound",
-      "weight": 0.01
-    },
-    {
       "source": "code-mod-kindex-92df373f87c7",
       "target": "code-mod-kindex-46a31493a160",
       "type": "depends_on",
@@ -1759,13 +1480,6 @@
       "type": "depends_on",
       "direction": "outbound",
       "weight": 0.5
-    },
-    {
-      "source": "code-mod-kindex-c4522229e518",
-      "target": "code-mod-kindex-7c7bbd6990da",
-      "type": "related",
-      "direction": "outbound",
-      "weight": 0.01
     },
     {
       "source": "code-mod-kindex-c77f7cec7d57",
@@ -1894,22 +1608,8 @@
       "weight": 0.6
     },
     {
-      "source": "code-sym-kindex-3da712cdf5b5",
-      "target": "code-mod-kindex-f9986c492ab2",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
       "source": "code-sym-kindex-415d46d7c508",
       "target": "code-mod-kindex-6a3142a46050",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
-      "source": "code-sym-kindex-4710515cacde",
-      "target": "code-mod-kindex-46a31493a160",
       "type": "contains",
       "direction": "outbound",
       "weight": 0.6
@@ -1966,13 +1666,6 @@
     {
       "source": "code-sym-kindex-74266f41225f",
       "target": "code-mod-kindex-6a3142a46050",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
-      "source": "code-sym-kindex-77f33e03ff54",
-      "target": "code-mod-kindex-4506c94e9fe5",
       "type": "contains",
       "direction": "outbound",
       "weight": 0.6
@@ -2041,13 +1734,6 @@
       "weight": 0.6
     },
     {
-      "source": "code-sym-kindex-b37057535f7f",
-      "target": "code-mod-kindex-46a31493a160",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
       "source": "code-sym-kindex-b42e459fa446",
       "target": "code-mod-kindex-6a3142a46050",
       "type": "contains",
@@ -2076,39 +1762,11 @@
       "weight": 0.01
     },
     {
-      "source": "code-sym-kindex-d1aead4dfe46",
-      "target": "code-mod-kindex-46a31493a160",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
       "source": "code-sym-kindex-e0501acf75b6",
       "target": "code-mod-kindex-9865e2d9ecc1",
       "type": "contains",
       "direction": "outbound",
       "weight": 0.01
-    },
-    {
-      "source": "code-sym-kindex-e0b23690c2bb",
-      "target": "code-mod-kindex-46a31493a160",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
-      "source": "code-sym-kindex-e7d77ef2ec54",
-      "target": "code-mod-kindex-6a3142a46050",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
-    },
-    {
-      "source": "code-sym-kindex-f23dff30a8e5",
-      "target": "code-mod-kindex-46a31493a160",
-      "type": "contains",
-      "direction": "outbound",
-      "weight": 0.6
     },
     {
       "source": "code-sym-kindex-fe4d5554b184",
@@ -2125,7 +1783,6 @@
       "description": "Kindex-inferred core layer.",
       "nodeIds": [
         "code-mod-kindex-0156971f69e3",
-        "code-mod-kindex-05f34125a9ba",
         "code-mod-kindex-1008402a94e8",
         "code-mod-kindex-119a6050feb3",
         "code-mod-kindex-1668da8a23a5",
@@ -2138,7 +1795,6 @@
         "code-mod-kindex-26bb9b6e1fcb",
         "code-mod-kindex-2ecdcb3c4276",
         "code-mod-kindex-416c0a5d982b",
-        "code-mod-kindex-42ecd8f0766c",
         "code-mod-kindex-4506c94e9fe5",
         "code-mod-kindex-4af5ee17841c",
         "code-mod-kindex-5445e879d317",
@@ -2148,16 +1804,12 @@
         "code-mod-kindex-6a3142a46050",
         "code-mod-kindex-6a374a6f7fce",
         "code-mod-kindex-702e4442e57e",
-        "code-mod-kindex-7c7bbd6990da",
         "code-mod-kindex-7ccf79c98767",
         "code-mod-kindex-7e3e66278abe",
         "code-mod-kindex-858b7166f927",
-        "code-mod-kindex-8a94356fd973",
         "code-mod-kindex-92df373f87c7",
         "code-mod-kindex-9418152e54f2",
-        "code-mod-kindex-94e276789253",
         "code-mod-kindex-9865e2d9ecc1",
-        "code-mod-kindex-af2e3463feb5",
         "code-mod-kindex-b568a48e00e4",
         "code-mod-kindex-b73cd67cf905",
         "code-mod-kindex-bd222a4e378f",
@@ -2177,7 +1829,6 @@
       "name": "Data",
       "description": "Kindex-inferred data layer.",
       "nodeIds": [
-        "code-mod-kindex-177b370455a7",
         "code-mod-kindex-46a31493a160",
         "code-mod-kindex-c8ebc72bbedb"
       ]
@@ -2201,9 +1852,7 @@
         "code-sym-kindex-279e1c45cb06",
         "code-sym-kindex-352d8c9bbdba",
         "code-sym-kindex-36fe0270bb97",
-        "code-sym-kindex-3da712cdf5b5",
         "code-sym-kindex-415d46d7c508",
-        "code-sym-kindex-4710515cacde",
         "code-sym-kindex-4ad370312e30",
         "code-sym-kindex-552c22e16187",
         "code-sym-kindex-58d630bc994a",
@@ -2213,7 +1862,6 @@
         "code-sym-kindex-658345dd71d1",
         "code-sym-kindex-74266f41225f",
         "code-sym-kindex-74e41dbe4692",
-        "code-sym-kindex-77f33e03ff54",
         "code-sym-kindex-7e4d614285e9",
         "code-sym-kindex-89cc5b13c9e0",
         "code-sym-kindex-95b8acd87972",
@@ -2223,25 +1871,12 @@
         "code-sym-kindex-aa2ebf2ad1ea",
         "code-sym-kindex-aced1fc3143a",
         "code-sym-kindex-b29226f27eca",
-        "code-sym-kindex-b37057535f7f",
         "code-sym-kindex-b42e459fa446",
         "code-sym-kindex-b90676bdf42f",
         "code-sym-kindex-c644dbd33873",
         "code-sym-kindex-cbab8b0e1faf",
-        "code-sym-kindex-d1aead4dfe46",
         "code-sym-kindex-e0501acf75b6",
-        "code-sym-kindex-e0b23690c2bb",
-        "code-sym-kindex-e7d77ef2ec54",
-        "code-sym-kindex-f23dff30a8e5",
         "code-sym-kindex-fe4d5554b184"
-      ]
-    },
-    {
-      "id": "test",
-      "name": "Test",
-      "description": "Kindex-inferred test layer.",
-      "nodeIds": [
-        "code-mod-kindex-a31c7ed5d35f"
       ]
     }
   ],
@@ -2249,10 +1884,9 @@
     {
       "order": 1,
       "title": "Core",
-      "description": "Review 46 node(s) in the Core layer.",
+      "description": "Review 40 node(s) in the Core layer.",
       "nodeIds": [
         "code-mod-kindex-0156971f69e3",
-        "code-mod-kindex-05f34125a9ba",
         "code-mod-kindex-1008402a94e8",
         "code-mod-kindex-119a6050feb3",
         "code-mod-kindex-1668da8a23a5",
@@ -2265,7 +1899,6 @@
         "code-mod-kindex-26bb9b6e1fcb",
         "code-mod-kindex-2ecdcb3c4276",
         "code-mod-kindex-416c0a5d982b",
-        "code-mod-kindex-42ecd8f0766c",
         "code-mod-kindex-4506c94e9fe5",
         "code-mod-kindex-4af5ee17841c",
         "code-mod-kindex-5445e879d317",
@@ -2275,15 +1908,16 @@
         "code-mod-kindex-6a3142a46050",
         "code-mod-kindex-6a374a6f7fce",
         "code-mod-kindex-702e4442e57e",
-        "code-mod-kindex-7c7bbd6990da"
+        "code-mod-kindex-7ccf79c98767",
+        "code-mod-kindex-7e3e66278abe",
+        "code-mod-kindex-858b7166f927"
       ]
     },
     {
       "order": 2,
       "title": "Data",
-      "description": "Review 3 node(s) in the Data layer.",
+      "description": "Review 2 node(s) in the Data layer.",
       "nodeIds": [
-        "code-mod-kindex-177b370455a7",
         "code-mod-kindex-46a31493a160",
         "code-mod-kindex-c8ebc72bbedb"
       ]
@@ -2291,7 +1925,7 @@
     {
       "order": 3,
       "title": "Domain",
-      "description": "Review 47 node(s) in the Domain layer.",
+      "description": "Review 39 node(s) in the Domain layer.",
       "nodeIds": [
         "code-sym-kindex-05a1fbf0db2e",
         "code-sym-kindex-0707d0c210b4",
@@ -2307,9 +1941,7 @@
         "code-sym-kindex-279e1c45cb06",
         "code-sym-kindex-352d8c9bbdba",
         "code-sym-kindex-36fe0270bb97",
-        "code-sym-kindex-3da712cdf5b5",
         "code-sym-kindex-415d46d7c508",
-        "code-sym-kindex-4710515cacde",
         "code-sym-kindex-4ad370312e30",
         "code-sym-kindex-552c22e16187",
         "code-sym-kindex-58d630bc994a",
@@ -2317,15 +1949,9 @@
         "code-sym-kindex-608ef82e510c",
         "code-sym-kindex-62490d9465aa",
         "code-sym-kindex-658345dd71d1",
-        "code-sym-kindex-74266f41225f"
-      ]
-    },
-    {
-      "order": 4,
-      "title": "Test",
-      "description": "Review 1 node(s) in the Test layer.",
-      "nodeIds": [
-        "code-mod-kindex-a31c7ed5d35f"
+        "code-sym-kindex-74266f41225f",
+        "code-sym-kindex-74e41dbe4692",
+        "code-sym-kindex-7e4d614285e9"
       ]
     }
   ]

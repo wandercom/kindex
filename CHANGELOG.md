@@ -2,6 +2,43 @@
 
 All notable changes to Kindex are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.35.0] - 2026-09-02
+
+### Added
+- **OpenCode SessionStart hook parity.** OpenCode sessions got the Kindex MCP tools
+  but no hooks, so nothing primed automatically — because the MCP server's cwd is not
+  the project's, MCP cannot know which repo a session is in. Hooks can: they run in
+  the agent's process at the project cwd. `kin setup-opencode-hooks` now installs an
+  auto-loaded OpenCode plugin (`~/.config/opencode/plugin/kindex.js`) that runs
+  `kin prime` **in the working directory** once per session and injects the result
+  into the system prompt via `experimental.chat.system.transform` (the OpenCode
+  analog of Claude's SessionStart context), plus `experimental.session.compacting`
+  for compaction context — matching the priming Claude and Codex already get. New
+  `--adapter opencode` on `prime`/`attention-hook`/`agent-prime-hook`/`agent-stop-hook`
+  emits plain text for the plugin to inject.
+
+### Changed
+- **Sim supervisory review now weighs alignment and trajectory, with graduated
+  effort.** The optional async Sim check-in judged only whether the work itself was
+  sound; it now also asks whether the work still serves what the **user** actually
+  asked (spirit over letter; a newer instruction can supersede an older one, an aside
+  should not) and where the current course **leads** (does it reach the goal or
+  diverge; what are the side-effects). Effort is self-calibrated by reading the
+  window: banter is skipped before it costs anything; ordinary work gets the grounded
+  single-persona review; a high-stakes, hard-to-reverse move (money, a large workflow,
+  an architecture lock-in) is a **reversibility trip-wire** that can recommend — or,
+  opt-in, run and verify — a deeper Advocate/Helland review. Notes are framed as
+  considerations to weigh, not verdicts.
+
+### Fixed
+- **`.kin` artifacts are now anchored at the git root with repo-relative paths.**
+  `kin export code-map` auto-detects the git root of the cwd and relativizes against
+  it, so a tracked `.kin/code-map.json` never carries machine-local absolute paths —
+  in-repo absolute provenance is **recovered** as a repo-relative path instead of
+  dropped, and nothing outside the repo leaks. `kin index` writes `.kin/` at the git
+  **root** (not the cwd), so running it from a subdirectory no longer scatters `.kin/`
+  directories through the tree.
+
 ## [0.34.0] - 2026-08-31
 
 ### Added

@@ -231,6 +231,64 @@ class TestSetupCodex:
         assert "--adapter codex" in session_cmd
         assert "source ~/.profile" in session_cmd
 
+    def test_setup_opencode_hooks_installs_plugin(self, tmp_path):
+        """Installs an auto-loaded OpenCode plugin that primes from the repo."""
+        from kindex.setup import install_opencode_hooks
+
+        oc_dir = tmp_path / "opencode"
+        cfg = Config(data_dir=str(tmp_path), opencode_dir=str(oc_dir))
+        actions = install_opencode_hooks(cfg)
+
+        plugin = oc_dir / "plugin" / "kindex.js"
+        assert plugin.exists(), actions
+        js = plugin.read_text()
+        # runs kin prime in the working directory and injects into the system prompt
+        assert "experimental.chat.system.transform" in js
+        assert "prime --for hook --adapter opencode" in js
+        assert "experimental.session.compacting" in js
+        assert ".cwd(directory)" in js          # primes IN the repo, not the server cwd
+        assert any("OpenCode plugin" in a for a in actions)
+
+    def test_setup_opencode_hooks_idempotent(self, tmp_path):
+        from kindex.setup import install_opencode_hooks
+
+        oc_dir = tmp_path / "opencode"
+        cfg = Config(data_dir=str(tmp_path), opencode_dir=str(oc_dir))
+        install_opencode_hooks(cfg)
+        actions = install_opencode_hooks(cfg)
+        assert actions == ["OpenCode plugin already installed"]
+
+    def test_setup_opencode_hooks_dry_run_does_not_write(self, tmp_path):
+        from kindex.setup import install_opencode_hooks
+
+        oc_dir = tmp_path / "opencode"
+        cfg = Config(data_dir=str(tmp_path), opencode_dir=str(oc_dir))
+        actions = install_opencode_hooks(cfg, dry_run=True)
+        assert any("Would write" in a for a in actions)
+        assert not (oc_dir / "plugin" / "kindex.js").exists()
+
+    def test_uninstall_opencode_hooks_removes_plugin(self, tmp_path):
+        from kindex.setup import install_opencode_hooks, uninstall_opencode_hooks
+
+        oc_dir = tmp_path / "opencode"
+        cfg = Config(data_dir=str(tmp_path), opencode_dir=str(oc_dir))
+        install_opencode_hooks(cfg)
+        actions = uninstall_opencode_hooks(cfg)
+        assert any("Removed" in a for a in actions)
+        assert not (oc_dir / "plugin" / "kindex.js").exists()
+        assert uninstall_opencode_hooks(cfg) == ["No Kindex OpenCode plugin found"]
+
+    def test_prime_and_hooks_accept_opencode_adapter(self):
+        """Regression: the OpenCode plugin runs `kin prime --adapter opencode`, so
+        the argparse choices MUST include it — else the plugin gets an exit-2
+        'invalid choice' and injects nothing."""
+        from kindex.cli import build_parser
+
+        parser = build_parser()
+        for sub in ("prime", "attention-hook", "agent-prime-hook", "agent-stop-hook"):
+            args = parser.parse_args([sub, "--adapter", "opencode"])
+            assert args.adapter == "opencode", sub
+
     def test_setup_codex_hooks_idempotent(self, tmp_path):
         """Installing twice should not duplicate Codex prompt hook."""
         from kindex.setup import install_codex_hooks

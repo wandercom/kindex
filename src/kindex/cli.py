@@ -1663,9 +1663,19 @@ def cmd_export(args):
             print("Error: code-map export supports --format understand-anything or json",
                   file=sys.stderr)
             sys.exit(1)
+        # Actively find the repo being worked on: default the relativization root
+        # to the git top-level of the cwd, so `kin export code-map` run anywhere
+        # inside a repo scopes to that repo and emits paths relative to its root —
+        # never machine-local absolutes. Explicit --directory always wins.
+        directory = getattr(args, "directory", None)
+        if not directory:
+            from .setup import git_repo_root
+            root = git_repo_root()
+            if root is not None:
+                directory = str(root)
         graph = export_understand_anything(
             store,
-            directory=getattr(args, "directory", None),
+            directory=directory,
             project_name=getattr(args, "project_name", None),
             limit=getattr(args, "limit", 10000),
         )
@@ -2221,6 +2231,11 @@ def cmd_prime(args):
             )
             if rendered:
                 print(rendered, end="")
+        elif adapter == "opencode":
+            # The OpenCode plugin captures stdout and pushes it onto the system
+            # prompt (output.system) itself — there is no suppressOutput envelope,
+            # so always emit PLAIN text, regardless of the quiet display setting.
+            print(body, end="")
         elif quiet:
             # Quiet mode: feed the context to the model but ask the client not to
             # render the SessionStart block. Needs the JSON adapter for suppressOutput.
@@ -2765,8 +2780,16 @@ def cmd_index(args):
     store = _store(args)
 
     from .ingest import write_kin_index
+    from .setup import git_repo_root
 
-    output_dir = Path(getattr(args, "output_dir", None) or os.getcwd())
+    # Anchor `.kin/` at the GIT ROOT of the repo being worked on, not the cwd —
+    # so `kin index` run from any subdirectory writes one `.kin/` at the top level
+    # (and the same root drives the merge-driver registration below). An explicit
+    # --output-dir is honored verbatim for advanced/monorepo use.
+    if getattr(args, "output_dir", None):
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = git_repo_root(Path.cwd()) or Path.cwd()
     try:
         path = write_kin_index(store, output_dir)
     except RuntimeError as e:
@@ -5301,12 +5324,22 @@ def cmd_sim(args):
             store.close()
             sys.exit(1)
         from .budget import BudgetLedger
+        from .sim import _capture_intent, build_sim_grounding, get_sim_guidance
         ledger = BudgetLedger(cfg.ledger_path, cfg.budget)
-        result, acct = call_sim(cfg, ledger, text, "sim-check", client=None)
+        grounding = build_sim_grounding(store, text, cfg)
+        result, acct = call_sim(
+            cfg, ledger, text, "sim-check", client=None,
+            guidance=get_sim_guidance(store),
+            grounding=grounding,
+            intent=_capture_intent(store),
+        )
         payload = {"status": acct.get("status")}
         if result:
             payload.update({"rating": result.rating, "note": result.note,
                             "basis": result.basis,
+                            "dimension": result.dimension, "stakes": result.stakes,
+                            "escalate": result.escalate,
+                            "escalate_reason": result.escalate_reason,
                             "would_inject": result.rating >= cfg.sim.threshold})
         print(_dumps(payload, indent=2))
         store.close()
@@ -5949,6 +5982,22 @@ def cmd_setup_opencode_mcp(args):
     else:
         from .setup import install_opencode_mcp
         actions = install_opencode_mcp(cfg, dry_run=dry_run)
+
+    for a in actions:
+        print(f"  {a}")
+
+
+def cmd_setup_opencode_hooks(args):
+    """Install/uninstall the Kindex OpenCode plugin (session-start priming)."""
+    cfg = _config(args)
+    dry_run = getattr(args, "dry_run", False)
+
+    if getattr(args, "uninstall", False):
+        from .setup import uninstall_opencode_hooks
+        actions = uninstall_opencode_hooks(cfg, dry_run=dry_run)
+    else:
+        from .setup import install_opencode_hooks
+        actions = install_opencode_hooks(cfg, dry_run=dry_run)
 
     for a in actions:
         print(f"  {a}")
@@ -6802,7 +6851,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Regenerate the LLM prompt cache codebook")
     s.add_argument("--conversation-id", help="Conversation/session id for scoped reminders")
     s.add_argument("--adapter", default="claude",
-                   choices=["plain", "claude", "codex", "antigravity"],
+                   choices=["plain", "claude", "codex", "antigravity", "opencode"],
                    help="Hook output adapter for client hook protocols")
     s.add_argument("--agent-instance", help="Agent instance/conversation override key")
     _common(s)
@@ -7049,6 +7098,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--uninstall", action="store_true", help="Remove installed MCP server")
     _common(s)
     s.set_defaults(func=cmd_setup_opencode_mcp)
+
+    # setup-opencode-hooks
+    s = sub.add_parser("setup-opencode-hooks",
+                       help="Install the Kindex OpenCode plugin (session-start priming)")
+    s.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    s.add_argument("--uninstall", action="store_true", help="Remove the installed plugin")
+    _common(s)
+    s.set_defaults(func=cmd_setup_opencode_hooks)
 
     # setup-cursor-mcp
     s = sub.add_parser("setup-cursor-mcp", help="Install Kindex MCP server into Cursor")
@@ -7372,7 +7429,7 @@ def build_parser() -> argparse.ArgumentParser:
     # agent-prime-hook (portable one-shot prime hook)
     s = sub.add_parser("agent-prime-hook", help="Portable one-shot agent prime hook")
     s.add_argument("--adapter", default="plain",
-                   choices=["plain", "claude", "codex", "antigravity"])
+                   choices=["plain", "claude", "codex", "antigravity", "opencode"])
     s.add_argument("--client", help="Client family for config overrides")
     s.add_argument("--event", default="PreInvocation", help="Hook event name")
     s.add_argument("--tokens", type=int, default=750)
@@ -7385,7 +7442,7 @@ def build_parser() -> argparse.ArgumentParser:
     # agent-stop-hook (portable session-end hook)
     s = sub.add_parser("agent-stop-hook", help="Portable session-end hook")
     s.add_argument("--adapter", default="plain",
-                   choices=["plain", "claude", "codex", "antigravity"])
+                   choices=["plain", "claude", "codex", "antigravity", "opencode"])
     s.add_argument("--conversation-id")
     _common(s)
     s.set_defaults(func=cmd_agent_stop_hook)
@@ -7402,7 +7459,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force-attention", action="store_true",
                    help="Run attention regardless of tick interval")
     s.add_argument("--adapter", default="plain",
-                   choices=["plain", "claude", "codex", "antigravity"],
+                   choices=["plain", "claude", "codex", "antigravity", "opencode"],
                    help="Render hook output for a client protocol")
     s.add_argument("--agent-instance", help="Agent instance/conversation override key")
     _common(s)
@@ -7411,7 +7468,7 @@ def build_parser() -> argparse.ArgumentParser:
     # attention-hook (advisory tool/action hook)
     s = sub.add_parser("attention-hook", help="Advisory attention hook for tool/action events")
     s.add_argument("--adapter", default="claude",
-                   choices=["plain", "claude", "codex", "antigravity"],
+                   choices=["plain", "claude", "codex", "antigravity", "opencode"],
                    help="Render hook output for a client protocol")
     s.add_argument("--event", help="Hook event name (default from stdin, then PreToolUse)")
     s.add_argument("--text", help="Conversation/action snippet (normally read from hook stdin)")

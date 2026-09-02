@@ -113,6 +113,16 @@ def _node_matches_root(node: dict, root: Path | None) -> bool:
         if _is_absolute_path(path) and _relative_to_root(path, root) is not None:
             return True
 
+    # A node already in portable form — a repo-relative ``relative_path`` with no
+    # ``repo_root`` and no absolute provenance — carries no evidence of belonging to
+    # a DIFFERENT repo. Include it in the active export rather than dropping it: it
+    # is already the exact relative shape the tracked artifact requires, and an
+    # explicit root filter should not silently discard portable, unclaimed nodes.
+    if not repo_root and not _is_absolute_path(_split_location(str(node.get("prov_source") or ""))[0]):
+        rel = extra.get("relative_path")
+        if rel and not _is_absolute_path(_split_location(str(rel))[0]):
+            return True
+
     return False
 
 
@@ -319,6 +329,12 @@ def export_understand_anything(
     repo-relative POSIX paths and never raw machine-local provenance paths.
     Active nodes are exported by default; callers may opt into archived nodes
     for historical analysis.
+
+    The relativization root is the repository top-level passed as ``directory``.
+    The CLI (`kin export code-map`) defaults it to the git root of the cwd so a
+    tracked .kin/code-map.json is always relative to that repo's root; when no
+    root is available, only nodes carrying a repo-relative ``extra.relative_path``
+    are emitted and absolute provenance is dropped rather than leaked.
     """
     root = Path(directory).resolve() if directory else None
     all_nodes = store.all_nodes(limit=limit)
