@@ -487,8 +487,8 @@
       "id": "code-mod-kindex-a31c7ed5d35f",
       "title": "conftest.py",
       "type": "artifact",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1004,8 +1004,8 @@
       "id": "code-sym-kindex-3da712cdf5b5",
       "title": "MemoryUnavailableError",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1026,8 +1026,8 @@
       "id": "code-sym-kindex-4710515cacde",
       "title": "InvalidIntervalError",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1191,8 +1191,8 @@
       "id": "code-sym-kindex-77f33e03ff54",
       "title": "TrustDecision",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1389,8 +1389,8 @@
       "id": "code-sym-kindex-b37057535f7f",
       "title": "StaleReviewError",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1554,8 +1554,8 @@
       "id": "code-sym-kindex-d1aead4dfe46",
       "title": "TitleCollisionError",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1587,8 +1587,8 @@
       "id": "code-sym-kindex-e0b23690c2bb",
       "title": "CandidateStateError",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1620,8 +1620,8 @@
       "id": "code-sym-kindex-e7d77ef2ec54",
       "title": "CaptureConfig",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [
@@ -1642,8 +1642,8 @@
       "id": "code-sym-kindex-f23dff30a8e5",
       "title": "CandidateNotFoundError",
       "type": "concept",
-      "updated_at": "2026-08-31T18:00:39",
-      "weight": 0.5
+      "updated_at": "2026-08-31T18:45:07",
+      "weight": 0.01
     },
     {
       "domains": [

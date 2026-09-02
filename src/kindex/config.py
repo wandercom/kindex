@@ -408,6 +408,33 @@ class AttentionConfig(BaseModel):
     reinforce_gap_as_question: bool = True   # log a knowledge-gap when a real need matches no node
 
 
+class AdvocateConfig(BaseModel):
+    """Opt-in deep escalation to ~/Code/advocate (multi-persona adversarial review,
+    including the Helland architectural seat).
+
+    OFF by default — the light path is a recommendation folded into Sim's note.
+    When enabled, a high-stakes escalation runs Advocate on the flagged window,
+    then VERIFIES the findings against the window (dropping hallucinations, per the
+    2026-06-09 head-to-head experiment's hard requirement for autonomous multi-call
+    surfacing) and folds only the survivors into the injected note. Hard-capped and
+    cooldown-gated so the heavy path can never run away.
+    """
+    enabled: bool = False
+    # Shell command that runs Advocate: the review brief arrives on stdin and the
+    # Advocate JSON is expected on stdout. The real ~/Code/advocate writes JSON to
+    # a FILE (-o), not stdout, so the verified wrapper (persona ids checked against
+    # advocate v0.1.5 — the Helland seat is `helland`) is:
+    #   sh -c 'f=$(mktemp); advocate review --stdin --no-color \
+    #            -p helland -p sage -p adversarial -o "$f" >/dev/null 2>&1; \
+    #            cat "$f"; rm -f "$f"'
+    # The parser reads the nested persona_reports[].findings[] of that JSON.
+    command: str = ""
+    max_cost: float = 2.0          # hard ceiling for one escalation's verify spend
+    cooldown_ticks: int = 30       # minimum ticks between escalations per conversation
+    max_findings: int = 5          # cap on surfaced (verified) survivor findings
+    timeout: int = 300             # subprocess timeout for the Advocate run
+
+
 class SimConfig(BaseModel):
     """Optional async Sim (Jeremy-simulacrum) supervisory check-in.
 
@@ -420,6 +447,14 @@ class SimConfig(BaseModel):
     snapshot (cheap, SQLite-only); the LLM/Sim spend happens in the daemon drain;
     the next tick picks up any pending injection (cheap) and surfaces it if still
     fresh. Mirrors reinforce.py's queue/drain pattern.
+
+    Graduated effort (the tool calibrates spend to what's actually at stake by
+    reading the window): Tier 0 banter is skipped at enqueue by a cheap triage;
+    Tier 1 ordinary code/task work gets the grounded single-persona review across
+    the direction/alignment/trajectory/architecture lenses; Tier 2 high-impact
+    moves (money, a large workflow, an irreversible or architecture-locking
+    decision) self-assess `stakes` and may recommend — or, if `advocate.enabled`,
+    run — a deeper Advocate/Helland review.
     """
     enabled: bool = False
     tick_interval: int = 6          # enqueue a review roughly every ~6 ticks
@@ -448,6 +483,12 @@ class SimConfig(BaseModel):
     # Jeremy-simulacrum, e.g. "~/.claude/skills/simulacrum/run.py".
     command: str = ""
     command_timeout: int = 60
+    # Tier 0 triage: skip enqueuing a review for confident banter/small-talk so the
+    # machinery never spends on light back-and-forth. Rounds UP when unsure — only a
+    # confidently-trivial window is skipped. Disable to review every gated tick.
+    triage_banter: bool = True
+    # Deep escalation to ~/Code/advocate (with the Helland seat). Off by default.
+    advocate: AdvocateConfig = Field(default_factory=AdvocateConfig)
 
 
 class RankingConfig(BaseModel):

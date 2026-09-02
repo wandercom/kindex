@@ -795,6 +795,86 @@ def uninstall_opencode_mcp(config: "Config", dry_run: bool = False) -> list[str]
     return [f"Removed OpenCode MCP server from {settings_path}"]
 
 
+# The Kindex OpenCode plugin. OpenCode has no settings-file hook LIST like Claude
+# (settings.json) or Codex (hooks.json); instead it auto-loads plugins from the
+# `plugin/` directory and calls their lifecycle hooks. This plugin gives OpenCode
+# the parity Claude/Codex have: it runs `kin prime` IN THE WORKING DIRECTORY at
+# session start (so it finds and leverages the repo's own `.kin/`) and injects the
+# result into the system prompt via `experimental.chat.system.transform`, and feeds
+# Kindex context into compaction via `experimental.session.compacting`. Hooks run in
+# the agent's process at the project cwd — which MCP cannot do — so this is what lets
+# an OpenCode session actually leverage the repo `.kin/`.
+_OPENCODE_PLUGIN_JS = r'''// Kindex OpenCode plugin — installed by `kin setup-opencode-hooks`. Do not edit;
+// re-run the installer to update. Primes each session with repo-scoped Kindex
+// context by running `kin prime` in the working directory (so it leverages the
+// repo's .kin/), mirroring the Claude/Codex SessionStart hooks.
+export const KindexPlugin = async ({ directory, $ }) => {
+  const primed = new Set();
+  const runKin = async (args) => {
+    try {
+      const res = await $`bash -lc ${"source ~/.profile >/dev/null 2>&1 || true; exec kin " + args}`
+        .cwd(directory)
+        .quiet()
+        .nothrow();
+      const out = res && res.stdout ? res.stdout.toString().trim() : "";
+      return res && res.exitCode === 0 ? out : "";
+    } catch (_e) {
+      return "";
+    }
+  };
+  return {
+    // Inject auto-primed Kindex context (+ the "use kindex"/.kin directive) into the
+    // system prompt once per session — the OpenCode analog of Claude's SessionStart
+    // additionalContext.
+    "experimental.chat.system.transform": async (input, output) => {
+      const sid = input && input.sessionID ? input.sessionID : "default";
+      if (primed.has(sid)) return;
+      primed.add(sid);
+      const ctx = await runKin("prime --for hook --adapter opencode");
+      if (ctx) output.system.push(ctx);
+    },
+    // Carry Kindex context across compaction so nothing load-bearing is lost.
+    "experimental.session.compacting": async (_input, output) => {
+      const ctx = await runKin("compact-hook --emit-context");
+      if (ctx) output.context.push(ctx);
+    },
+  };
+};
+'''
+
+
+def install_opencode_hooks(config: "Config", dry_run: bool = False) -> list[str]:
+    """Install the Kindex OpenCode plugin so OpenCode sessions prime from the repo.
+
+    OpenCode auto-loads plugins from ``~/.config/opencode/plugin/*.js``; we write
+    ours there. This is the OpenCode counterpart of ``install_codex_hooks`` /
+    ``install_claude_hooks`` — a hook that runs ``kin prime`` in the working
+    directory so the session leverages the repo's own ``.kin/`` (MCP cannot,
+    because the MCP server's cwd is not the project's).
+    """
+    plugin_path = config.opencode_path / "plugin" / "kindex.js"
+    if plugin_path.exists() and plugin_path.read_text() == _OPENCODE_PLUGIN_JS:
+        return ["OpenCode plugin already installed"]
+    verb = "Updated" if plugin_path.exists() else "Added"
+    if dry_run:
+        return [f"Would write Kindex OpenCode plugin to {plugin_path}"]
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_path.write_text(_OPENCODE_PLUGIN_JS)
+    return [f"{verb} Kindex OpenCode plugin (kin prime on session start)",
+            f"Wrote {plugin_path}"]
+
+
+def uninstall_opencode_hooks(config: "Config", dry_run: bool = False) -> list[str]:
+    """Remove the Kindex OpenCode plugin."""
+    plugin_path = config.opencode_path / "plugin" / "kindex.js"
+    if not plugin_path.exists():
+        return ["No Kindex OpenCode plugin found"]
+    if dry_run:
+        return [f"Would remove {plugin_path}"]
+    plugin_path.unlink()
+    return [f"Removed {plugin_path}"]
+
+
 def install_cursor_mcp(config: "Config", dry_run: bool = False) -> list[str]:
     """Install Kindex MCP server config into ~/.cursor/mcp.json."""
     settings_path = config.cursor_path / "mcp.json"
