@@ -7,8 +7,8 @@
       "Python"
     ],
     "frameworks": [],
-    "analyzedAt": "2026-09-02T20:07:41-05:00",
-    "gitCommitHash": "bbd4278437f895c715e574643a3cd895c2e25476"
+    "analyzedAt": "2026-09-02T22:06:09-05:00",
+    "gitCommitHash": "205d78154d4cbc7582917ba906f9bae565fb5461"
   },
   "nodes": [
     {
@@ -237,12 +237,12 @@
       "type": "file",
       "name": "src/kindex/archive.py",
       "filePath": "src/kindex/archive.py",
-      "summary": "Language: Python | Path: src/kindex/archive.py | ~461 lines ## Functions - archive_cycle( config: \"Config\", store: \"Store\", verbose: bool = False, ) -> int",
+      "summary": "Language: Python | Path: src/kindex/archive.py | ~606 lines ## Functions - archive_cycle( config: \"Config\", store: \"Store\", verbose: bool = False, ) -> int",
       "tags": [
         "code",
         "python"
       ],
-      "complexity": 11,
+      "complexity": 13,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -271,7 +271,7 @@
       "type": "file",
       "name": "src/kindex/cli.py",
       "filePath": "src/kindex/cli.py",
-      "summary": "Language: Python | Path: src/kindex/cli.py | ~7647 lines ## Functions - cmd_add(args)",
+      "summary": "Language: Python | Path: src/kindex/cli.py | ~7725 lines ## Functions - cmd_add(args)",
       "tags": [
         "code",
         "python"
@@ -730,7 +730,7 @@
       "type": "file",
       "name": "src/kindex/dream.py",
       "filePath": "src/kindex/dream.py",
-      "summary": "Language: Python | Path: src/kindex/dream.py | ~748 lines ## Functions - auto_apply_suggestions(store: Store) -> int",
+      "summary": "Language: Python | Path: src/kindex/dream.py | ~767 lines ## Functions - auto_apply_suggestions(store: Store) -> int",
       "tags": [
         "code",
         "python"
@@ -917,7 +917,7 @@
       "type": "file",
       "name": "src/kindex/graph.py",
       "filePath": "src/kindex/graph.py",
-      "summary": "Language: Python | Path: src/kindex/graph.py | ~476 lines ## Classes - GraphStats",
+      "summary": "Language: Python | Path: src/kindex/graph.py | ~481 lines ## Classes - GraphStats",
       "tags": [
         "code",
         "python"
@@ -1053,7 +1053,7 @@
       "type": "file",
       "name": "src/kindex/mcp_server.py",
       "filePath": "src/kindex/mcp_server.py",
-      "summary": "Language: Python | Path: src/kindex/mcp_server.py | ~2759 lines ## Classes - MemoryUnavailableError(RuntimeError)",
+      "summary": "Language: Python | Path: src/kindex/mcp_server.py | ~2783 lines ## Classes - MemoryUnavailableError(RuntimeError)",
       "tags": [
         "code",
         "python"
@@ -1257,7 +1257,7 @@
       "type": "file",
       "name": "src/kindex/schema.py",
       "filePath": "src/kindex/schema.py",
-      "summary": "Language: Python | Path: src/kindex/schema.py | ~321 lines ## Functions - edit_class_for(node_type: str, overrides: dict[str, str] | None = None) -> str",
+      "summary": "Language: Python | Path: src/kindex/schema.py | ~337 lines ## Functions - edit_class_for(node_type: str, overrides: dict[str, str] | None = None) -> str",
       "tags": [
         "code",
         "python"
@@ -1274,12 +1274,12 @@
       "type": "file",
       "name": "src/kindex/sessions.py",
       "filePath": "src/kindex/sessions.py",
-      "summary": "Language: Python | Path: src/kindex/sessions.py | ~593 lines ## Functions - add_segment( store: Store, name: str, *, new_focus: str, summary: str = \"\", decisions: list[str] | None = None, project_path: str | None = None, ) -> None",
+      "summary": "Language: Python | Path: src/kindex/sessions.py | ~611 lines ## Functions - add_segment( store: Store, name: str, *, new_focus: str, summary: str = \"\", decisions: list[str] | None = None, project_path: str | None = None, ) -> None",
       "tags": [
         "code",
         "python"
       ],
-      "complexity": 13,
+      "complexity": 14,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -1308,12 +1308,12 @@
       "type": "file",
       "name": "src/kindex/snapshots.py",
       "filePath": "src/kindex/snapshots.py",
-      "summary": "Language: Python | Path: src/kindex/snapshots.py | ~100 lines ## Functions - snapshot_db( store: \"Store\", reason: str, *, state_dir: Path | str | None = None, keep: int = DEFAULT_KEEP, ) -> Path",
+      "summary": "Language: Python | Path: src/kindex/snapshots.py | ~213 lines ## Functions - snapshot_connection( db_path: Path | str, connection: sqlite3.Connection, reason: str, *, state_dir: Path | str | None = None, keep: int = DEFAULT_KEEP, ) -> Path",
       "tags": [
         "code",
         "python"
       ],
-      "complexity": 4,
+      "complexity": 8,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -1321,16 +1321,50 @@
       }
     },
     {
-      "id": "code-sym-kindex-95b8acd87972",
+      "id": "code-sym-kindex-32f9c6a79350",
       "type": "class",
-      "name": "Store",
+      "name": "UnsupportedSchemaVersionError",
       "filePath": "src/kindex/store.py",
-      "summary": "class Store (src/kindex/store.py:273) ## Methods - accept_capture_candidate( self, candidate_id: str, *, review_token: str, reviewed_by: str, prov_method: str, valid_at: str | None = None, invalid_at: str | None = None, now: str | None = None, ) -> dict",
+      "summary": "class UnsupportedSchemaVersionError(RuntimeError) (src/kindex/store.py:91)",
       "tags": [
         "code",
         "python"
       ],
-      "complexity": 75,
+      "complexity": 1,
+      "languageNotes": {
+        "language": "Python",
+        "kindexType": "concept",
+        "toolTier": ""
+      }
+    },
+    {
+      "id": "code-sym-kindex-35eef8f2471c",
+      "type": "class",
+      "name": "SchemaMigrationError",
+      "filePath": "src/kindex/store.py",
+      "summary": "class SchemaMigrationError(RuntimeError) (src/kindex/store.py:95)",
+      "tags": [
+        "code",
+        "python"
+      ],
+      "complexity": 1,
+      "languageNotes": {
+        "language": "Python",
+        "kindexType": "concept",
+        "toolTier": ""
+      }
+    },
+    {
+      "id": "code-sym-kindex-95b8acd87972",
+      "type": "class",
+      "name": "Store",
+      "filePath": "src/kindex/store.py",
+      "summary": "class Store (src/kindex/store.py:293) ## Methods - accept_capture_candidate( self, candidate_id: str, *, review_token: str, reviewed_by: str, prov_method: str, valid_at: str | None = None, invalid_at: str | None = None, now: str | None = None, ) -> dict",
+      "tags": [
+        "code",
+        "python"
+      ],
+      "complexity": 76,
       "languageNotes": {
         "language": "Python",
         "kindexType": "concept",
@@ -1342,12 +1376,12 @@
       "type": "file",
       "name": "src/kindex/store.py",
       "filePath": "src/kindex/store.py",
-      "summary": "Language: Python | Path: src/kindex/store.py | ~3994 lines ## Classes - CandidateNotFoundError(ValueError)",
+      "summary": "Language: Python | Path: src/kindex/store.py | ~4355 lines ## Classes - CandidateNotFoundError(ValueError)",
       "tags": [
         "code",
         "python"
       ],
-      "complexity": 23,
+      "complexity": 25,
       "languageNotes": {
         "language": "Python",
         "kindexType": "artifact",
@@ -1611,8 +1645,22 @@
       "weight": 0.6
     },
     {
+      "source": "code-sym-kindex-32f9c6a79350",
+      "target": "code-mod-kindex-46a31493a160",
+      "type": "contains",
+      "direction": "outbound",
+      "weight": 0.6
+    },
+    {
       "source": "code-sym-kindex-352d8c9bbdba",
       "target": "code-mod-kindex-6a3142a46050",
+      "type": "contains",
+      "direction": "outbound",
+      "weight": 0.6
+    },
+    {
+      "source": "code-sym-kindex-35eef8f2471c",
+      "target": "code-mod-kindex-46a31493a160",
       "type": "contains",
       "direction": "outbound",
       "weight": 0.6
@@ -1874,7 +1922,9 @@
         "code-sym-kindex-206068442308",
         "code-sym-kindex-219563924e7c",
         "code-sym-kindex-279e1c45cb06",
+        "code-sym-kindex-32f9c6a79350",
         "code-sym-kindex-352d8c9bbdba",
+        "code-sym-kindex-35eef8f2471c",
         "code-sym-kindex-36fe0270bb97",
         "code-sym-kindex-415d46d7c508",
         "code-sym-kindex-4ad370312e30",
@@ -1950,7 +2000,7 @@
     {
       "order": 3,
       "title": "Domain",
-      "description": "Review 40 node(s) in the Domain layer.",
+      "description": "Review 42 node(s) in the Domain layer.",
       "nodeIds": [
         "code-sym-kindex-05a1fbf0db2e",
         "code-sym-kindex-0707d0c210b4",
@@ -1964,7 +2014,9 @@
         "code-sym-kindex-206068442308",
         "code-sym-kindex-219563924e7c",
         "code-sym-kindex-279e1c45cb06",
+        "code-sym-kindex-32f9c6a79350",
         "code-sym-kindex-352d8c9bbdba",
+        "code-sym-kindex-35eef8f2471c",
         "code-sym-kindex-36fe0270bb97",
         "code-sym-kindex-415d46d7c508",
         "code-sym-kindex-4ad370312e30",
@@ -1974,9 +2026,7 @@
         "code-sym-kindex-608ef82e510c",
         "code-sym-kindex-62490d9465aa",
         "code-sym-kindex-658345dd71d1",
-        "code-sym-kindex-74266f41225f",
-        "code-sym-kindex-74e41dbe4692",
-        "code-sym-kindex-7e4d614285e9"
+        "code-sym-kindex-74266f41225f"
       ]
     }
   ]

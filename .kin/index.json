@@ -4,7 +4,7 @@
     "python",
     "shell"
   ],
-  "node_count": 151,
+  "node_count": 153,
   "nodes": [
     {
       "domains": [
@@ -14,7 +14,7 @@
       "id": "code-mod-kindex-0156971f69e3",
       "title": "src/kindex/snapshots.py",
       "type": "artifact",
-      "updated_at": "2026-08-31T18:00:39",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.5
     },
     {
@@ -190,7 +190,7 @@
       "id": "code-mod-kindex-26bb9b6e1fcb",
       "title": "src/kindex/graph.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -256,7 +256,7 @@
       "id": "code-mod-kindex-46a31493a160",
       "title": "src/kindex/store.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -311,7 +311,7 @@
       "id": "code-mod-kindex-5aa57e096c49",
       "title": "src/kindex/dream.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -333,7 +333,7 @@
       "id": "code-mod-kindex-66df7720eed6",
       "title": "src/kindex/cli.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -410,7 +410,7 @@
       "id": "code-mod-kindex-7e3e66278abe",
       "title": "src/kindex/archive.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -586,7 +586,7 @@
       "id": "code-mod-kindex-c4522229e518",
       "title": "src/kindex/__init__.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -597,7 +597,7 @@
       "id": "code-mod-kindex-c77f7cec7d57",
       "title": "src/kindex/sessions.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -608,7 +608,7 @@
       "id": "code-mod-kindex-c8ebc72bbedb",
       "title": "src/kindex/schema.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -696,7 +696,7 @@
       "id": "code-mod-kindex-f9986c492ab2",
       "title": "src/kindex/mcp_server.py",
       "type": "artifact",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -979,10 +979,32 @@
         "code",
         "python"
       ],
+      "id": "code-sym-kindex-32f9c6a79350",
+      "title": "UnsupportedSchemaVersionError",
+      "type": "concept",
+      "updated_at": "2026-09-02T22:06:16",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
       "id": "code-sym-kindex-352d8c9bbdba",
       "title": "CollabConfig",
       "type": "concept",
       "updated_at": "2026-09-02T20:07:06",
+      "weight": 0.5
+    },
+    {
+      "domains": [
+        "code",
+        "python"
+      ],
+      "id": "code-sym-kindex-35eef8f2471c",
+      "title": "SchemaMigrationError",
+      "type": "concept",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.5
     },
     {
@@ -1004,7 +1026,7 @@
       "id": "code-sym-kindex-3da712cdf5b5",
       "title": "MemoryUnavailableError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1026,7 +1048,7 @@
       "id": "code-sym-kindex-4710515cacde",
       "title": "InvalidIntervalError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1268,7 +1290,7 @@
       "id": "code-sym-kindex-95b8acd87972",
       "title": "Store",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1301,7 +1323,7 @@
       "id": "code-sym-kindex-9f9f9fbe1087",
       "title": "EditPolicyError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1367,7 +1389,7 @@
       "id": "code-sym-kindex-b166b6681594",
       "title": "LockHeldError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1389,7 +1411,7 @@
       "id": "code-sym-kindex-b37057535f7f",
       "title": "StaleReviewError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1400,7 +1422,7 @@
       "id": "code-sym-kindex-b3b8d9cad562",
       "title": "TraversalResult",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1455,7 +1477,7 @@
       "id": "code-sym-kindex-b724908147cc",
       "title": "ProfileMismatchError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1554,7 +1576,7 @@
       "id": "code-sym-kindex-d1aead4dfe46",
       "title": "TitleCollisionError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1598,7 +1620,7 @@
       "id": "code-sym-kindex-e0b23690c2bb",
       "title": "CandidateStateError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1620,7 +1642,7 @@
       "id": "code-sym-kindex-e3fc793d7353",
       "title": "GraphStats",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
@@ -1653,7 +1675,7 @@
       "id": "code-sym-kindex-f23dff30a8e5",
       "title": "CandidateNotFoundError",
       "type": "concept",
-      "updated_at": "2026-09-02T20:07:06",
+      "updated_at": "2026-09-02T22:06:16",
       "weight": 0.01
     },
     {
