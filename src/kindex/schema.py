@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Audience scopes for tenancy model
 AUDIENCES = ("private", "team", "org", "public")
@@ -22,6 +22,15 @@ OPERATIONAL_TYPES = (
 )
 
 ALL_NODE_TYPES = NODE_TYPES + OPERATIONAL_TYPES
+
+# Session nodes record agent-run lifecycle. They remain queryable history, but
+# they are not knowledge-topology vertices and do not need semantic edges.
+SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES = ("session",)
+
+# v0.35 and earlier materialized shared node domains as pairwise edges. Those
+# edges are derived from attributes already stored on each endpoint and must not
+# participate in semantic traversal or graph-health metrics.
+LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE = "dream-cycle domain co-membership"
 
 # Edge types — bidirectional by convention
 EDGE_TYPES = (
@@ -154,6 +163,14 @@ CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_nodes_updated ON nodes(updated_at);
 CREATE INDEX IF NOT EXISTS idx_nodes_weight ON nodes(weight DESC);
 CREATE INDEX IF NOT EXISTS idx_nodes_audience ON nodes(audience);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_active_tag_project
+    ON nodes (
+        json_extract(extra, '$.tag'),
+        COALESCE(json_extract(extra, '$.project_path'), '')
+    )
+    WHERE type = 'session'
+      AND json_valid(extra)
+      AND json_extract(extra, '$.session_status') = 'active';
 
 -- Activity log for audit trail
 CREATE TABLE IF NOT EXISTS activity_log (
@@ -186,6 +203,8 @@ CREATE INDEX IF NOT EXISTS idx_suggestions_status_created
     ON suggestions(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status_pair
     ON suggestions(status, concept_a, concept_b);
+CREATE INDEX IF NOT EXISTS idx_suggestions_pair
+    ON suggestions(concept_a, concept_b);
 
 -- Automatic extraction is staged here for explicit review. Candidate rows are
 -- deliberately separate from nodes/edges/FTS so no query can accidentally

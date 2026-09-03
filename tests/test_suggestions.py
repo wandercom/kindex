@@ -87,6 +87,7 @@ class TestAddAndListSuggestions:
 
         assert store.suggestion_exists("Alpha", "Beta") is False
         assert store.suggestion_exists("Alpha", "Beta", status="accepted") is True
+        assert store.suggestion_exists("Alpha", "Beta", status=None) is True
 
     def test_suggestions_have_dream_indexes(self, store):
         """Schema includes indexes needed by scheduled dream runs."""
@@ -95,6 +96,7 @@ class TestAddAndListSuggestions:
 
         assert "idx_suggestions_status_created" in names
         assert "idx_suggestions_status_pair" in names
+        assert "idx_suggestions_pair" in names
 
 
 class TestAcceptSuggestion:
@@ -142,6 +144,31 @@ class TestAcceptSuggestion:
         r = run("suggest", "--accept", str(sid), data_dir=d)
         assert r.returncode == 0
         assert "Accepted" in r.stdout or "created" in r.stdout.lower()
+
+    def test_accept_resolves_stable_node_ids_via_cli(self, tmp_path):
+        """Dream proposals use IDs so duplicate titles stay unambiguous."""
+        d = str(tmp_path)
+        run("init", data_dir=d)
+
+        cfg = Config(data_dir=d)
+        s = Store(cfg)
+        s.add_node("Alpha Concept", node_id="alpha", node_type="concept")
+        s.add_node("Beta Concept", node_id="beta", node_type="concept")
+        sid = s.add_suggestion(
+            concept_a="alpha",
+            concept_b="beta",
+            reason="shared domain",
+            source="dream-cycle-domain",
+        )
+        s.close()
+
+        result = run("suggest", "--accept", str(sid), data_dir=d)
+
+        assert result.returncode == 0
+        assert "Accepted" in result.stdout
+        reopened = Store(cfg)
+        assert reopened.edges_from("alpha", semantic_only=True)
+        reopened.close()
 
 
 class TestRejectSuggestion:

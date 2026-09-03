@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import networkx as nx
 
+from .schema import SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES
 from .vault import Vault
 
 
@@ -192,13 +193,16 @@ def build_nx_from_store(store, limit: int = _NX_BUILD_LIMIT) -> nx.DiGraph:
     """
     G = nx.DiGraph()
 
-    for node in store.all_nodes(limit=limit):
+    for node in store.all_nodes(
+        exclude_types=SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+        limit=limit,
+    ):
         G.add_node(node["id"], title=node["title"], type=node["type"],
                    weight=node.get("weight", 0.5),
                    domains=node.get("domains", []))
 
     for nid in list(G.nodes()):
-        for edge in store.edges_from(nid):
+        for edge in store.edges_from(nid, semantic_only=True):
             if edge["to_id"] in G:
                 G.add_edge(nid, edge["to_id"],
                            weight=edge["weight"],
@@ -215,23 +219,40 @@ def store_stats(store) -> dict:
     Density, components, and degree stats come from the networkx graph
     (may be approximate if the graph exceeds the build limit).
     """
-    # Accurate counts from SQL
-    sql_nodes = store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-    sql_edges = store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    placeholders = ",".join("?" for _ in SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES)
+    semantic_nodes = store.conn.execute(
+        f"SELECT COUNT(*) FROM nodes WHERE type NOT IN ({placeholders})",
+        SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+    ).fetchone()[0]
+    stored_nodes = store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    edge_counts = store.graph_edge_counts()
 
     G = build_nx_from_store(store)
-    truncated = G.number_of_nodes() < sql_nodes
+    truncated = G.number_of_nodes() < semantic_nodes
 
     if not G:
-        return {"nodes": sql_nodes, "edges": sql_edges, "density": 0,
+        return {"nodes": semantic_nodes, "semantic_nodes": semantic_nodes,
+                "edges": edge_counts["semantic"],
+                "stored_nodes": stored_nodes,
+                "stored_edges": edge_counts["stored"],
+                "ignored_domain_edges": edge_counts["domain"],
+                "ignored_session_edges": edge_counts["session"],
+                "ignored_other_edges": edge_counts["other"],
+                "density": 0,
                 "components": 0, "avg_degree": 0, "max_degree_node": "",
-                "max_degree": 0, "truncated": False}
+                "max_degree": 0, "truncated": truncated}
 
     degrees = dict(G.degree())
     mx = max(degrees, key=degrees.get) if degrees else ""
     return {
-        "nodes": sql_nodes,
-        "edges": sql_edges,
+        "nodes": semantic_nodes,
+        "semantic_nodes": semantic_nodes,
+        "edges": edge_counts["semantic"],
+        "stored_nodes": stored_nodes,
+        "stored_edges": edge_counts["stored"],
+        "ignored_domain_edges": edge_counts["domain"],
+        "ignored_session_edges": edge_counts["session"],
+        "ignored_other_edges": edge_counts["other"],
         "density": round(nx.density(G), 4),
         "components": nx.number_weakly_connected_components(G),
         "avg_degree": round(sum(degrees.values()) / len(degrees), 2) if degrees else 0,

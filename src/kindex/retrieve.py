@@ -563,7 +563,9 @@ def hybrid_search(
             seen.add(node["id"])
             node["confidence"] = round(score, 4)
             node["rrf_score"] = round(score, 6)  # backward compat
-            node["edges_out"] = store.edges_from(node["id"])[:5]
+            node["edges_out"] = store.edges_from(
+                node["id"], semantic_only=True
+            )[:5]
             results.append(node)
         except Exception:
             continue  # one malformed candidate never zeroes retrieval
@@ -1258,7 +1260,7 @@ def predict_tier2(
     predicted: dict[str, dict] = {}
 
     for hit in search_results[:3]:
-        for edge in store.edges_from(hit["id"])[:5]:
+        for edge in store.edges_from(hit["id"], semantic_only=True)[:5]:
             tid = edge["to_id"]
             if tid not in hit_ids and tid not in predicted:
                 node = store.get_node(tid)

@@ -202,7 +202,7 @@ class TestSessionTagAtomicity:
         sessions.link_node_to_tag(store, self.TAG, nid)  # rival commit
 
         with monkeypatch.context() as m:
-            m.setattr(sessions, "get_tag", lambda s, n: _stale(stale))
+            m.setattr(sessions, "get_tag", lambda s, n, **_: _stale(stale))
             sessions.add_segment(store, self.TAG, new_focus="next topic",
                                  summary="first part done")
 
@@ -222,7 +222,7 @@ class TestSessionTagAtomicity:
         nid = store.add_node("Captured by A")
 
         with monkeypatch.context() as m:
-            m.setattr(sessions, "get_tag", lambda s, n: _stale(stale))
+            m.setattr(sessions, "get_tag", lambda s, n, **_: _stale(stale))
             sessions.link_node_to_tag(store, self.TAG, nid)
 
         extra = _fresh_extra(store, tag["id"])
@@ -238,7 +238,7 @@ class TestSessionTagAtomicity:
         sessions.link_node_to_tag(store, self.TAG, nid)
 
         with monkeypatch.context() as m:
-            m.setattr(sessions, "get_tag", lambda s, n: _stale(stale))
+            m.setattr(sessions, "get_tag", lambda s, n, **_: _stale(stale))
             sessions.update_tag(store, self.TAG, focus="refocus",
                                 append_remaining=["todo-x"])
 
@@ -254,7 +254,7 @@ class TestSessionTagAtomicity:
         sessions.link_node_to_tag(store, self.TAG, nid)
 
         with monkeypatch.context() as m:
-            m.setattr(sessions, "get_tag", lambda s, n: _stale(stale))
+            m.setattr(sessions, "get_tag", lambda s, n, **_: _stale(stale))
             sessions.pause_tag(store, self.TAG, summary="pausing")
 
         extra = _fresh_extra(store, tag["id"])
@@ -268,7 +268,7 @@ class TestSessionTagAtomicity:
         sessions.link_node_to_tag(store, self.TAG, nid)
 
         with monkeypatch.context() as m:
-            m.setattr(sessions, "get_tag", lambda s, n: _stale(stale))
+            m.setattr(sessions, "get_tag", lambda s, n, **_: _stale(stale))
             sessions.complete_tag(store, self.TAG, summary="all done")
 
         extra = _fresh_extra(store, tag["id"])

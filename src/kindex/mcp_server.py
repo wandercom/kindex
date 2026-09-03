@@ -310,7 +310,7 @@ def _node_detail(store, node: dict) -> str:
     if node.get("content"):
         lines.append(f"\n{node['content']}")
 
-    edges = store.edges_from(node["id"])
+    edges = store.edges_from(node["id"], semantic_only=True)
     if edges:
         lines.append(f"\n## Connections ({len(edges)})")
         for e in edges[:20]:
@@ -1007,10 +1007,23 @@ def status() -> str:
 
     lines = [
         "# Kindex Status\n",
-        f"Nodes: {stats.get('nodes', 0)}",
-        f"Edges: {stats.get('edges', 0)}",
-        f"Orphans: {stats.get('orphans', 0)}",
+        f"Nodes: {stats['semantic_nodes']} semantic",
+        f"Edges: {stats['edges']} semantic",
+        f"Orphans: {stats['orphans']} semantic",
     ]
+    stored_nodes = stats["stored_nodes"]
+    stored_edges = stats["stored_edges"]
+    excluded_nodes = stored_nodes - stats["semantic_nodes"]
+    excluded_edges = stored_edges - stats["edges"]
+    if excluded_nodes or excluded_edges:
+        lines.extend([
+            f"Stored nodes: {stored_nodes} ({excluded_nodes} lifecycle)",
+            f"Stored edges: {stored_edges} ({excluded_edges} excluded)",
+            f"  Domain-derived: {stats.get('ignored_domain_edges', 0)}",
+            f"  Session-linked: {stats.get('ignored_session_edges', 0)}",
+        ])
+        if stats.get("ignored_other_edges", 0):
+            lines.append(f"  Unresolved: {stats['ignored_other_edges']}")
 
     type_counts = stats.get("types", {})
     if type_counts:
@@ -1232,12 +1245,25 @@ def graph_stats() -> str:
 
     lines = [
         "# Graph Analytics\n",
-        f"Nodes: {stats.get('nodes', 0)}",
-        f"Edges: {stats.get('edges', 0)}",
+        f"Nodes: {stats['semantic_nodes']} semantic",
+        f"Edges: {stats['edges']} semantic",
         f"Density: {stats.get('density', 0):.4f}",
         f"Components: {stats.get('components', 0)}",
         f"Avg Degree: {stats.get('avg_degree', 0):.1f}",
     ]
+    stored_nodes = stats["stored_nodes"]
+    stored_edges = stats["stored_edges"]
+    excluded_nodes = stored_nodes - stats["semantic_nodes"]
+    excluded_edges = stored_edges - stats["edges"]
+    if excluded_nodes or excluded_edges:
+        lines.extend([
+            f"Stored nodes: {stored_nodes} ({excluded_nodes} lifecycle)",
+            f"Stored edges: {stored_edges} ({excluded_edges} excluded)",
+            f"  Domain-derived: {stats.get('ignored_domain_edges', 0)}",
+            f"  Session-linked: {stats.get('ignored_session_edges', 0)}",
+        ])
+        if stats.get("ignored_other_edges", 0):
+            lines.append(f"  Unresolved: {stats['ignored_other_edges']}")
     if stats.get("truncated"):
         lines.append(f"\n*Note: graph analysis used a subset of nodes. "
                      f"Density/centrality/community stats are approximate.*")
@@ -1279,7 +1305,8 @@ def graph_heal() -> str:
 
     # Stats overview
     stats = store_stats(store)
-    lines.append(f"Nodes: {stats.get('nodes', 0)}, Edges: {stats.get('edges', 0)}, "
+    lines.append(f"Semantic nodes: {stats['semantic_nodes']}, "
+                 f"semantic edges: {stats['edges']}, "
                  f"Components: {stats.get('components', 0)}, "
                  f"Density: {stats.get('density', 0):.4f}\n")
 
@@ -1454,14 +1481,14 @@ def graph_merge(source_id: str, target_id: str, keep: str = "target",
 
     # Move edges from source to target
     moved = 0
-    for edge in store.edges_from(source_id):
+    for edge in store.edges_from(source_id, semantic_only=True):
         if edge["to_id"] != target_id:
             store.add_edge(target_id, edge["to_id"],
                            edge_type=edge.get("type", "relates_to"),
                            weight=edge.get("weight", 0.3),
                            provenance=f"merged from {source['title']}")
             moved += 1
-    for edge in store.edges_to(source_id):
+    for edge in store.edges_to(source_id, semantic_only=True):
         if edge["from_id"] != target_id:
             store.add_edge(edge["from_id"], target_id,
                            edge_type=edge.get("type", "relates_to"),
@@ -1510,7 +1537,7 @@ def dream(
     """Run knowledge consolidation (dream cycle).
 
     Performs memory consolidation: fuzzy deduplication, suggestion
-    auto-application, and domain-based edge strengthening. Like sleep
+    auto-application, and bounded domain-link proposals for review. Like sleep
     consolidating memory — replay, strengthen, prune.
 
     Args:
@@ -1530,8 +1557,25 @@ def dream(
     lines.append(f"  Merged: {results.get('merged', 0)}")
     lines.append(f"  Suggested: {results.get('suggested', 0)}")
     lines.append(f"  Suggestions applied: {results.get('suggestions_applied', 0)}")
-    if "edges_strengthened" in results:
-        lines.append(f"  Edges strengthened: {results['edges_strengthened']}")
+    proposals = results.get("domain_link_proposals", [])
+    if "domain_link_proposals" in results:
+        capped = " (capped)" if results.get("domain_link_proposals_capped") else ""
+        lines.append(f"  Domain proposals: {len(proposals)}{capped}")
+        if dry_run:
+            for proposal in proposals:
+                lines.append(
+                    f"    [{proposal['domain']}] {proposal['from_title']} "
+                    f"<-> {proposal['to_title']}"
+                )
+    created = results.get("domain_link_suggestions_created", 0)
+    if created:
+        lines.append(f"  Domain suggestions: {created} queued for review")
+    if "domain_link_suggestions_pending" in results:
+        lines.append(
+            "  Domain review queue: "
+            f"{results['domain_link_suggestions_pending']}/"
+            f"{results.get('domain_link_proposal_limit', 0)}"
+        )
     if "cluster_summaries" in results:
         lines.append(f"  Cluster summaries: {results['cluster_summaries']}")
     return "\n".join(lines)
@@ -1716,7 +1760,8 @@ def orient() -> str:
 
     lines = [
         "# Kindex Orientation\n",
-        f"Graph: {stats.get('nodes', 0)} nodes, {stats.get('edges', 0)} edges, "
+        f"Graph: {stats['semantic_nodes']} semantic nodes, "
+        f"{stats['edges']} semantic edges, "
         f"{stats.get('components', 0)} component(s)\n",
     ]
 
@@ -1766,7 +1811,14 @@ def tag_start(name: str, description: str = "", focus: str = "",
         return f"Error: {e}"
 
 
-def _reinforce_on_end(store, config, tag_name: str, summary: str) -> str:
+def _reinforce_on_end(
+    store,
+    config,
+    tag_name: str,
+    summary: str,
+    *,
+    project_path: str | None = None,
+) -> str:
     """Private helper (NOT an MCP tool — it takes store/config directly).
 
     Silently queue this session for later reinforcement grading (no LLM, no
@@ -1786,7 +1838,7 @@ def _reinforce_on_end(store, config, tag_name: str, summary: str) -> str:
             return ""
 
         parts = [summary] if summary else []
-        tag = get_tag(store, tag_name)
+        tag = get_tag(store, tag_name, project_path=project_path)
         if tag:
             parts.append(tag.get("content", "") or "")
             for seg in (tag.get("extra") or {}).get("segments", []) or []:
@@ -1823,6 +1875,7 @@ def tag_update(name: str = "", focus: str = "", description: str = "",
     from .sessions import (update_tag, add_segment, pause_tag,
                            complete_tag, get_active_tag, get_tag)
     import os
+    project_path = os.getcwd()
 
     if not name:
         active = get_active_tag(store, project_path=os.getcwd())
@@ -1839,17 +1892,30 @@ def tag_update(name: str = "", focus: str = "", description: str = "",
                 remaining=[r.strip() for r in remaining.split(",") if r.strip()] if remaining else None,
                 append_remaining=[r.strip() for r in add_remaining.split(",") if r.strip()] if add_remaining else None,
                 remove_remaining=[r.strip() for r in done.split(",") if r.strip()] if done else None,
+                project_path=project_path,
             )
             return f"Updated tag: {name}"
         elif action == "segment":
-            add_segment(store, name, new_focus=focus or "New segment", summary=summary)
+            add_segment(
+                store,
+                name,
+                new_focus=focus or "New segment",
+                summary=summary,
+                project_path=project_path,
+            )
             return f"New segment on {name}: {focus}"
         elif action == "pause":
-            pause_tag(store, name, summary=summary)
+            pause_tag(store, name, summary=summary, project_path=project_path)
             return f"Paused: {name}"
         elif action == "end":
-            complete_tag(store, name, summary=summary)
-            note = _reinforce_on_end(store, config, name, summary)
+            complete_tag(store, name, summary=summary, project_path=project_path)
+            note = _reinforce_on_end(
+                store,
+                config,
+                name,
+                summary,
+                project_path=project_path,
+            )
             return f"Completed: {name}{note}"
         return f"Unknown action: {action}"
     except ValueError as e:
@@ -1867,11 +1933,18 @@ def tag_resume(name: str = "", tokens: int = 1500) -> str:
             direct library caller to supply that provider's exact counter.
     """
     store, _ = _get_store()
-    from .sessions import format_resume_context, list_tags
+    from .sessions import format_resume_context, list_tags, resume_tag
+    import os
+
+    project_path = os.getcwd()
 
     if not name:
-        tags = list_tags(store, status="active", limit=5)
-        tags += list_tags(store, status="paused", limit=5)
+        tags = list_tags(
+            store, status="active", project_path=project_path, limit=5
+        )
+        tags += list_tags(
+            store, status="paused", project_path=project_path, limit=5
+        )
         if not tags:
             return "No active or paused session tags."
         lines = ["Available session tags:\n"]
@@ -1882,12 +1955,17 @@ def tag_resume(name: str = "", tokens: int = 1500) -> str:
                          f"{extra.get('current_focus', '')[:60]}")
         return "\n".join(lines)
 
-    return format_resume_context(
-        store,
-        name,
-        max_tokens=tokens,
-        evaluation_time=operation_now(),
-    )
+    try:
+        resume_tag(store, name, project_path=project_path)
+        return format_resume_context(
+            store,
+            name,
+            max_tokens=tokens,
+            evaluation_time=operation_now(),
+            project_path=project_path,
+        )
+    except ValueError as e:
+        return f"Error: {e}"
 
 
 # ── Tasks ─────────────────────────────────────────────────────────────

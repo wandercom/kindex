@@ -47,7 +47,7 @@ class TestFindArchivable:
         ids = find_archivable_nodes(store)
         assert "active1" not in ids  # status is still 'active'
 
-    def test_skips_session_types(self, setup):
+    def test_skips_active_session_types(self, setup):
         from kindex.archive import find_archivable_nodes
 
         cfg, store = setup
@@ -60,6 +60,53 @@ class TestFindArchivable:
 
         ids = find_archivable_nodes(store)
         assert "sess1" not in ids
+
+    def test_finds_completed_unlinked_session(self, setup):
+        from kindex.archive import find_archivable_nodes
+        from kindex.sessions import complete_tag, start_tag
+
+        cfg, store = setup
+        session_id = start_tag(store, "finished-session")
+        complete_tag(store, "finished-session")
+        store.conn.execute(
+            "UPDATE nodes SET updated_at = '2025-01-01T00:00:00' WHERE id = ?",
+            (session_id,),
+        )
+        store.conn.commit()
+
+        assert session_id in find_archivable_nodes(store)
+
+    def test_skips_paused_session(self, setup):
+        from kindex.archive import find_archivable_nodes
+        from kindex.sessions import pause_tag, start_tag
+
+        cfg, store = setup
+        session_id = start_tag(store, "paused-session")
+        pause_tag(store, "paused-session")
+        store.conn.execute(
+            "UPDATE nodes SET updated_at = '2025-01-01T00:00:00' WHERE id = ?",
+            (session_id,),
+        )
+        store.conn.commit()
+
+        assert session_id not in find_archivable_nodes(store)
+
+    def test_skips_completed_session_with_linked_knowledge(self, setup):
+        from kindex.archive import find_archivable_nodes
+        from kindex.sessions import complete_tag, link_node_to_tag, start_tag
+
+        cfg, store = setup
+        session_id = start_tag(store, "linked-session")
+        node_id = store.add_node("Session knowledge")
+        link_node_to_tag(store, "linked-session", node_id)
+        complete_tag(store, "linked-session")
+        store.conn.execute(
+            "UPDATE nodes SET updated_at = '2025-01-01T00:00:00' WHERE id = ?",
+            (session_id,),
+        )
+        store.conn.commit()
+
+        assert session_id not in find_archivable_nodes(store)
 
     def test_empty_store(self, setup):
         from kindex.archive import find_archivable_nodes
@@ -223,6 +270,21 @@ class TestRestoreNode:
         # Edge should be restored since b1 is still in fast graph
         edges = store.edges_from("a1")
         assert len(edges) >= 1
+
+    def test_restore_preserves_completed_session_history(self, setup):
+        from kindex.archive import archive_nodes, restore_node
+        from kindex.sessions import complete_tag, start_tag
+
+        cfg, store = setup
+        session_id = start_tag(store, "session-history", focus="Done work")
+        complete_tag(store, "session-history", summary="Finished")
+        archive_nodes(cfg, store, [session_id])
+
+        assert restore_node(cfg, store, session_id)
+        restored = store.get_node(session_id)
+        assert restored["type"] == "session"
+        assert restored["extra"]["session_status"] == "completed"
+        assert restored["extra"]["segments"][0]["summary"] == "Finished"
 
 
 class TestRotation:

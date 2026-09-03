@@ -569,7 +569,10 @@ def _graph_hygiene(store: "Store", verbose: bool = False) -> dict:
             if mid == oid:
                 continue
             # Only link to nodes that already have edges (not other orphans)
-            if not store.edges_from(mid) and not store.edges_to(mid):
+            if (
+                not store.edges_from(mid, semantic_only=True)
+                and not store.edges_to(mid, semantic_only=True)
+            ):
                 continue
             # Create a low-weight link
             store.add_edge(

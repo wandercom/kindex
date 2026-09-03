@@ -305,10 +305,10 @@ kin remind exec --reminder-id <id>
 
 ### Dream — Knowledge Consolidation
 
-Kindex can run fuzzy deduplication, auto-apply pending suggestions, and strengthen edges between nodes that share domains. Like memory consolidation during sleep — replay, strengthen important paths, prune noise.
+Kindex can run fuzzy deduplication, auto-apply high-confidence pending suggestions, and stage bounded domain-link proposals for review. Resolved fuzzy matches are not recreated. The pending domain-review queue is capped per graph (50 by default), proposals are round-robin across domains, and rejected pairs stay rejected. Shared domains are never materialized directly as semantic edges. Like memory consolidation during sleep — replay important paths and prune noise without turning tags into topology.
 
 ```bash
-# See what would happen (no changes)
+# See exact merge and domain-link proposals (no changes)
 kin dream --dry-run
 
 # Run full consolidation
@@ -386,8 +386,14 @@ kin ingest all
 # Session tags — named work context handles
 kin tag start auth-refactor --focus "OAuth2 flow" --remaining "tokens,tests"
 kin tag segment --focus "Token storage" --summary "Flow design done"
-kin tag resume auth-refactor   # admission-controlled context for new session
+kin tag pause auth-refactor --summary "Waiting for review"
+kin tag resume auth-refactor   # reactivate and render admission-controlled context
 kin tag end --summary "All done"
+
+# Completed, unlinked session tags age into the reversible slow archive;
+# active, paused, and artifact-linked sessions stay in the fast store.
+kin archive search auth-refactor
+kin archive restore <session-node-id>
 
 # Reminders — never forget, never nag
 kin remind create "standup" --at "every weekday at 9am" --priority high
@@ -811,8 +817,8 @@ Dream (kin dream):
   Modes:         lightweight (<5s) | full (non-LLM) | deep (claude -p clusters)
   Triggers:      CLI | cron step 11 | throttled Stop-time detach
   Dedup:         difflib.SequenceMatcher, 4-char title bucketing, 0.95 merge / 0.85 suggest
-  Consolidation: suggestion auto-apply, domain edge strengthening, cluster summarisation
-  Safety:        fcntl.flock exclusion, protected types skip, provenance tracking
+  Consolidation: suggestion auto-apply, bounded domain proposals, cluster summarisation
+  Safety:        no tag-derived edges, overlap dedup, fcntl.flock, protected types
 
 Three integration paths:
   MCP plugin --> Claude calls tools natively (search, add, learn, remind, ...)
@@ -862,11 +868,12 @@ Code structure lives in the same graph as your decisions, watches, and constrain
 | `kin supersede <id> <text>` | Replace a node with a new one, preserving history (--reason) |
 | `kin alias <id> [add\|remove\|list]` | Manage AKA/synonyms for a node |
 | `kin register <id> <path>` | Associate a file path with a node |
-| `kin orphans` | Nodes with no connections |
+| `kin orphans` | Semantic nodes with no semantic connections (sessions excluded) |
 | `kin trail <id>` | Temporal history and provenance chain |
 | `kin decay` | Apply weight decay to stale nodes/edges |
 | `kin recent` | Recently active nodes |
 | `kin tag [action]` | Session tags: start, update, segment, pause, end, resume, list, show |
+| `kin archive [action]` | Search, restore, or run the reversible slow-graph archive |
 | `kin candidate [action]` | Quarantined capture review: list, show, accept, reject, prune, erase |
 | `kin verify <node>` | Assert verification and optional RFC 3339 valid interval |
 | `kin invalidate <node>` | Record asserted invalidation actor, code, and exclusive end time |
@@ -916,7 +923,7 @@ gain explicit contextual support.
 |---------|-------------|
 | `kin ingest <source>` | Ingest from: projects, sessions, codex-sessions, files, commits, github, linear, code, all |
 | `kin cron` | One-shot maintenance cycle (for crontab/launchd) |
-| `kin dream` | Knowledge consolidation: dedup, suggestions, edge strengthening (--deep, --detach) |
+| `kin dream` | Knowledge consolidation: dedup and reviewable link proposals (--deep, --detach) |
 | `kin watch` | Watch for new sessions and ingest them (--interval) |
 | `kin analytics` | Archive session analytics and activity heatmap |
 | `kin index` | Write .kin/index.json for git tracking |

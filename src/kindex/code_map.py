@@ -398,7 +398,7 @@ def export_understand_anything(
     ua_edges = []
     seen_edges: set[tuple[str, str, str]] = set()
     for node in code_nodes:
-        for edge in store.edges_from(node["id"]):
+        for edge in store.edges_from(node["id"], semantic_only=True):
             target = edge.get("to_id")
             if target not in code_ids:
                 continue

@@ -55,6 +55,32 @@ class TestBuildNX:
         assert G.number_of_nodes() == 0
         s.close()
 
+    def test_excludes_sessions_and_derived_domain_edges(self, store):
+        from kindex.schema import LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE
+
+        store.add_node("Session", node_id="session", node_type="session")
+        store.add_edge("hub", "session", provenance="session-tag")
+        store.add_edge(
+            "a", "b", provenance=LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE
+        )
+
+        graph = build_nx_from_store(store)
+
+        assert "session" not in graph
+        assert not graph.has_edge("a", "b")
+        assert graph.has_edge("hub", "a")
+
+    def test_semantic_edge_reads_exclude_session_at_either_endpoint(self, store):
+        store.add_node("Session", node_id="session", node_type="session")
+        store.add_edge("hub", "session", provenance="session-tag")
+
+        assert all(
+            edge["to_id"] != "session"
+            for edge in store.edges_from("hub", semantic_only=True)
+        )
+        assert store.edges_from("session", semantic_only=True) == []
+        assert store.edges_to("session", semantic_only=True) == []
+
 
 class TestStoreStats:
     def test_stats(self, store):
@@ -72,6 +98,41 @@ class TestStoreStats:
         stats = store_stats(s)
         assert stats["nodes"] == 0
         s.close()
+
+    def test_reports_stored_topology_separately(self, store):
+        from kindex.schema import LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE
+
+        store.add_node("Session", node_id="session", node_type="session")
+        store.add_edge("hub", "session", provenance="session-tag")
+        store.add_edge(
+            "a", "b", provenance=LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE
+        )
+
+        stats = store_stats(store)
+
+        assert stats["nodes"] == 5
+        assert stats["semantic_nodes"] == 5
+        assert stats["stored_nodes"] == 6
+        assert stats["stored_edges"] > stats["edges"]
+        assert stats["ignored_domain_edges"] == 2
+        assert stats["ignored_session_edges"] == 2
+
+    def test_orphans_ignore_session_and_domain_only_links(self, store):
+        from kindex.schema import LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE
+
+        store.add_node("Session", node_id="session", node_type="session")
+        store.add_node("Domain only", node_id="domain-only")
+        store.add_node("Peer", node_id="peer")
+        store.add_edge(
+            "domain-only",
+            "peer",
+            provenance=LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,
+        )
+
+        orphan_ids = {node["id"] for node in store.orphans()}
+
+        assert "session" not in orphan_ids
+        assert {"domain-only", "peer"} <= orphan_ids
 
 
 class TestCentrality:

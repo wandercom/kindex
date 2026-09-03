@@ -53,6 +53,23 @@ class TestNodeOperations:
         assert node["title"] == "Updated"
         assert node["weight"] == 0.9
 
+    def test_same_id_upsert_preserves_relationships(self, store):
+        store.add_node("Original", node_id="same")
+        store.add_node("Peer", node_id="peer")
+        store.add_edge("same", "peer", provenance="test")
+        before_rowid = store.conn.execute(
+            "SELECT rowid FROM nodes WHERE id = 'same'"
+        ).fetchone()[0]
+
+        store.add_node("Updated", node_id="same")
+
+        assert store.get_node("same")["title"] == "Updated"
+        after_rowid = store.conn.execute(
+            "SELECT rowid FROM nodes WHERE id = 'same'"
+        ).fetchone()[0]
+        assert after_rowid == before_rowid
+        assert {edge["to_id"] for edge in store.edges_from("same")} == {"peer"}
+
     def test_delete_node(self, store):
         nid = store.add_node("Doomed")
         store.delete_node(nid)
@@ -185,3 +202,12 @@ class TestStats:
         s = store.stats()
         assert s["nodes"] == 2
         assert s["edges"] >= 1
+
+    def test_stats_use_same_explicit_node_vocabulary(self, store):
+        store.add_node("Knowledge", node_id="knowledge")
+        store.add_node("Session", node_id="session", node_type="session")
+
+        stats = store.stats()
+
+        assert stats["nodes"] == stats["semantic_nodes"] == 1
+        assert stats["stored_nodes"] == 2

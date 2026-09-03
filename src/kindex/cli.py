@@ -855,11 +855,11 @@ def cmd_orphans(args):
     orphans = store.orphans()
 
     if orphans:
-        print(f"{len(orphans)} orphan(s):")
+        print(f"{len(orphans)} semantic orphan(s):")
         for n in orphans:
             print(f"  {n['id']}  [{n['type']}] {n['title']}")
     else:
-        print("No orphans. Graph health: good.")
+        print("No semantic orphans. Graph health: good.")
 
     store.close()
 
@@ -978,9 +978,23 @@ def cmd_status(args):
             print(f"Profile: {cfg.active_profile} (via {cfg.profile_source})")
         else:
             print("Profile: (none — legacy single-graph)")
-        print(f"Nodes:     {stats['nodes']}")
-        print(f"Edges:     {stats['edges']}")
+        print(f"Nodes:     {stats['semantic_nodes']} semantic")
+        print(f"Edges:     {stats['edges']} semantic")
         print(f"Orphans:   {stats['orphans']}")
+        stored_nodes = stats["stored_nodes"]
+        semantic_nodes = stats["semantic_nodes"]
+        excluded_nodes = stored_nodes - semantic_nodes
+        ignored = stats.get("stored_edges", 0) - stats.get("edges", 0)
+        if excluded_nodes or ignored:
+            print(
+                f"Stored:    {stored_nodes} nodes, {stats['stored_edges']} edges "
+                f"({excluded_nodes} lifecycle nodes, {ignored} excluded edges)"
+            )
+            print(f"  domain-derived {stats.get('ignored_domain_edges', 0)}")
+            print(f"  session-linked {stats.get('ignored_session_edges', 0)}")
+            other = stats.get("ignored_other_edges", 0)
+            if other:
+                print(f"  unresolved      {other}")
         print(f"\nBy type:")
         for t, c in sorted(stats.get("types", {}).items()):
             print(f"  {t:12s} {c}")
@@ -2412,8 +2426,14 @@ def cmd_suggest(args):
             return
 
         # Resolve concept titles to nodes
-        node_a = store.get_node_by_title(suggestion["concept_a"])
-        node_b = store.get_node_by_title(suggestion["concept_b"])
+        node_a = (
+            store.get_node(suggestion["concept_a"])
+            or store.get_node_by_title(suggestion["concept_a"])
+        )
+        node_b = (
+            store.get_node(suggestion["concept_b"])
+            or store.get_node_by_title(suggestion["concept_b"])
+        )
 
         if node_a and node_b:
             store.add_edge(
@@ -2644,13 +2664,32 @@ def cmd_graph(args):
             print(_dumps(stats, indent=2))
         else:
             print(f"Graph Statistics")
-            print(f"  Nodes:      {stats['nodes']}")
-            print(f"  Edges:      {stats['edges']}")
+            print(f"  Nodes:      {stats['semantic_nodes']} semantic")
+            print(f"  Edges:      {stats['edges']} semantic")
             print(f"  Density:    {stats['density']}")
             print(f"  Components: {stats['components']}")
             print(f"  Avg degree: {stats['avg_degree']}")
             if stats['max_degree_node']:
                 print(f"  Hub:        {stats['max_degree_node']} (degree {stats['max_degree']})")
+            ignored = stats.get("stored_edges", 0) - stats.get("edges", 0)
+            excluded_nodes = stats["stored_nodes"] - stats["semantic_nodes"]
+            if excluded_nodes or ignored:
+                print(
+                    f"  Stored:     {stats['stored_nodes']} nodes, "
+                    f"{stats['stored_edges']} edges ({excluded_nodes} lifecycle "
+                    f"nodes, {ignored} excluded edges)"
+                )
+                print(
+                    "    domain-derived: "
+                    f"{stats.get('ignored_domain_edges', 0)}"
+                )
+                print(
+                    "    session-linked: "
+                    f"{stats.get('ignored_session_edges', 0)}"
+                )
+                other = stats.get("ignored_other_edges", 0)
+                if other:
+                    print(f"    unresolved:     {other}")
 
     elif mode == "centrality":
         method = args.method or "betweenness"
@@ -2857,7 +2896,7 @@ def cmd_sync_links(args):
     updated = 0
 
     for node in nodes:
-        edges = store.edges_from(node["id"])
+        edges = store.edges_from(node["id"], semantic_only=True)
         if not edges:
             continue
 
@@ -3583,7 +3622,7 @@ def cmd_skills(args):
         return
 
     # Find skill edges (demonstrates)
-    edges = store.edges_from(person["id"])
+    edges = store.edges_from(person["id"], semantic_only=True)
     skill_edges = [e for e in edges if e.get("type") == "demonstrates"]
 
     # Also find context_of edges to skill nodes
@@ -3869,8 +3908,27 @@ def cmd_dream(args):
             print(f"  Merged:              {results.get('merged', 0)}")
             print(f"  Suggested:           {results.get('suggested', 0)}")
             print(f"  Suggestions applied: {results.get('suggestions_applied', 0)}")
-            if "edges_strengthened" in results:
-                print(f"  Edges strengthened:  {results['edges_strengthened']}")
+            proposals = results.get("domain_link_proposals", [])
+            if "domain_link_proposals" in results:
+                capped = " (capped)" if results.get(
+                    "domain_link_proposals_capped"
+                ) else ""
+                print(f"  Domain proposals:    {len(proposals)}{capped}")
+                if dry_run:
+                    for proposal in proposals:
+                        print(
+                            f"    [{proposal['domain']}] "
+                            f"{proposal['from_title']} <-> {proposal['to_title']}"
+                        )
+            created = results.get("domain_link_suggestions_created", 0)
+            if created:
+                print(f"  Domain suggestions:  {created} queued for review")
+            if "domain_link_suggestions_pending" in results:
+                print(
+                    "  Domain review queue: "
+                    f"{results['domain_link_suggestions_pending']}/"
+                    f"{results.get('domain_link_proposal_limit', 0)}"
+                )
             if "cluster_summaries" in results:
                 print(f"  Cluster summaries:   {results['cluster_summaries']}")
 
@@ -5562,6 +5620,7 @@ def cmd_tag(args):
                 remaining=remaining,
                 append_remaining=append,
                 remove_remaining=remove,
+                project_path=os.getcwd(),
             )
             print(f"Updated: {tag_name}")
         except ValueError as e:
@@ -5581,7 +5640,13 @@ def cmd_tag(args):
         focus = getattr(args, "focus", None) or "New segment"
         summary = getattr(args, "summary", None) or ""
         try:
-            add_segment(store, tag_name, new_focus=focus, summary=summary)
+            add_segment(
+                store,
+                tag_name,
+                new_focus=focus,
+                summary=summary,
+                project_path=os.getcwd(),
+            )
             print(f"New segment on {tag_name}: {focus}")
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -5599,7 +5664,9 @@ def cmd_tag(args):
             return
         summary = getattr(args, "summary", None) or ""
         try:
-            pause_tag(store, tag_name, summary=summary)
+            pause_tag(
+                store, tag_name, summary=summary, project_path=os.getcwd()
+            )
             print(f"Paused: {tag_name}")
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -5617,13 +5684,15 @@ def cmd_tag(args):
             return
         summary = getattr(args, "summary", None) or ""
         try:
-            complete_tag(store, tag_name, summary=summary)
+            complete_tag(
+                store, tag_name, summary=summary, project_path=os.getcwd()
+            )
             print(f"Completed: {tag_name}")
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
 
     elif action == "resume":
-        from .sessions import format_resume_context
+        from .sessions import format_resume_context, resume_tag
 
         if not tag_name:
             print("Usage: kin tag resume <name>", file=sys.stderr)
@@ -5632,13 +5701,18 @@ def cmd_tag(args):
         tokens = getattr(args, "tokens", 1500)
         if tokens is None:
             tokens = 1500
-        block = format_resume_context(
-            store,
-            tag_name,
-            max_tokens=tokens,
-            evaluation_time=operation_now(),
-        )
-        print(block)
+        try:
+            resume_tag(store, tag_name, project_path=os.getcwd())
+            block = format_resume_context(
+                store,
+                tag_name,
+                max_tokens=tokens,
+                evaluation_time=operation_now(),
+                project_path=os.getcwd(),
+            )
+            print(block)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
 
     elif action == "list":
         from .sessions import list_tags
@@ -5665,7 +5739,7 @@ def cmd_tag(args):
             print("Usage: kin tag show <name>", file=sys.stderr)
             store.close()
             return
-        tag = get_tag(store, tag_name)
+        tag = get_tag(store, tag_name, project_path=os.getcwd())
         if not tag:
             print(f"Tag not found: {tag_name}", file=sys.stderr)
             store.close()
@@ -6697,7 +6771,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_recent)
 
     # orphans
-    s = sub.add_parser("orphans", help="Nodes with no edges")
+    s = sub.add_parser("orphans", help="Semantic nodes with no semantic edges")
     _common(s)
     s.set_defaults(func=cmd_orphans)
 
