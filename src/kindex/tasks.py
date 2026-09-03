@@ -366,9 +366,9 @@ def store_bfs(
             continue
 
         # Follow edges in both directions
-        edges = store.edges_from(node_id)
+        edges = store.edges_from(node_id, semantic_only=True)
         try:
-            edges += store.edges_to(node_id)
+            edges += store.edges_to(node_id, semantic_only=True)
         except AttributeError:
             pass
 

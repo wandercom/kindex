@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import sqlite3
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -27,13 +28,20 @@ def _normalize_tag(name: str) -> str:
     return name.strip("-")
 
 
-def get_tag(store: Store, name: str) -> dict | None:
+def get_tag(
+    store: Store,
+    name: str,
+    *,
+    project_path: str | None = None,
+) -> dict | None:
     """Look up a session tag by name. Returns the node dict or None."""
-    tag = store.get_session_tag_by_name(_normalize_tag(name))
+    tag = store.get_session_tag_by_name(
+        _normalize_tag(name), project_path=project_path
+    )
     if tag:
         return tag
     # Also try unnormalized (in case title was stored differently)
-    return store.get_session_tag_by_name(name)
+    return store.get_session_tag_by_name(name, project_path=project_path)
 
 
 def get_active_tag(store: Store, project_path: str | None = None) -> dict | None:
@@ -72,7 +80,7 @@ def start_tag(
     if not tag_name:
         raise ValueError("Tag name cannot be empty")
 
-    existing = get_tag(store, tag_name)
+    existing = get_tag(store, tag_name, project_path=project_path)
     if existing:
         extra = existing.get("extra") or {}
         if extra.get("session_status") == "active":
@@ -98,6 +106,7 @@ def start_tag(
         "project_path": project_path or "",
         "started_at": now,
         "paused_at": None,
+        "paused_reason": None,
         "completed_at": None,
         "current_focus": focus,
         "remaining": remaining or [],
@@ -105,15 +114,19 @@ def start_tag(
         "linked_nodes": [],
     }
 
-    nid = store.add_node(
-        title=tag_name,
-        content=description,
-        node_type="session",
-        prov_activity="session-tag",
-        prov_source=project_path or "",
-        prov_who=prov_who or [],
-        extra=extra,
-    )
+    try:
+        nid = store.add_node(
+            title=tag_name,
+            content=description,
+            node_type="session",
+            prov_activity="session-tag",
+            prov_source=project_path or "",
+            prov_who=prov_who or [],
+            extra=extra,
+        )
+    except sqlite3.IntegrityError as exc:
+        store.conn.rollback()
+        raise ValueError(f"Active tag already exists: {tag_name}") from exc
     return nid
 
 
@@ -126,6 +139,7 @@ def update_tag(
     remaining: list[str] | None = None,
     append_remaining: list[str] | None = None,
     remove_remaining: list[str] | None = None,
+    project_path: str | None = None,
 ) -> None:
     """Update the current state of a session tag.
 
@@ -133,7 +147,7 @@ def update_tag(
     extra changes go through Store.atomic_extra_update (fresh read inside
     BEGIN IMMEDIATE — no lost updates from stale snapshots).
     """
-    tag = get_tag(store, name)
+    tag = get_tag(store, name, project_path=project_path)
     if not tag:
         raise ValueError(f"Tag not found: {name}")
 
@@ -171,13 +185,14 @@ def add_segment(
     new_focus: str,
     summary: str = "",
     decisions: list[str] | None = None,
+    project_path: str | None = None,
 ) -> None:
     """Close the current segment and start a new one.
 
     Runs inside Store.atomic_extra_update: a node linked (or a focus set)
     by another agent between this caller's read and write must survive.
     """
-    tag = get_tag(store, name)
+    tag = get_tag(store, name, project_path=project_path)
     if not tag:
         raise ValueError(f"Tag not found: {name}")
 
@@ -212,14 +227,20 @@ def add_segment(
     store.atomic_extra_update(tag["id"], _mutate)
 
 
-def link_node_to_tag(store: Store, tag_name: str, node_id: str) -> None:
+def link_node_to_tag(
+    store: Store,
+    tag_name: str,
+    node_id: str,
+    *,
+    project_path: str | None = None,
+) -> None:
     """Associate a knowledge node with a session tag.
 
     Hooks auto-link every captured node to the project's active tag, so
     multiple agents race on this node: the mutation runs inside
     Store.atomic_extra_update to avoid losing concurrent links/segments.
     """
-    tag = get_tag(store, tag_name)
+    tag = get_tag(store, tag_name, project_path=project_path)
     if not tag:
         return
 
@@ -245,15 +266,22 @@ def link_node_to_tag(store: Store, tag_name: str, node_id: str) -> None:
         pass  # Edge may already exist
 
 
-def pause_tag(store: Store, name: str, *, summary: str = "") -> None:
+def pause_tag(
+    store: Store,
+    name: str,
+    *,
+    summary: str = "",
+    project_path: str | None = None,
+) -> None:
     """Pause a session tag, marking it as suspended."""
-    tag = get_tag(store, name)
+    tag = get_tag(store, name, project_path=project_path)
     if not tag:
         raise ValueError(f"Tag not found: {name}")
 
     def _mutate(extra: dict) -> None:
         extra["session_status"] = "paused"
         extra["paused_at"] = _now()
+        extra["paused_reason"] = "user"
 
         if summary:
             # Update current segment summary
@@ -264,9 +292,15 @@ def pause_tag(store: Store, name: str, *, summary: str = "") -> None:
     store.atomic_extra_update(tag["id"], _mutate)
 
 
-def complete_tag(store: Store, name: str, *, summary: str = "") -> None:
+def complete_tag(
+    store: Store,
+    name: str,
+    *,
+    summary: str = "",
+    project_path: str | None = None,
+) -> None:
     """Mark a session tag as completed."""
-    tag = get_tag(store, name)
+    tag = get_tag(store, name, project_path=project_path)
     if not tag:
         raise ValueError(f"Tag not found: {name}")
 
@@ -286,6 +320,38 @@ def complete_tag(store: Store, name: str, *, summary: str = "") -> None:
     store.atomic_extra_update(tag["id"], _mutate)
 
 
+def resume_tag(
+    store: Store,
+    name: str,
+    *,
+    project_path: str | None = None,
+) -> dict:
+    """Reactivate a paused tag and return its current stored state."""
+    tag = get_tag(store, name, project_path=project_path)
+    if not tag:
+        raise ValueError(f"Tag not found: {name}")
+
+    status = (tag.get("extra") or {}).get("session_status")
+    if status == "completed":
+        raise ValueError(f"Tag is completed; start a new session: {name}")
+    if status == "paused":
+        def _mutate(extra: dict) -> None:
+            extra["session_status"] = "active"
+            extra["paused_at"] = None
+            extra["paused_reason"] = None
+
+        try:
+            store.atomic_extra_update(tag["id"], _mutate)
+        except sqlite3.IntegrityError as exc:
+            store.conn.rollback()
+            raise ValueError(f"Active tag already exists: {name}") from exc
+
+    resumed = store.get_node(tag["id"])
+    if resumed is None:
+        raise ValueError(f"Tag not found: {name}")
+    return resumed
+
+
 def format_resume_context(
     store: Store,
     name: str,
@@ -294,6 +360,7 @@ def format_resume_context(
     counter: Callable[[str], int] | None = None,
     evaluation_time: str | datetime.datetime | None = None,
     trusted_only: bool = True,
+    project_path: str | None = None,
 ) -> str:
     """Generate a deterministic, admission-controlled resume projection.
 
@@ -367,7 +434,7 @@ def format_resume_context(
     if not add_complete(warning):
         return ""
 
-    tag = get_tag(store, name)
+    tag = get_tag(store, name, project_path=project_path)
     if not tag:
         add_labeled("## Session not found: ", name)
         result = rendered()

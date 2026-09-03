@@ -608,6 +608,7 @@ class ReminderConfig(BaseModel):
     dream_on_stop_enabled: bool = True  # run throttled knowledge consolidation when Claude exits
     dream_min_interval: int = 3600      # seconds between scheduled/hook dream runs
     dream_max_new_suggestions: int = 100  # cap suggestion writes per dream run
+    dream_max_domain_link_suggestions: int = 50  # pending review cap per graph
     stop_guard_window: int = 7200      # seconds (2h) — block exit if actions due within
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     adaptive_scheduling: bool = True   # dynamically adjust cron interval

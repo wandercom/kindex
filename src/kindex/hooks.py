@@ -576,13 +576,18 @@ def capture_session_end(
             from .sessions import get_active_tag, link_node_to_tag
             import os
 
-            active_tag = get_active_tag(store, project_path=os.getcwd())
+            project_path = os.getcwd()
+            active_tag = get_active_tag(store, project_path=project_path)
             if active_tag:
                 tag_name = (active_tag.get("extra") or {}).get("tag", active_tag["title"])
                 for nid in created_ids:
-                    link_node_to_tag(store, tag_name, nid)
-        except Exception:
-            pass  # Don't break session end capture
+                    link_node_to_tag(
+                        store, tag_name, nid, project_path=project_path
+                    )
+        except Exception as exc:
+            # Hooks stay non-blocking, but a failed lifecycle link must remain
+            # visible in the degraded-event ledger.
+            _record_section_degraded("session-end-tag-link", exc, config)
 
     return count
 

@@ -26,7 +26,30 @@ def _jdumps(obj):
     return json.dumps(obj, default=_json_default)
 
 from .config import Config
-from .schema import ALL_NODE_TYPES, CREATE_TABLES, EDGE_TYPES, SCHEMA_VERSION, edit_class_for
+from .schema import (
+    ALL_NODE_TYPES,
+    CREATE_TABLES,
+    LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,
+    EDGE_TYPES,
+    SCHEMA_VERSION,
+    SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+    edit_class_for,
+)
+
+_SEMANTIC_NODE_PLACEHOLDERS = ",".join(
+    "?" for _ in SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES
+)
+_NON_DOMAIN_EDGE_SQL = "COALESCE(e.provenance, '') != ?"
+_SEMANTIC_EDGE_SQL = (
+    f"{_NON_DOMAIN_EDGE_SQL} "
+    f"AND source.type NOT IN ({_SEMANTIC_NODE_PLACEHOLDERS}) "
+    f"AND target.type NOT IN ({_SEMANTIC_NODE_PLACEHOLDERS})"
+)
+_SEMANTIC_EDGE_PARAMS = (
+    LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,
+    *SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+    *SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+)
 
 
 def _now() -> str:
@@ -506,6 +529,9 @@ class Store:
         if current_version < 11:
             self._migrate_v11()
 
+        if current_version < 12:
+            self._migrate_v12()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -780,6 +806,114 @@ class Store:
             c.rollback()
             raise
 
+    def _migrate_v12(self) -> None:
+        """Make active session-tag identity deterministic and race-safe.
+
+        Existing duplicate active rows are preserved as paused history. The
+        most recently updated row remains active, then a partial unique index
+        makes another duplicate for the same normalized tag and project
+        unrepresentable.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            node_columns = {
+                row["name"]
+                for row in c.execute("PRAGMA table_info(nodes)").fetchall()
+            }
+            updated_expr = "updated_at" if "updated_at" in node_columns else "''"
+            created_expr = "created_at" if "created_at" in node_columns else "''"
+            rows = c.execute(
+                f"""SELECT id, extra,
+                           {updated_expr} AS updated_at,
+                           {created_expr} AS created_at
+                      FROM nodes
+                     WHERE type = 'session'
+                       AND json_valid(extra)
+                       AND json_extract(extra, '$.session_status') = 'active'
+                       AND json_extract(extra, '$.tag') IS NOT NULL
+                     ORDER BY updated_at DESC, created_at DESC, id DESC"""
+            ).fetchall()
+            active_keys: set[tuple[str, str]] = set()
+            paused_at = _now()
+            for row in rows:
+                extra = json.loads(row["extra"])
+                key = (
+                    str(extra.get("tag") or ""),
+                    str(extra.get("project_path") or ""),
+                )
+                if key not in active_keys:
+                    active_keys.add(key)
+                    continue
+                extra["session_status"] = "paused"
+                extra["paused_at"] = extra.get("paused_at") or paused_at
+                extra["paused_reason"] = "duplicate-active-session-migration-v12"
+                c.execute(
+                    "UPDATE nodes SET extra = ? WHERE id = ?",
+                    (_jdumps(extra), row["id"]),
+                )
+
+            c.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_active_tag_project
+                       ON nodes (
+                           json_extract(extra, '$.tag'),
+                           COALESCE(json_extract(extra, '$.project_path'), '')
+                       )
+                     WHERE type = 'session'
+                       AND json_valid(extra)
+                       AND json_extract(extra, '$.session_status') = 'active'"""
+            )
+            has_suggestions = c.execute(
+                """SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'suggestions'"""
+            ).fetchone()
+            if has_suggestions is not None:
+                c.execute(
+                    """CREATE INDEX IF NOT EXISTS idx_suggestions_pair
+                           ON suggestions(concept_a, concept_b)"""
+                )
+            duplicate = c.execute(
+                """SELECT 1 FROM nodes
+                     WHERE type = 'session'
+                       AND json_valid(extra)
+                       AND json_extract(extra, '$.session_status') = 'active'
+                     GROUP BY json_extract(extra, '$.tag'),
+                              COALESCE(json_extract(extra, '$.project_path'), '')
+                    HAVING COUNT(*) > 1
+                     LIMIT 1"""
+            ).fetchone()
+            if duplicate is not None:
+                raise RuntimeError(
+                    "v12 migration verification failed: duplicate active session tags"
+                )
+            index = c.execute(
+                """SELECT 1 FROM sqlite_master
+                     WHERE type = 'index'
+                       AND name = 'idx_session_active_tag_project'"""
+            ).fetchone()
+            if index is None:
+                raise RuntimeError(
+                    "v12 migration verification failed: active session index"
+                )
+            if has_suggestions is not None:
+                suggestion_index = c.execute(
+                    """SELECT 1 FROM sqlite_master
+                         WHERE type = 'index'
+                           AND name = 'idx_suggestions_pair'"""
+                ).fetchone()
+                if suggestion_index is None:
+                    raise RuntimeError(
+                        "v12 migration verification failed: suggestion pair index"
+                    )
+            c.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                ("12",),
+            )
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
     # Columns each table must carry for the code that queries it to work.
     # Checked by `kin doctor`, which is the only place that catches the failure
     # class v10 repairs: a table that exists with the right name and the wrong
@@ -971,19 +1105,27 @@ class Store:
         concept_a: str,
         concept_b: str,
         *,
-        status: str = "pending",
+        status: str | None = "pending",
     ) -> bool:
         """Return true if a suggestion exists for this pair in either order."""
+        status_clause = "status = ? AND " if status is not None else ""
+        params: tuple[Any, ...]
+        if status is None:
+            params = (concept_a, concept_b, concept_b, concept_a)
+        else:
+            params = (status, concept_a, concept_b, status, concept_b, concept_a)
         row = self.conn.execute(
-            """
+            f"""
             SELECT 1 FROM suggestions
-             WHERE status = ? AND kind = 'bridge' AND concept_a = ? AND concept_b = ?
+             WHERE {status_clause}kind = 'bridge'
+               AND concept_a = ? AND concept_b = ?
             UNION ALL
             SELECT 1 FROM suggestions
-             WHERE status = ? AND kind = 'bridge' AND concept_a = ? AND concept_b = ?
+             WHERE {status_clause}kind = 'bridge'
+               AND concept_a = ? AND concept_b = ?
             LIMIT 1
             """,
-            (status, concept_a, concept_b, status, concept_b, concept_a),
+            params,
         ).fetchone()
         return row is not None
 
@@ -1041,14 +1183,36 @@ class Store:
         now = _now()
         when = prov_when or now
         self.conn.execute(
-            """INSERT OR REPLACE INTO nodes
+            """INSERT INTO nodes
                (id, type, title, content, aka, intent,
                 prov_who, prov_when, prov_activity, prov_why, prov_source,
                 weight, domains, status, audience,
                 created_at, updated_at, last_accessed, extra,
                 referent, asserted_at, true_of)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?)""",
+                       ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   type = excluded.type,
+                   title = excluded.title,
+                   content = excluded.content,
+                   aka = excluded.aka,
+                   intent = excluded.intent,
+                   prov_who = excluded.prov_who,
+                   prov_when = excluded.prov_when,
+                   prov_activity = excluded.prov_activity,
+                   prov_why = excluded.prov_why,
+                   prov_source = excluded.prov_source,
+                   weight = excluded.weight,
+                   domains = excluded.domains,
+                   status = excluded.status,
+                   audience = excluded.audience,
+                   created_at = excluded.created_at,
+                   updated_at = excluded.updated_at,
+                   last_accessed = excluded.last_accessed,
+                   extra = excluded.extra,
+                   referent = excluded.referent,
+                   asserted_at = excluded.asserted_at,
+                   true_of = excluded.true_of""",
             (nid, node_type, title, content,
              _jdumps(aka or []), intent,
              _jdumps(prov_who or []), when, prov_activity, prov_why, prov_source,
@@ -1195,6 +1359,7 @@ class Store:
                   status: str | None = None,
                   audience: str | None = None,
                   tags: list[str] | None = None,
+                  exclude_types: tuple[str, ...] = (),
                   limit: int = 500) -> list[dict]:
         """List nodes with optional type/status/audience/tags filters."""
         q = "SELECT * FROM nodes WHERE 1=1"
@@ -1212,7 +1377,11 @@ class Store:
             for tag in tags:
                 q += " AND domains LIKE ?"
                 params.append(f'%"{tag}"%')
-        q += " ORDER BY weight DESC, updated_at DESC LIMIT ?"
+        if exclude_types:
+            placeholders = ",".join("?" for _ in exclude_types)
+            q += f" AND type NOT IN ({placeholders})"
+            params.extend(exclude_types)
+        q += " ORDER BY weight DESC, updated_at DESC, id ASC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(q, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
@@ -2617,9 +2786,12 @@ class Store:
             placeholders = ",".join("?" for _ in frontier)
             try:
                 rows = self.conn.execute(
-                    f"""SELECT from_id, to_id, weight FROM edges
-                        WHERE from_id IN ({placeholders})""",
-                    tuple(frontier),
+                    f"""SELECT e.from_id, e.to_id, e.weight FROM edges e
+                          JOIN nodes source ON source.id = e.from_id
+                          JOIN nodes target ON target.id = e.to_id
+                         WHERE e.from_id IN ({placeholders})
+                           AND {_SEMANTIC_EDGE_SQL}""",
+                    (*frontier, *_SEMANTIC_EDGE_PARAMS),
                 ).fetchall()
             except Exception:
                 break
@@ -2647,31 +2819,96 @@ class Store:
 
         return sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))
 
-    def edges_from(self, node_id: str) -> list[dict]:
-        rows = self.conn.execute(
-            """SELECT e.*, n.title as to_title FROM edges e
-               JOIN nodes n ON n.id = e.to_id
-               WHERE e.from_id = ? ORDER BY e.weight DESC""",
-            (node_id,),
-        ).fetchall()
+    def edges_from(self, node_id: str, *, semantic_only: bool = False) -> list[dict]:
+        q = """SELECT e.*, target.title as to_title FROM edges e
+                 JOIN nodes source ON source.id = e.from_id
+                 JOIN nodes target ON target.id = e.to_id
+                WHERE e.from_id = ?"""
+        params: list[Any] = [node_id]
+        if semantic_only:
+            q += f" AND {_SEMANTIC_EDGE_SQL}"
+            params.extend(_SEMANTIC_EDGE_PARAMS)
+        q += " ORDER BY e.weight DESC"
+        rows = self.conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
 
-    def edges_to(self, node_id: str) -> list[dict]:
-        rows = self.conn.execute(
-            """SELECT e.*, n.title as from_title FROM edges e
-               JOIN nodes n ON n.id = e.from_id
-               WHERE e.to_id = ? ORDER BY e.weight DESC""",
-            (node_id,),
-        ).fetchall()
+    def edges_to(self, node_id: str, *, semantic_only: bool = False) -> list[dict]:
+        q = """SELECT e.*, source.title as from_title FROM edges e
+                 JOIN nodes source ON source.id = e.from_id
+                 JOIN nodes target ON target.id = e.to_id
+                WHERE e.to_id = ?"""
+        params: list[Any] = [node_id]
+        if semantic_only:
+            q += f" AND {_SEMANTIC_EDGE_SQL}"
+            params.extend(_SEMANTIC_EDGE_PARAMS)
+        q += " ORDER BY e.weight DESC"
+        rows = self.conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
 
     def orphans(self) -> list[dict]:
-        """Nodes with no edges (violates graph health invariant)."""
+        """Semantic nodes with no semantic edges."""
         rows = self.conn.execute(
-            """SELECT * FROM nodes WHERE id NOT IN
-               (SELECT from_id FROM edges UNION SELECT to_id FROM edges)"""
+            f"""SELECT n.* FROM nodes n
+                  WHERE n.type NOT IN ({_SEMANTIC_NODE_PLACEHOLDERS})
+                    AND NOT EXISTS (
+                        SELECT 1 FROM edges e
+                        JOIN nodes source ON source.id = e.from_id
+                        JOIN nodes target ON target.id = e.to_id
+                        WHERE e.from_id = n.id
+                          AND {_SEMANTIC_EDGE_SQL}
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM edges e
+                        JOIN nodes source ON source.id = e.from_id
+                        JOIN nodes target ON target.id = e.to_id
+                        WHERE e.to_id = n.id
+                          AND {_SEMANTIC_EDGE_SQL}
+                    )""",
+            (
+                *SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+                *_SEMANTIC_EDGE_PARAMS,
+                *_SEMANTIC_EDGE_PARAMS,
+            ),
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def graph_edge_counts(self) -> dict[str, int]:
+        """Count stored and semantic edges without conflating derived topology."""
+        stored = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        domain = self.conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE provenance = ?",
+            (LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,),
+        ).fetchone()[0]
+        semantic = self.conn.execute(
+            f"""SELECT COUNT(*) FROM edges e
+                  JOIN nodes source ON source.id = e.from_id
+                  JOIN nodes target ON target.id = e.to_id
+                 WHERE {_SEMANTIC_EDGE_SQL}""",
+            _SEMANTIC_EDGE_PARAMS,
+        ).fetchone()[0]
+        session = self.conn.execute(
+            f"""SELECT COUNT(*) FROM edges e
+                  JOIN nodes source ON source.id = e.from_id
+                  JOIN nodes target ON target.id = e.to_id
+                 WHERE {_NON_DOMAIN_EDGE_SQL}
+                   AND (
+                       source.type IN ({_SEMANTIC_NODE_PLACEHOLDERS})
+                       OR target.type IN ({_SEMANTIC_NODE_PLACEHOLDERS})
+                   )""",
+            (
+                LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,
+                *SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+                *SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+            ),
+        ).fetchone()[0]
+        other = stored - semantic - domain - session
+        return {
+            "stored": stored,
+            "semantic": semantic,
+            "domain": domain,
+            "session": session,
+            "other": other,
+        }
 
     # ── FTS5 search ────────────────────────────────────────────────────
 
@@ -3300,34 +3537,49 @@ class Store:
         project_path: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        """Query session-tag nodes with optional status and project_path filters."""
-        q = "SELECT * FROM nodes WHERE type = 'session' AND extra LIKE ?"
-        params: list = ['%"session_status"%']
-        if project_path:
-            q += " AND extra LIKE ?"
-            params.append(f'%"project_path"%"{project_path}"%')
-        q += " ORDER BY updated_at DESC LIMIT ?"
+        """Query session tags, applying exact filters before ordering and limit."""
+        q = """SELECT * FROM nodes
+                WHERE type = 'session'
+                  AND json_valid(extra)
+                  AND json_extract(extra, '$.session_status') IS NOT NULL"""
+        params: list[Any] = []
+        if status:
+            q += " AND json_extract(extra, '$.session_status') = ?"
+            params.append(status)
+        if project_path is not None:
+            q += " AND COALESCE(json_extract(extra, '$.project_path'), '') = ?"
+            params.append(project_path)
+        q += " ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(q, params).fetchall()
-        results = [self._row_to_dict(r) for r in rows]
-        if status:
-            results = [
-                r for r in results
-                if (r.get("extra") or {}).get("session_status") == status
-            ]
-        return results
+        return [self._row_to_dict(r) for r in rows]
 
-    def get_session_tag_by_name(self, tag_name: str) -> dict | None:
-        """Find a session tag by its tag name in extra JSON."""
-        rows = self.conn.execute(
-            "SELECT * FROM nodes WHERE type = 'session' AND extra LIKE ?",
-            (f'%"tag"%"{tag_name}"%',),
-        ).fetchall()
-        for r in rows:
-            d = self._row_to_dict(r)
-            if (d.get("extra") or {}).get("tag") == tag_name:
-                return d
-        return self.get_node_by_title(tag_name)
+    def get_session_tag_by_name(
+        self,
+        tag_name: str,
+        *,
+        project_path: str | None = None,
+    ) -> dict | None:
+        """Find the current session tag with an exact, deterministic lookup."""
+        q = """SELECT * FROM nodes
+                WHERE type = 'session'
+                  AND json_valid(extra)
+                  AND json_extract(extra, '$.tag') = ?"""
+        params: list[Any] = [tag_name]
+        if project_path is not None:
+            q += " AND COALESCE(json_extract(extra, '$.project_path'), '') = ?"
+            params.append(project_path)
+        q += """ ORDER BY
+                    CASE json_extract(extra, '$.session_status')
+                        WHEN 'active' THEN 0
+                        WHEN 'paused' THEN 1
+                        WHEN 'completed' THEN 2
+                        ELSE 3
+                    END,
+                    updated_at DESC, created_at DESC, id DESC
+                  LIMIT 1"""
+        row = self.conn.execute(q, params).fetchone()
+        return self._row_to_dict(row) if row is not None else None
 
     def active_watches(self) -> list[dict]:
         """Get all active watches that haven't expired."""
@@ -3694,15 +3946,32 @@ class Store:
     # ── Stats ──────────────────────────────────────────────────────────
 
     def stats(self) -> dict:
-        node_count = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        edge_count = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        stored_node_count = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes"
+        ).fetchone()[0]
+        placeholders = ",".join(
+            "?" for _ in SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES
+        )
+        semantic_node_count = self.conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE type NOT IN ({placeholders})",
+            SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+        ).fetchone()[0]
+        edge_counts = self.graph_edge_counts()
         orphan_count = len(self.orphans())
         type_counts = {}
         for row in self.conn.execute("SELECT type, COUNT(*) as c FROM nodes GROUP BY type"):
             type_counts[row["type"]] = row["c"]
         return {
-            "nodes": node_count,
-            "edges": edge_count,
+            # ``nodes`` remains as a compatibility alias, but it now has the
+            # same semantic meaning as graph.store_stats().
+            "nodes": semantic_node_count,
+            "semantic_nodes": semantic_node_count,
+            "stored_nodes": stored_node_count,
+            "edges": edge_counts["semantic"],
+            "stored_edges": edge_counts["stored"],
+            "ignored_domain_edges": edge_counts["domain"],
+            "ignored_session_edges": edge_counts["session"],
+            "ignored_other_edges": edge_counts["other"],
             "orphans": orphan_count,
             "types": type_counts,
         }

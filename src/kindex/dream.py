@@ -3,7 +3,7 @@
 Performs memory consolidation on the knowledge graph:
 - Fuzzy deduplication (title similarity + content overlap)
 - Suggestion auto-application
-- Domain-based edge strengthening
+- Bounded, reviewable domain-link proposals
 
 Three invocation modes:
 - lightweight: dedup + suggestions only, <5s target
@@ -45,6 +45,8 @@ PROTECTED_TYPES = (frozenset(EDIT_POLICY["additive"])
 DEFAULT_MERGE_THRESHOLD = 0.95
 DEFAULT_SUGGEST_THRESHOLD = 0.85
 DEFAULT_MAX_NEW_SUGGESTIONS = 100
+DEFAULT_MAX_DOMAIN_LINK_SUGGESTIONS = 50
+DOMAIN_SUGGESTION_SOURCE = "dream-cycle-domain"
 
 # Runaway-merge guards.
 #
@@ -292,7 +294,7 @@ def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
         return False
 
     # Move edges from source to target
-    for edge in store.edges_from(source_id):
+    for edge in store.edges_from(source_id, semantic_only=True):
         if edge["to_id"] != target_id:
             store.add_edge(
                 target_id, edge["to_id"],
@@ -300,7 +302,7 @@ def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
                 weight=edge.get("weight", 0.3),
                 provenance="dream-cycle merge",
             )
-    for edge in store.edges_to(source_id):
+    for edge in store.edges_to(source_id, semantic_only=True):
         if edge["from_id"] != target_id:
             store.add_edge(
                 edge["from_id"], target_id,
@@ -339,6 +341,11 @@ def auto_apply_suggestions(store: Store) -> int:
     applied = 0
 
     for s in suggestions:
+        # Domain co-membership is a weak, derived signal. Full Dream stages
+        # those pairs for review; a later lightweight run must not turn them
+        # back into automatic edges.
+        if s.get("source") == DOMAIN_SUGGESTION_SOURCE:
+            continue
         concept_a = s.get("concept_a", "")
         concept_b = s.get("concept_b", "")
 
@@ -359,8 +366,14 @@ def auto_apply_suggestions(store: Store) -> int:
             continue
 
         # Check edge doesn't already exist
-        existing_out = {e["to_id"] for e in store.edges_from(node_a["id"])}
-        existing_in = {e["from_id"] for e in store.edges_to(node_a["id"])}
+        existing_out = {
+            e["to_id"]
+            for e in store.edges_from(node_a["id"], semantic_only=True)
+        }
+        existing_in = {
+            e["from_id"]
+            for e in store.edges_to(node_a["id"], semantic_only=True)
+        }
         if node_b["id"] in existing_out or node_b["id"] in existing_in:
             store.update_suggestion(s["id"], "accepted")
             applied += 1
@@ -378,18 +391,28 @@ def auto_apply_suggestions(store: Store) -> int:
     return applied
 
 
-def strengthen_domain_edges(
+def propose_domain_links(
     store: Store,
     *,
-    dry_run: bool = False,
-    verbose: bool = False,
-) -> int:
-    """Find active nodes sharing domains but lacking edges; create weak links."""
+    limit: int = DEFAULT_MAX_DOMAIN_LINK_SUGGESTIONS,
+) -> tuple[list[dict], bool]:
+    """Return bounded, sparse domain-link proposals without mutating topology.
+
+    Each domain contributes a star around its highest-weight member instead of
+    all pairwise combinations. The returned boolean says whether another valid
+    proposal existed beyond ``limit``.
+    """
     import json
 
-    nodes = store.all_nodes(status="active", limit=2000)
-    # Build domain -> node_ids index
-    domain_index: dict[str, list[dict]] = {}
+    limit = max(0, int(limit))
+    # Use an identity-ordered bounded population. Relevance weights decay, so
+    # taking the top weighted rows would churn both representatives and
+    # candidate membership even when graph content had not changed.
+    rows = store.conn.execute(
+        "SELECT * FROM nodes WHERE status = 'active' ORDER BY id ASC LIMIT 2000"
+    ).fetchall()
+    nodes = [store._row_to_dict(row) for row in rows]
+    domain_index: dict[str, dict[str, dict]] = {}
     for n in nodes:
         if n.get("type", "concept") in PROTECTED_TYPES:
             continue
@@ -400,44 +423,69 @@ def strengthen_domain_edges(
             except (json.JSONDecodeError, TypeError):
                 domains = []
         for d in domains:
-            domain_index.setdefault(d, []).append(n)
+            if isinstance(d, str) and d:
+                domain_index.setdefault(d, {})[n["id"]] = n
 
-    created = 0
+    proposals: list[dict] = []
     seen_pairs: set[tuple[str, str]] = set()
+    neighbor_cache: dict[str, set[str]] = {}
 
-    for domain, members in domain_index.items():
-        if len(members) < 2 or len(members) > 50:
+    def semantic_neighbors(node_id: str) -> set[str]:
+        if node_id not in neighbor_cache:
+            outgoing = {
+                edge["to_id"]
+                for edge in store.edges_from(node_id, semantic_only=True)
+            }
+            incoming = {
+                edge["from_id"]
+                for edge in store.edges_to(node_id, semantic_only=True)
+            }
+            neighbor_cache[node_id] = outgoing | incoming
+        return neighbor_cache[node_id]
+
+    ranked_domains: list[tuple[str, list[dict]]] = []
+    for domain, members_by_id in sorted(domain_index.items()):
+        if len(members_by_id) < 2:
             continue
-        for i, a in enumerate(members):
-            for b in members[i + 1:]:
-                pair = tuple(sorted([a["id"], b["id"]]))
-                if pair in seen_pairs:
-                    continue
-                seen_pairs.add(pair)
+        # IDs are the only immutable node identity. Weight decays and titles
+        # can be edited, so either would make a rejected star reappear around
+        # a different representative on a later Dream cycle.
+        members = sorted(members_by_id.values(), key=lambda node: node["id"])
+        ranked_domains.append((domain, members))
+    # Round-robin across domains so one broad tag cannot consume the entire
+    # graph-wide review budget before narrower domains receive one proposal.
+    domain_round = [(domain, members, 1) for domain, members in ranked_domains]
+    while domain_round:
+        next_round: list[tuple[str, list[dict], int]] = []
+        for domain, members, spoke_index in domain_round:
+            if spoke_index + 1 < len(members):
+                next_round.append((domain, members, spoke_index + 1))
+            representative = members[0]
+            member = members[spoke_index]
+            pair = tuple(sorted((representative["id"], member["id"])))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            if member["id"] in semantic_neighbors(representative["id"]):
+                continue
+            if store.suggestion_exists(
+                representative["id"], member["id"], status=None
+            ):
+                continue
+            if len(proposals) >= limit:
+                return proposals, True
+            proposals.append(
+                {
+                    "from_id": representative["id"],
+                    "from_title": representative.get("title", ""),
+                    "to_id": member["id"],
+                    "to_title": member.get("title", ""),
+                    "domain": domain,
+                }
+            )
+        domain_round = next_round
 
-                # Check if edge already exists
-                existing = {e["to_id"] for e in store.edges_from(a["id"])}
-                if b["id"] in existing:
-                    continue
-                existing_rev = {e["from_id"] for e in store.edges_to(a["id"])}
-                if b["id"] in existing_rev:
-                    continue
-
-                if dry_run:
-                    created += 1
-                    continue
-
-                store.add_edge(
-                    a["id"], b["id"],
-                    edge_type="relates_to",
-                    weight=0.15,
-                    provenance="dream-cycle domain co-membership",
-                )
-                created += 1
-                if verbose and created <= 10:
-                    print(f"  Domain link: {a['title']} <-> {b['title']} ({domain})")
-
-    return created
+    return proposals, False
 
 
 # ── Dream cycles ─────────────────────────────────────────────────────
@@ -516,7 +564,7 @@ def dream_lightweight(
         if suggested >= max_new_suggestions:
             suggestion_capped = True
             break
-        if store.suggestion_exists(a_id, b_id):
+        if store.suggestion_exists(a_id, b_id, status=None):
             existing_suggestions += 1
             continue
         store.add_suggestion(
@@ -550,15 +598,45 @@ def dream_full(
     verbose: bool = False,
     dry_run: bool = False,
 ) -> dict:
-    """Full dream cycle: lightweight + edge strengthening.
+    """Full dream cycle: lightweight work plus domain-link suggestions.
 
     No LLM calls.
     """
     results = dream_lightweight(config, store, verbose=verbose, dry_run=dry_run)
 
-    # Strengthen edges between nodes that share domains
-    strengthened = strengthen_domain_edges(store, dry_run=dry_run, verbose=verbose)
-    results["edges_strengthened"] = strengthened
+    limit = max(
+        0,
+        int(
+            getattr(
+                config.reminders,
+                "dream_max_domain_link_suggestions",
+                DEFAULT_MAX_DOMAIN_LINK_SUGGESTIONS,
+            )
+            or 0
+        ),
+    )
+    pending = store.conn.execute(
+        """SELECT COUNT(*) FROM suggestions
+             WHERE status = 'pending' AND kind = 'bridge' AND source = ?""",
+        (DOMAIN_SUGGESTION_SOURCE,),
+    ).fetchone()[0]
+    available = max(0, limit - pending)
+    proposals, capped = propose_domain_links(store, limit=available)
+    created = 0
+    if not dry_run:
+        for proposal in proposals:
+            store.add_suggestion(
+                proposal["from_id"],
+                proposal["to_id"],
+                reason=f"Shared domain: {proposal['domain']}",
+                source=DOMAIN_SUGGESTION_SOURCE,
+            )
+            created += 1
+    results["domain_link_proposals"] = proposals
+    results["domain_link_proposal_limit"] = limit
+    results["domain_link_proposals_capped"] = capped
+    results["domain_link_suggestions_created"] = created
+    results["domain_link_suggestions_pending"] = pending + created
 
     return results
 

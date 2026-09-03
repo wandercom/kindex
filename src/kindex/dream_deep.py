@@ -9,6 +9,7 @@ Only invoked when user explicitly passes --deep flag.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -21,6 +22,9 @@ if TYPE_CHECKING:
 from .dream import PROTECTED_TYPES, dream_full
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CLUSTER_OVERLAP_THRESHOLD = 0.6
+CLUSTER_SUMMARY_SOURCE = "dream-deep-cluster-summary"
 
 
 def dream_deep(
@@ -40,8 +44,33 @@ def dream_deep(
     # Find dense clusters for summarisation
     clusters = _find_clusters(store, min_size=4, max_hops=2)
     summaries_created = 0
+    existing_signatures: set[str] = set()
+    existing_member_sets: list[set[str]] = []
+    for row in store.conn.execute(
+        """SELECT extra FROM nodes
+             WHERE status = 'active' AND prov_source = ? AND json_valid(extra)""",
+        (CLUSTER_SUMMARY_SOURCE,),
+    ).fetchall():
+        extra = json.loads(row["extra"] or "{}")
+        signature = extra.get("cluster_signature")
+        if isinstance(signature, str) and signature:
+            existing_signatures.add(signature)
+        members = extra.get("cluster_members")
+        if isinstance(members, list):
+            member_ids = {member for member in members if isinstance(member, str)}
+            if member_ids:
+                existing_member_sets.append(member_ids)
 
-    for cluster in clusters[:5]:  # cap at 5 clusters per dream
+    for cluster in clusters:
+        if summaries_created >= 5:
+            break
+        signature = _cluster_signature(cluster)
+        member_ids = {node["id"] for node in cluster}
+        if signature in existing_signatures or any(
+            _clusters_overlap(member_ids, existing)
+            for existing in existing_member_sets
+        ):
+            continue
         if dry_run:
             logger.info("Would summarise cluster: %s", [n["title"] for n in cluster])
             summaries_created += 1
@@ -61,8 +90,12 @@ def dream_deep(
             content=summary["content"],
             node_type="concept",
             prov_activity="dream-cycle",
-            prov_source="dream-deep-cluster-summary",
+            prov_source=CLUSTER_SUMMARY_SOURCE,
             weight=max(n.get("weight", 0.5) for n in cluster),
+            extra={
+                "cluster_signature": signature,
+                "cluster_members": sorted(node["id"] for node in cluster),
+            },
         )
         for member in cluster:
             store.add_edge(
@@ -72,6 +105,8 @@ def dream_deep(
                 provenance="dream-cycle cluster summary",
             )
         summaries_created += 1
+        existing_signatures.add(signature)
+        existing_member_sets.append(member_ids)
         if verbose:
             print(f"  Cluster summary: {summary['title']} ({len(cluster)} members)")
 
@@ -84,14 +119,19 @@ def _find_clusters(
 ) -> list[list[dict]]:
     """Find dense clusters of related nodes sharing domains."""
     nodes = store.all_nodes(status="active", limit=2000)
-    nodes = [n for n in nodes if n.get("type", "concept") not in PROTECTED_TYPES]
+    nodes = [
+        node
+        for node in nodes
+        if node.get("type", "concept") not in PROTECTED_TYPES
+        and node.get("prov_source") != CLUSTER_SUMMARY_SOURCE
+    ]
 
     # Build adjacency from edges
     adj: dict[str, set[str]] = {}
     for n in nodes:
         nid = n["id"]
         adj.setdefault(nid, set())
-        for e in store.edges_from(nid):
+        for e in store.edges_from(nid, semantic_only=True):
             adj[nid].add(e["to_id"])
             adj.setdefault(e["to_id"], set()).add(nid)
 
@@ -141,10 +181,62 @@ def _find_clusters(
             continue
         visited_clusters.add(key)
 
-        clusters.append([node_map[nid] for nid in cluster_ids])
+        clusters.append([node_map[nid] for nid in sorted(cluster_ids)])
 
-    clusters.sort(key=len, reverse=True)
-    return clusters[:10]
+    return _dedupe_overlapping_clusters(clusters)[:10]
+
+
+def _dedupe_overlapping_clusters(
+    clusters: list[list[dict]],
+    threshold: float = DEFAULT_CLUSTER_OVERLAP_THRESHOLD,
+) -> list[list[dict]]:
+    """Keep deterministic clusters while suppressing subsets and high overlap."""
+    ordered = sorted(
+        (
+            sorted(cluster, key=lambda node: node["id"])
+            for cluster in clusters
+        ),
+        key=lambda cluster: (
+            -len(cluster),
+            tuple(node["id"] for node in cluster),
+        ),
+    )
+    kept: list[list[dict]] = []
+    kept_ids: list[set[str]] = []
+    for cluster in ordered:
+        ids = {node["id"] for node in cluster}
+        if not ids:
+            continue
+        overlaps = False
+        for existing in kept_ids:
+            if _clusters_overlap(ids, existing, threshold):
+                overlaps = True
+                break
+        if not overlaps:
+            kept.append(cluster)
+            kept_ids.append(ids)
+    return kept
+
+
+def _clusters_overlap(
+    left: set[str],
+    right: set[str],
+    threshold: float = DEFAULT_CLUSTER_OVERLAP_THRESHOLD,
+) -> bool:
+    """Return whether two non-empty member sets describe the same cluster."""
+    if not left or not right:
+        return False
+    shared = len(left & right)
+    return (
+        shared == min(len(left), len(right))
+        or shared / len(left | right) >= threshold
+    )
+
+
+def _cluster_signature(cluster: list[dict]) -> str:
+    """Return a stable identity for an exact set of cluster members."""
+    member_ids = "\n".join(sorted(node["id"] for node in cluster))
+    return hashlib.sha256(member_ids.encode("utf-8")).hexdigest()
 
 
 def _parse_domains(node: dict) -> set[str]:

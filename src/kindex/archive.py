@@ -245,28 +245,47 @@ def find_archivable_nodes(
     """Find nodes eligible for archival to slow graph.
 
     Criteria:
-    - Status is 'archived' (marked by graph hygiene) or 'superseded'
-      (replaced via supersede_node — terminal, weight decays naturally)
-    - Weight below threshold
-    - Not updated in min_age_days
-    - Not a lifecycle type (task, session, etc. handled separately)
+    - Semantic nodes are archived/superseded, low-weight, and old.
+    - Completed session tags are old, unlinked, and have no graph edges.
+    - Active/paused sessions and other lifecycle nodes stay in the fast store.
     """
     now = datetime.datetime.now()
     cutoff = now - datetime.timedelta(days=min_age_days)
     cutoff_iso = cutoff.isoformat(timespec="seconds")
 
     rows = store.conn.execute(
-        """SELECT id, type FROM nodes
-           WHERE status IN ('archived', 'superseded')
-             AND weight <= ?
-             AND updated_at < ?
-           ORDER BY weight ASC, updated_at ASC
-           LIMIT ?""",
-        (weight_threshold, cutoff_iso, limit),
+        """SELECT n.id FROM nodes n
+            WHERE n.updated_at < ?
+              AND (
+                    (
+                        n.status IN ('archived', 'superseded')
+                        AND n.weight <= ?
+                        AND n.type NOT IN ('task', 'session', 'checkpoint',
+                                           'coordination')
+                    )
+                    OR
+                    (
+                        n.type = 'session'
+                        AND json_valid(n.extra)
+                        AND json_extract(n.extra, '$.session_status') = 'completed'
+                        AND COALESCE(
+                            json_array_length(
+                                json_extract(n.extra, '$.linked_nodes')
+                            ),
+                            0
+                        ) = 0
+                        AND NOT EXISTS (
+                            SELECT 1 FROM edges e
+                             WHERE e.from_id = n.id OR e.to_id = n.id
+                        )
+                    )
+              )
+            ORDER BY n.weight ASC, n.updated_at ASC, n.id ASC
+            LIMIT ?""",
+        (cutoff_iso, weight_threshold, limit),
     ).fetchall()
 
-    skip_types = {"task", "session", "checkpoint"}
-    return [r["id"] for r in rows if r["type"] not in skip_types]
+    return [r["id"] for r in rows]
 
 
 def archive_cycle(

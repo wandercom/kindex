@@ -190,6 +190,47 @@ class TestCaptureSessionEnd:
         gnn_nodes = [n for n in store.all_nodes() if "graph neural" in n["title"].lower()]
         assert len(gnn_nodes) == 1  # should not create a duplicate
 
+    def test_capture_links_nodes_to_same_project_tag(
+        self, store, config, ledger, monkeypatch, tmp_path
+    ):
+        import kindex.extract as extract_mod
+        from kindex.hooks import capture_session_end
+        from kindex.sessions import get_tag, start_tag
+
+        monkeypatch.chdir(tmp_path)
+        start_tag(store, "capture-tag", project_path=str(tmp_path))
+        monkeypatch.setattr(
+            extract_mod,
+            "extract",
+            lambda *_args, **_kwargs: {
+                "concepts": [{
+                    "title": "Captured concept",
+                    "content": "Enough detail to retain this concept.",
+                    "domains": [],
+                    "type": "concept",
+                }],
+                "decisions": [],
+                "questions": [],
+                "connections": [],
+                "bridge_opportunities": [],
+            },
+        )
+
+        capture_session_end(
+            store,
+            config,
+            ledger,
+            session_text="A sufficiently long session transcript for extraction.",
+        )
+
+        tag = get_tag(store, "capture-tag", project_path=str(tmp_path))
+        assert len(tag["extra"]["linked_nodes"]) == 1
+        captured_id = tag["extra"]["linked_nodes"][0]
+        assert any(
+            edge["to_id"] == tag["id"]
+            for edge in store.edges_from(captured_id)
+        )
+
 
 class TestWriteInboxItem:
     def test_write_inbox_item(self, config):

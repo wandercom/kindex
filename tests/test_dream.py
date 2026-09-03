@@ -266,6 +266,27 @@ class TestDreamLightweight:
         assert results["suggestion_existing"] == 1
         assert row["count"] == 1
 
+    def test_does_not_recreate_resolved_suggestion(self, config, store, monkeypatch):
+        import kindex.dream as dream
+
+        a = store.add_node("Alpha anchor")
+        b = store.add_node("Alpha anchored")
+        suggestion_id = store.add_suggestion(a, b, source="dream-cycle")
+        store.update_suggestion(suggestion_id, "rejected")
+        monkeypatch.setattr(
+            dream,
+            "find_duplicates",
+            lambda _store: {"merge": [], "suggest": [(a, b, 0.9)]},
+        )
+
+        results = dream.dream_lightweight(config, store)
+
+        assert results["suggested"] == 0
+        assert results["suggestion_existing"] == 1
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM suggestions"
+        ).fetchone()[0] == 1
+
     def test_caps_new_suggestion_writes(self, config, store, monkeypatch):
         import kindex.dream as dream
 
@@ -296,7 +317,8 @@ class TestDreamFull:
         from kindex.dream import dream_full
         results = dream_full(config, store)
         assert results["merged"] == 0
-        assert results["edges_strengthened"] == 0
+        assert results["domain_link_suggestions_created"] == 0
+        assert results["domain_link_proposals"] == []
 
 
 class TestDreamCycle:
@@ -435,42 +457,236 @@ class TestProtectedTypes:
         assert len(result["merge"]) == 0
 
 
-# ── Domain edge strengthening ────────────────────────────────────────
+# ── Domain link proposals ────────────────────────────────────────────
 
 
-class TestDomainEdges:
-    def test_creates_edges_for_shared_domain(self, store):
-        from kindex.dream import strengthen_domain_edges
+class TestDomainLinkProposals:
+    def test_proposes_sparse_representative_links(self, store):
+        from kindex.dream import propose_domain_links
+
+        ids = [
+            store.add_node(f"Concept {index}", domains=["security"])
+            for index in range(5)
+        ]
+
+        proposals, capped = propose_domain_links(store, limit=20)
+
+        assert len(proposals) == len(ids) - 1
+        assert capped is False
+        assert len({proposal["from_id"] for proposal in proposals}) == 1
+        assert store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0
+
+    def test_proposal_budget_is_hard_and_deterministic(self, store):
+        from kindex.dream import propose_domain_links
+
+        for index in range(10):
+            store.add_node(f"Concept {index}", domains=["security"])
+
+        first, first_capped = propose_domain_links(store, limit=3)
+        second, second_capped = propose_domain_links(store, limit=3)
+
+        assert first == second
+        assert len(first) == 3
+        assert first_capped is second_capped is True
+
+    def test_proposal_budget_round_robins_across_domains(self, store):
+        from kindex.dream import propose_domain_links
+
+        for domain in ("alpha", "beta", "gamma"):
+            for index in range(3):
+                store.add_node(
+                    f"{domain} {index}",
+                    node_id=f"{domain}-{index}",
+                    domains=[domain],
+                )
+
+        proposals, capped = propose_domain_links(store, limit=3)
+
+        assert [proposal["domain"] for proposal in proposals] == [
+            "alpha",
+            "beta",
+            "gamma",
+        ]
+        assert capped is True
+
+    def test_representative_is_stable_when_weights_change(self, store):
+        from kindex.dream import propose_domain_links
+
+        store.add_node("First", node_id="a", domains=["security"], weight=0.1)
+        store.add_node("Second", node_id="b", domains=["security"], weight=0.9)
+        store.add_node("Third", node_id="c", domains=["security"], weight=0.5)
+        before, _ = propose_domain_links(store)
+
+        store.update_node("a", weight=1.0)
+        store.update_node("b", weight=0.01)
+        store.update_node("c", weight=0.02)
+        after, _ = propose_domain_links(store)
+
+        assert before == after
+        assert {proposal["from_id"] for proposal in after} == {"a"}
+
+    def test_full_dry_run_reports_pairs_without_writes(self, config, store):
+        from kindex.dream import dream_full
+
         store.add_node("Concept A", domains=["security"])
         store.add_node("Concept B", domains=["security"])
 
-        created = strengthen_domain_edges(store)
-        assert created >= 1
+        results = dream_full(config, store, dry_run=True)
 
-    def test_dry_run_counts_without_creating(self, store):
-        from kindex.dream import strengthen_domain_edges
-        store.add_node("Concept A", domains=["security"])
-        store.add_node("Concept B", domains=["security"])
+        assert len(results["domain_link_proposals"]) == 1
+        assert results["domain_link_suggestions_created"] == 0
+        assert store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM suggestions"
+        ).fetchone()[0] == 0
 
-        created = strengthen_domain_edges(store, dry_run=True)
-        assert created >= 1
+    def test_full_creates_reviewable_suggestion_not_edge(self, config, store):
+        from kindex.dream import DOMAIN_SUGGESTION_SOURCE, dream_full
 
-        # No actual edges should exist
-        nodes = store.all_nodes(status="active")
-        for n in nodes:
-            edges = store.edges_from(n["id"])
-            # Filter to only dream-created edges
-            dream_edges = [e for e in edges if "dream" in (e.get("provenance") or "")]
-            assert len(dream_edges) == 0
-
-    def test_skips_already_linked(self, store):
-        from kindex.dream import strengthen_domain_edges
         a = store.add_node("Concept A", domains=["security"])
         b = store.add_node("Concept B", domains=["security"])
-        store.add_edge(a, b, edge_type="relates_to")
 
-        created = strengthen_domain_edges(store)
-        assert created == 0
+        first = dream_full(config, store)
+        second = dream_full(config, store)
+
+        assert first["domain_link_suggestions_created"] == 1
+        assert second["domain_link_suggestions_created"] == 0
+        assert store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0
+        suggestion = store.conn.execute(
+            "SELECT * FROM suggestions WHERE concept_a IN (?, ?)", (a, b)
+        ).fetchone()
+        assert suggestion["source"] == DOMAIN_SUGGESTION_SOURCE
+
+    def test_domain_suggestions_are_never_auto_applied(self, store):
+        from kindex.dream import DOMAIN_SUGGESTION_SOURCE, auto_apply_suggestions
+
+        a = store.add_node("Matching concept")
+        b = store.add_node("Matching concept details")
+        store.add_suggestion(a, b, source=DOMAIN_SUGGESTION_SOURCE)
+
+        assert auto_apply_suggestions(store) == 0
+        assert store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0
+
+    def test_pending_domain_queue_has_a_global_cap(self, config, store):
+        from kindex.dream import DOMAIN_SUGGESTION_SOURCE, dream_full
+
+        config.reminders.dream_max_domain_link_suggestions = 3
+        for index in range(10):
+            store.add_node(f"Concept {index}", domains=["security"])
+
+        first = dream_full(config, store)
+        second = dream_full(config, store)
+
+        assert first["domain_link_suggestions_created"] == 3
+        assert second["domain_link_suggestions_created"] == 0
+        assert second["domain_link_suggestions_pending"] == 3
+        pending = store.conn.execute(
+            "SELECT COUNT(*) FROM suggestions WHERE status = 'pending' AND source = ?",
+            (DOMAIN_SUGGESTION_SOURCE,),
+        ).fetchone()[0]
+        assert pending == 3
+
+    def test_rejected_domain_pair_is_not_reproposed(self, config, store):
+        from kindex.dream import dream_full
+
+        store.add_node("Concept A", node_id="a", domains=["security"])
+        store.add_node("Concept B", node_id="b", domains=["security"])
+        first = dream_full(config, store)
+        suggestion = store.pending_suggestions()[0]
+        store.update_suggestion(suggestion["id"], "rejected")
+
+        second = dream_full(config, store)
+
+        assert first["domain_link_suggestions_created"] == 1
+        assert second["domain_link_proposals"] == []
+        assert second["domain_link_suggestions_created"] == 0
+
+
+class TestDeepDreamClusters:
+    def test_overlap_dedup_removes_subsets_and_near_duplicates(self):
+        from kindex.dream_deep import _dedupe_overlapping_clusters
+
+        def cluster(*ids):
+            return [{"id": node_id} for node_id in ids]
+
+        clusters = [
+            cluster("a", "b", "c", "d", "e"),
+            cluster("a", "b", "c", "d"),
+            cluster("a", "b", "c", "d", "f"),
+            cluster("w", "x", "y", "z"),
+        ]
+
+        deduped = _dedupe_overlapping_clusters(clusters)
+
+        assert [[node["id"] for node in group] for group in deduped] == [
+            ["a", "b", "c", "d", "e"],
+            ["w", "x", "y", "z"],
+        ]
+
+    def test_existing_domain_edges_do_not_create_clusters(self, store):
+        from kindex.dream_deep import _find_clusters
+        from kindex.schema import LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE
+
+        ids = [
+            store.add_node(f"Concept {index}", domains=["security"])
+            for index in range(4)
+        ]
+        for index in range(len(ids) - 1):
+            store.add_edge(
+                ids[index],
+                ids[index + 1],
+                provenance=LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,
+            )
+
+        assert _find_clusters(store, min_size=4, max_hops=2) == []
+
+    def test_cluster_signature_prevents_regeneration(self, config, store, monkeypatch):
+        import kindex.dream_deep as deep
+
+        cluster = [
+            store.get_node(store.add_node(f"Node {index}"))
+            for index in range(4)
+        ]
+        calls = []
+        monkeypatch.setattr(deep, "_find_clusters", lambda *args, **kwargs: [cluster])
+
+        def summarise(_cluster, timeout=300):
+            calls.append(timeout)
+            return {"title": f"Summary {len(calls)}", "content": "Summary"}
+
+        monkeypatch.setattr(deep, "_llm_summarise_cluster", summarise)
+
+        first = deep.dream_deep(config, store)
+        second = deep.dream_deep(config, store)
+
+        assert first["cluster_summaries"] == 1
+        assert second["cluster_summaries"] == 0
+        assert len(calls) == 1
+
+    def test_existing_overlapping_summary_prevents_regeneration(
+        self, config, store, monkeypatch
+    ):
+        import kindex.dream_deep as deep
+
+        cluster = [
+            store.get_node(store.add_node(f"Node {index}", node_id=f"node-{index}"))
+            for index in range(5)
+        ]
+        store.add_node(
+            "Existing summary",
+            prov_source=deep.CLUSTER_SUMMARY_SOURCE,
+            extra={"cluster_members": [f"node-{index}" for index in range(4)]},
+        )
+        monkeypatch.setattr(deep, "_find_clusters", lambda *args, **kwargs: [cluster])
+        monkeypatch.setattr(
+            deep,
+            "_llm_summarise_cluster",
+            lambda *_args, **_kwargs: pytest.fail("overlapping cluster regenerated"),
+        )
+
+        result = deep.dream_deep(config, store)
+
+        assert result["cluster_summaries"] == 0
 
 
 # ── Protected types: managed/additive state survives dream (idx 25) ──

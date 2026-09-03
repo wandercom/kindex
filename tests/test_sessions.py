@@ -1,5 +1,7 @@
 """Tests for session tag management: start, update, segment, pause, resume, complete."""
 
+import json
+import sqlite3
 import subprocess
 import sys
 
@@ -57,13 +59,25 @@ class TestStartTag:
             start_tag(store, "test-tag")
 
     def test_start_allows_reuse_of_completed_name(self, store):
-        from kindex.sessions import start_tag, complete_tag
+        from kindex.sessions import complete_tag, get_tag, start_tag, update_tag
 
-        start_tag(store, "reusable")
+        first = start_tag(store, "reusable", focus="old")
         complete_tag(store, "reusable")
-        # Should not raise
-        nid = start_tag(store, "reusable")
-        assert nid
+        second = start_tag(store, "reusable", focus="new")
+        update_tag(store, "reusable", focus="current")
+
+        assert get_tag(store, "reusable")["id"] == second
+        assert store.get_node(first)["extra"]["current_focus"] == "old"
+        assert store.get_node(second)["extra"]["current_focus"] == "current"
+
+    def test_same_name_is_scoped_to_project(self, store):
+        from kindex.sessions import get_tag, start_tag
+
+        first = start_tag(store, "shared", project_path="/project/a")
+        second = start_tag(store, "shared", project_path="/project/b")
+
+        assert get_tag(store, "shared", project_path="/project/a")["id"] == first
+        assert get_tag(store, "shared", project_path="/project/b")["id"] == second
 
     def test_start_empty_name_raises(self, store):
         from kindex.sessions import start_tag
@@ -224,6 +238,30 @@ class TestPauseAndComplete:
         with pytest.raises(ValueError, match="not found"):
             complete_tag(store, "nonexistent")
 
+    def test_resume_reactivates_paused_tag(self, store):
+        from kindex.sessions import get_tag, pause_tag, resume_tag, start_tag
+
+        start_tag(store, "resume-state", project_path="/project")
+        pause_tag(store, "resume-state", project_path="/project")
+
+        resumed = resume_tag(store, "resume-state", project_path="/project")
+
+        assert resumed["extra"]["session_status"] == "active"
+        assert resumed["extra"]["paused_at"] is None
+        assert resumed["extra"]["paused_reason"] is None
+        assert get_tag(
+            store, "resume-state", project_path="/project"
+        )["extra"]["session_status"] == "active"
+
+    def test_completed_tag_cannot_be_resumed(self, store):
+        from kindex.sessions import complete_tag, resume_tag, start_tag
+
+        start_tag(store, "finished", project_path="/project")
+        complete_tag(store, "finished", project_path="/project")
+
+        with pytest.raises(ValueError, match="completed"):
+            resume_tag(store, "finished", project_path="/project")
+
 
 class TestGetTag:
     def test_get_by_name(self, store):
@@ -286,6 +324,23 @@ class TestListTags:
         tags = list_tags(store, project_path="/proj/a")
         assert len(tags) == 1
         assert tags[0]["extra"]["tag"] == "proj-a"
+
+    def test_status_filter_is_applied_before_limit(self, store):
+        from kindex.sessions import complete_tag, list_tags, start_tag
+
+        active_id = start_tag(store, "older-active")
+        store.conn.execute(
+            "UPDATE nodes SET updated_at = '2020-01-01T00:00:00' WHERE id = ?",
+            (active_id,),
+        )
+        for index in range(3):
+            name = f"newer-completed-{index}"
+            start_tag(store, name)
+            complete_tag(store, name)
+
+        active = list_tags(store, status="active", limit=1)
+
+        assert [tag["id"] for tag in active] == [active_id]
 
 
 class TestResumeContext:
@@ -399,10 +454,13 @@ class TestTagCLI:
         d = str(tmp_path)
         run("tag", "start", "resume-cli", "--focus", "Resuming",
             "--description", "Resume test", data_dir=d)
+        run("tag", "pause", "resume-cli", data_dir=d)
         r = run("tag", "resume", "resume-cli", data_dir=d)
         assert r.returncode == 0
         assert "resume-cli" in r.stdout
         assert "Resuming" in r.stdout
+        shown = run("tag", "show", "resume-cli", data_dir=d)
+        assert "Status: active" in shown.stdout
 
     def test_tag_pause(self, tmp_path):
         d = str(tmp_path)
@@ -468,3 +526,108 @@ class TestStoreSessionMethods:
     def test_get_session_tag_by_name_not_found(self, store):
         tag = store.get_session_tag_by_name("nonexistent")
         assert tag is None
+
+    def test_active_name_and_project_are_unique_in_storage(self, store):
+        extra = {
+            "tag": "unique",
+            "project_path": "/project",
+            "session_status": "active",
+        }
+        first = store.add_node("unique", node_type="session", extra=extra)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            store.add_node("unique", node_type="session", extra=extra)
+
+        rows = store.get_session_tags(status="active", project_path="/project")
+        assert [row["id"] for row in rows] == [first]
+
+
+def test_session_uniqueness_migration_pauses_older_duplicates(tmp_path):
+    cfg = Config(data_dir=str(tmp_path))
+    store = Store(cfg)
+    _ = store.conn
+    store.conn.execute("DROP INDEX idx_session_active_tag_project")
+    store.conn.execute("DROP INDEX idx_suggestions_pair")
+    store.conn.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
+    extra = {
+        "tag": "duplicate",
+        "project_path": "/project",
+        "session_status": "active",
+    }
+    first = store.add_node("duplicate", node_type="session", extra=extra)
+    second = store.add_node("duplicate", node_type="session", extra=extra)
+    store.conn.execute(
+        "UPDATE nodes SET updated_at = '2026-01-01T00:00:00' WHERE id = ?",
+        (first,),
+    )
+    store.conn.execute(
+        "UPDATE nodes SET updated_at = '2026-02-01T00:00:00' WHERE id = ?",
+        (second,),
+    )
+    store.conn.commit()
+    store.close()
+
+    migrated = Store(cfg)
+    rows = migrated.conn.execute(
+        "SELECT id, extra FROM nodes WHERE type = 'session' ORDER BY id"
+    ).fetchall()
+    extras = {row["id"]: json.loads(row["extra"]) for row in rows}
+    statuses = {node_id: extra["session_status"] for node_id, extra in extras.items()}
+
+    assert statuses == {first: "paused", second: "active"}
+    assert extras[first]["paused_reason"] == (
+        "duplicate-active-session-migration-v12"
+    )
+    assert migrated.get_meta("schema_version") == "12"
+    assert migrated.conn.execute(
+        """SELECT 1 FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_suggestions_pair'"""
+    ).fetchone()
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.add_node("duplicate", node_type="session", extra=extra)
+    migrated.close()
+
+
+def test_session_uniqueness_migration_has_total_tiebreak(tmp_path):
+    cfg = Config(data_dir=str(tmp_path))
+    store = Store(cfg)
+    _ = store.conn
+    store.conn.execute("DROP INDEX idx_session_active_tag_project")
+    store.conn.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
+    extra = {
+        "tag": "tie",
+        "project_path": "/project",
+        "session_status": "active",
+    }
+    for index in range(11):
+        store.add_node(
+            "tie",
+            node_id=f"duplicate-{index:02d}",
+            node_type="session",
+            extra=extra,
+        )
+    store.conn.execute(
+        """UPDATE nodes
+              SET updated_at = '2026-01-01T00:00:00',
+                  created_at = '2026-01-01T00:00:00'
+            WHERE type = 'session'"""
+    )
+    store.conn.commit()
+    store.close()
+
+    migrated = Store(cfg)
+    active = migrated.get_session_tags(
+        status="active", project_path="/project", limit=20
+    )
+    paused = migrated.get_session_tags(
+        status="paused", project_path="/project", limit=20
+    )
+
+    assert [row["id"] for row in active] == ["duplicate-10"]
+    assert len(paused) == 10
+    assert all(
+        row["extra"]["paused_reason"]
+        == "duplicate-active-session-migration-v12"
+        for row in paused
+    )
+    migrated.close()

@@ -935,7 +935,7 @@ def detect_expertise(store: "Store", person_node_id: str) -> dict[str, int]:
     domain_counts: Counter[str] = Counter()
 
     # 1. Tally domains from directly connected nodes
-    edges = store.edges_from(person_node_id)
+    edges = store.edges_from(person_node_id, semantic_only=True)
     for edge in edges:
         target_id = edge.get("to_id")
         if not target_id:
