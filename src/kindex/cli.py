@@ -959,6 +959,24 @@ def cmd_status(args):
 
     # Standard graph stats
     stats = store.stats()
+    from .store import SCHEMA_RECOVERY_PATH_META, SCHEMA_RECOVERY_REASON_META
+    recovery_path = store.get_meta(SCHEMA_RECOVERY_PATH_META)
+    recovery_reason = store.get_meta(SCHEMA_RECOVERY_REASON_META)
+    from .archive import ARCHIVE_DUPLICATE_COUNT_META, ARCHIVE_DUPLICATE_IDS_META
+    try:
+        archive_duplicate_count = int(
+            store.get_meta(ARCHIVE_DUPLICATE_COUNT_META) or 0
+        )
+    except (TypeError, ValueError):
+        archive_duplicate_count = 0
+    try:
+        archive_duplicate_ids = json.loads(
+            store.get_meta(ARCHIVE_DUPLICATE_IDS_META) or "[]"
+        )
+    except (TypeError, json.JSONDecodeError):
+        archive_duplicate_ids = []
+    if not isinstance(archive_duplicate_ids, list):
+        archive_duplicate_ids = []
 
     cfg = _config(args)
     from .config import read_degraded_events
@@ -972,6 +990,16 @@ def cmd_status(args):
             stats["degraded_last"] = {"cmd": last.get("cmd"),
                                       "error_class": last.get("error_class"),
                                       "ts": last.get("ts")}
+        if recovery_path:
+            stats["schema_recovery"] = {
+                "path": recovery_path,
+                "reason": recovery_reason,
+            }
+        if archive_duplicate_count:
+            stats["archive_duplicates"] = {
+                "count": archive_duplicate_count,
+                "sample_ids": archive_duplicate_ids,
+            }
         print(_dumps(stats, indent=2))
     else:
         if cfg.active_profile:
@@ -981,6 +1009,20 @@ def cmd_status(args):
         print(f"Nodes:     {stats['semantic_nodes']} semantic")
         print(f"Edges:     {stats['edges']} semantic")
         print(f"Orphans:   {stats['orphans']}")
+        print(f"Metrics:   schema {stats['metrics_schema']}")
+        if recovery_path:
+            display_path = "".join(
+                char if char.isprintable() else "?" for char in recovery_path
+            )[:1000]
+            print(
+                f"Recovery:  {display_path} "
+                f"({recovery_reason or 'schema migration'})"
+            )
+        if archive_duplicate_count:
+            print(
+                "Archive:   "
+                f"{archive_duplicate_count} duplicate ID(s) need review"
+            )
         stored_nodes = stats["stored_nodes"]
         semantic_nodes = stats["semantic_nodes"]
         excluded_nodes = stored_nodes - semantic_nodes
@@ -2425,15 +2467,20 @@ def cmd_suggest(args):
             store.close()
             return
 
-        # Resolve concept titles to nodes
-        node_a = (
-            store.get_node(suggestion["concept_a"])
-            or store.get_node_by_title(suggestion["concept_a"])
-        )
-        node_b = (
-            store.get_node(suggestion["concept_b"])
-            or store.get_node_by_title(suggestion["concept_b"])
-        )
+        # Endpoint identity is persisted independently of its producer. Title
+        # lookups refuse ambiguity instead of creating an edge to a guess.
+        identity_kind = suggestion.get("identity_kind", "title")
+        try:
+            node_a = store.resolve_suggestion_node(
+                suggestion["concept_a"], identity_kind
+            )
+            node_b = store.resolve_suggestion_node(
+                suggestion["concept_b"], identity_kind
+            )
+        except ValueError as exc:
+            print(f"Cannot accept: {exc}", file=sys.stderr)
+            store.close()
+            return
 
         if node_a and node_b:
             store.add_edge(
@@ -3939,7 +3986,13 @@ def cmd_dream(args):
 
 def cmd_archive(args):
     """Manage the slow graph archive."""
-    from .archive import list_archives, search_archives, restore_node, archive_cycle
+    from .archive import (
+        archive_cycle,
+        find_archive_duplicates,
+        list_archives,
+        restore_node,
+        search_archives,
+    )
 
     store = _store(args)
     cfg = _config(args)
@@ -3962,6 +4015,16 @@ def cmd_archive(args):
                   f"(created {created})")
         print(f"\nTotal: {len(archives)} archives, {total_nodes} nodes, "
               f"{total_size:.1f}MB")
+        duplicates = find_archive_duplicates(cfg, store)
+        if duplicates["count"]:
+            sample = ", ".join(
+                item["id"] for item in duplicates["samples"][:5]
+            )
+            print(
+                "Warning: "
+                f"{duplicates['count']} ID(s) exist in both fast and slow "
+                f"graphs ({sample}); both copies were preserved for review."
+            )
 
     elif action == "search":
         query = getattr(args, "query", "")
@@ -5730,7 +5793,12 @@ def cmd_tag(args):
                 tfocus = extra.get("current_focus", "")[:50]
                 seg_count = len(extra.get("segments", []))
                 updated = (t.get("updated_at") or "")[:16]
-                print(f"  [{tstatus:9s}] {tname:25s} {tfocus:50s} ({seg_count} seg) {updated}")
+                reason = extra.get("paused_reason")
+                reason_text = f" reason={reason}" if reason else ""
+                print(
+                    f"  [{tstatus:9s}] {tname:25s} {tfocus:50s} "
+                    f"({seg_count} seg) {updated}{reason_text}"
+                )
 
     elif action == "show":
         from .sessions import get_tag
@@ -5752,6 +5820,8 @@ def cmd_tag(args):
         print(f"Started: {extra.get('started_at', '')}")
         if extra.get("paused_at"):
             print(f"Paused: {extra['paused_at']}")
+        if extra.get("paused_reason"):
+            print(f"Pause reason: {extra['paused_reason']}")
         if extra.get("completed_at"):
             print(f"Completed: {extra['completed_at']}")
         if tag.get("content"):
@@ -7609,7 +7679,11 @@ def _degrade_hook_failure(args, exc: BaseException) -> None:
 
 
 def main():
-    from .store import ProfileMismatchError
+    from .store import (
+        ProfileMismatchError,
+        SchemaMigrationError,
+        UnsupportedSchemaVersionError,
+    )
 
     parser = build_parser()
     args = parser.parse_args()
@@ -7634,9 +7708,13 @@ def main():
         else:
             try:
                 args.func(args)
-            except ProfileMismatchError as e:
-                # Sequestration guard: never open a DB stamped for another
-                # profile — fail clearly instead of dumping a traceback.
+            except (
+                ProfileMismatchError,
+                SchemaMigrationError,
+                UnsupportedSchemaVersionError,
+            ) as e:
+                # Storage safety refusals are expected operator actions, not
+                # programmer failures: print the remedy without a traceback.
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(2)
     else:

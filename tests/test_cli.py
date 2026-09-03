@@ -1,5 +1,6 @@
 """Tests for Kindex (kin) CLI commands."""
 
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +42,39 @@ class TestInit:
         r = run("init", "--data-dir", d)
         assert r.returncode == 0
         assert (tmp_path / "new" / "kindex.db").exists()
+
+    def test_newer_schema_refusal_has_no_traceback(self, tmp_path):
+        data_dir = tmp_path / "future"
+        assert run("init", "--data-dir", str(data_dir)).returncode == 0
+        with sqlite3.connect(data_dir / "kindex.db") as conn:
+            conn.execute(
+                "UPDATE meta SET value = '999' WHERE key = 'schema_version'"
+            )
+
+        result = run("status", "--data-dir", str(data_dir))
+
+        assert result.returncode == 2
+        assert "newer than this Kindex build supports" in result.stderr
+        assert "Traceback" not in result.stderr
+
+    def test_status_exposes_durable_schema_recovery_path(self, tmp_path):
+        data_dir = tmp_path / "recovery-status"
+        assert run("init", "--data-dir", str(data_dir)).returncode == 0
+        recovery = tmp_path / "before-v12.sqlite3"
+        with sqlite3.connect(data_dir / "kindex.db") as conn:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                ("schema_recovery_snapshot_path", str(recovery)),
+            )
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                ("schema_recovery_snapshot_reason", "schema-v11-to-v12"),
+            )
+
+        result = run("status", "--data-dir", str(data_dir))
+
+        assert result.returncode == 0
+        assert f"Recovery:  {recovery} (schema-v11-to-v12)" in result.stdout
 
 
 class TestAdd:

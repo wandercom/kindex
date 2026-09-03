@@ -139,6 +139,61 @@ counter when a provider-token guarantee is required. The complete resume block,
 including warnings and omission notices, remains inside the selected budget;
 a non-positive budget emits an empty block.
 
+As of v0.36.0, resume also changes a paused tag back to active for the exact
+project. Completed tags remain completed. After 60 days, completed, unlinked
+session tags can move from the fast graph (the live SQLite database queried by
+normal commands) to the slow archive (separate SQLite files searched explicitly
+with `kin archive search`). Active, paused, knowledge-linked, and newer tags do
+not move. Restore one with `kin archive restore`. `kin archive list` warns if an
+interrupted move left an ID in both stores; Kindex preserves both copies because
+ID equality alone cannot prove which one is stale.
+
+> [!WARNING]
+> Before upgrading, stop every Kindex daemon, MCP server, and older CLI
+> process. A v0.35.x process does not reject schema v12 and can write
+> non-canonical session paths after migration.
+
+Dream is Kindex's background knowledge-consolidation pass: it finds related
+nodes, safely merges strong duplicates, and stages weaker links for review.
+Before schema migration, the first v0.36.0 process uses SQLite's backup API to
+create a recovery snapshot under
+`$XDG_STATE_HOME/kindex/snapshots/<db>-<hash>/migrations/` (defaulting below
+`~/.local/state/kindex/snapshots/`). The owner-private snapshot is integrity- and
+source-version-checked; partial failures are removed. Concurrent v0.36+
+processes serialize migration through a dedicated rollback-journal SQLite lock
+and recheck the schema after waiting. These
+migration recovery points are not subject to the ten-file rotation used for
+automated-merge snapshots. Migration refuses to run if a safety step fails.
+`kin status` exposes the recovery path, and normal stores also record it in
+`kin changelog`. The path names the latest validated migration attempt; earlier
+attempts remain in the same `migrations/` directory. Schema v12 migrates
+atomically, preserves rows, and stores suggestion endpoint identity explicitly
+as `title` or `node_id`; ambiguous title acceptance is refused.
+
+### Roll Back a Schema Migration
+
+Do not open the migrated database with v0.35.x: that version has no
+forward-schema guard. Roll back in this order:
+
+1. While v0.36 is installed, run `kin status` and record the `Recovery` path.
+2. Stop every Kindex process again.
+3. Move the live database's `-wal` and `-shm` sidecars aside.
+4. Copy the recorded migration snapshot over the live database.
+5. Only then install or run v0.35.x and verify the graph.
+
+This is distinct from [recovering a bad automated merge](#recover-from-a-bad-automated-merge),
+which restores a rotating merge snapshot without changing package versions.
+Graph-health metrics now describe semantic topology; use the explicit stored
+counts when auditing retained session or legacy Dream rows. Machine-readable
+stats mark the new contract as `metrics_schema: 2`. List sessions paused by
+migration with `kin tag list --status paused`; their reason is
+`duplicate-active-session-migration-v12`.
+
+Dream's domain-review queue is capped by
+`reminders.dream_max_domain_link_suggestions` (default 50). The option stays in
+the reminder section because scheduled and Stop-hook Dream runs share that
+maintenance configuration.
+
 ## Bind Claims to What They Describe
 
 A claim about code (or any external referent) can carry a content digest of the
@@ -264,7 +319,10 @@ To restore after a false merge:
 # 1. Stop anything holding the DB (daemon, MCP server, open CLI sessions)
 # 2. Find the snapshot taken just before the bad merge
 ls ~/.local/state/kindex/snapshots/*/
-# 3. Copy it back over the live DB (default ~/.kindex/kindex.db) and restart
+# 3. Move stale SQLite sidecars aside before replacing the live DB
+mv ~/.kindex/kindex.db-wal ~/.kindex/kindex.db-wal.pre-restore 2>/dev/null || true
+mv ~/.kindex/kindex.db-shm ~/.kindex/kindex.db-shm.pre-restore 2>/dev/null || true
+# 4. Copy the snapshot over the live DB (default below), then restart
 cp ~/.local/state/kindex/snapshots/<db-dir>/<stamp>-graph-merge.sqlite3 \
    ~/.kindex/kindex.db
 ```

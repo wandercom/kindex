@@ -97,6 +97,22 @@ class TestAddAndListSuggestions:
         assert "idx_suggestions_status_created" in names
         assert "idx_suggestions_status_pair" in names
         assert "idx_suggestions_pair" in names
+        columns = {
+            row["name"]
+            for row in store.conn.execute(
+                "PRAGMA table_info(suggestions)"
+            ).fetchall()
+        }
+        assert "identity_kind" in columns
+
+    def test_node_id_identity_requires_existing_endpoints(self, store):
+        with pytest.raises(ValueError, match="do not exist"):
+            store.add_suggestion(
+                "missing-a",
+                "missing-b",
+                source="custom-id-producer",
+                identity_kind="node_id",
+            )
 
 
 class TestAcceptSuggestion:
@@ -159,7 +175,9 @@ class TestAcceptSuggestion:
             concept_b="beta",
             reason="shared domain",
             source="dream-cycle-domain",
+            identity_kind="node_id",
         )
+        assert s.pending_suggestions()[0]["identity_kind"] == "node_id"
         s.close()
 
         result = run("suggest", "--accept", str(sid), data_dir=d)
@@ -168,6 +186,67 @@ class TestAcceptSuggestion:
         assert "Accepted" in result.stdout
         reopened = Store(cfg)
         assert reopened.edges_from("alpha", semantic_only=True)
+        reopened.close()
+
+    def test_accept_uses_identity_kind_to_disambiguate_title_from_node_id(
+        self, tmp_path
+    ):
+        """A title equal to another node's ID must not redirect the edge."""
+        d = str(tmp_path)
+        run("init", data_dir=d)
+
+        cfg = Config(data_dir=d)
+        store = Store(cfg)
+        store.add_node("Wrong ID match", node_id="shared-label")
+        store.add_node("shared-label", node_id="title-owner")
+        store.add_node("Destination", node_id="destination")
+        suggestion_id = store.add_suggestion(
+            concept_a="shared-label",
+            concept_b="Destination",
+            reason="human title suggestion",
+            source="mcp-learn",
+        )
+        store.close()
+
+        result = run("suggest", "--accept", str(suggestion_id), data_dir=d)
+
+        assert result.returncode == 0
+        reopened = Store(cfg)
+        assert any(
+            edge["to_id"] == "destination"
+            for edge in reopened.edges_from(
+                "title-owner", semantic_only=True
+            )
+        )
+        assert not reopened.edges_from("shared-label", semantic_only=True)
+        reopened.close()
+
+    def test_accept_refuses_ambiguous_title(self, tmp_path):
+        """A mutable display title is never resolved by arbitrary row order."""
+        d = str(tmp_path)
+        run("init", data_dir=d)
+
+        cfg = Config(data_dir=d)
+        store = Store(cfg)
+        store.add_node("Duplicate", node_id="first")
+        store.add_node("Duplicate", node_id="second")
+        store.add_node("Destination", node_id="destination")
+        suggestion_id = store.add_suggestion(
+            "Duplicate",
+            "Destination",
+            source="mcp-learn",
+            identity_kind="title",
+        )
+        store.close()
+
+        result = run("suggest", "--accept", str(suggestion_id), data_dir=d)
+
+        assert result.returncode == 0
+        assert "ambiguous" in result.stderr
+        reopened = Store(cfg)
+        assert not reopened.edges_from("first", semantic_only=True)
+        assert not reopened.edges_from("second", semantic_only=True)
+        assert reopened.pending_suggestions()[0]["id"] == suggestion_id
         reopened.close()
 
 

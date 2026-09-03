@@ -210,4 +210,5 @@ class TestStats:
         stats = store.stats()
 
         assert stats["nodes"] == stats["semantic_nodes"] == 1
+        assert stats["metrics_schema"] == 2
         assert stats["stored_nodes"] == 2

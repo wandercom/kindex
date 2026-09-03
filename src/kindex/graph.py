@@ -6,7 +6,10 @@ from dataclasses import dataclass
 
 import networkx as nx
 
-from .schema import SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES
+from .schema import (
+    SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+    SEMANTIC_METRICS_SCHEMA_VERSION,
+)
 from .vault import Vault
 
 
@@ -238,6 +241,7 @@ def store_stats(store) -> dict:
                 "ignored_domain_edges": edge_counts["domain"],
                 "ignored_session_edges": edge_counts["session"],
                 "ignored_other_edges": edge_counts["other"],
+                "metrics_schema": SEMANTIC_METRICS_SCHEMA_VERSION,
                 "density": 0,
                 "components": 0, "avg_degree": 0, "max_degree_node": "",
                 "max_degree": 0, "truncated": truncated}
@@ -253,6 +257,7 @@ def store_stats(store) -> dict:
         "ignored_domain_edges": edge_counts["domain"],
         "ignored_session_edges": edge_counts["session"],
         "ignored_other_edges": edge_counts["other"],
+        "metrics_schema": SEMANTIC_METRICS_SCHEMA_VERSION,
         "density": round(nx.density(G), 4),
         "components": nx.number_weakly_connected_components(G),
         "avg_degree": round(sum(degrees.values()) / len(degrees), 2) if degrees else 0,

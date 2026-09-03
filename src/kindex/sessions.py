@@ -8,9 +8,12 @@ with structured metadata in the extra JSON field.
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import sqlite3
 from typing import TYPE_CHECKING, Callable
+
+from .schema import SESSION_PAUSE_REASON_USER
 
 if TYPE_CHECKING:
     from .store import Store
@@ -28,6 +31,14 @@ def _normalize_tag(name: str) -> str:
     return name.strip("-")
 
 
+def normalize_project_path(project_path: str | None) -> str:
+    """Return the stable filesystem identity used by session-tag lookups."""
+    if not project_path:
+        return ""
+    expanded = os.path.expanduser(project_path)
+    return os.path.normcase(os.path.realpath(os.path.abspath(expanded)))
+
+
 def get_tag(
     store: Store,
     name: str,
@@ -35,6 +46,8 @@ def get_tag(
     project_path: str | None = None,
 ) -> dict | None:
     """Look up a session tag by name. Returns the node dict or None."""
+    if project_path is not None:
+        project_path = normalize_project_path(project_path)
     tag = store.get_session_tag_by_name(
         _normalize_tag(name), project_path=project_path
     )
@@ -46,6 +59,8 @@ def get_tag(
 
 def get_active_tag(store: Store, project_path: str | None = None) -> dict | None:
     """Find the currently active session tag, optionally scoped to a project path."""
+    if project_path is not None:
+        project_path = normalize_project_path(project_path)
     tags = store.get_session_tags(status="active", project_path=project_path, limit=1)
     return tags[0] if tags else None
 
@@ -57,6 +72,8 @@ def list_tags(
     limit: int = 20,
 ) -> list[dict]:
     """List session tags with optional filters."""
+    if project_path is not None:
+        project_path = normalize_project_path(project_path)
     return store.get_session_tags(
         status=status, project_path=project_path, limit=limit
     )
@@ -79,6 +96,7 @@ def start_tag(
     tag_name = _normalize_tag(name)
     if not tag_name:
         raise ValueError("Tag name cannot be empty")
+    project_path = normalize_project_path(project_path)
 
     existing = get_tag(store, tag_name, project_path=project_path)
     if existing:
@@ -103,7 +121,7 @@ def start_tag(
     extra = {
         "tag": tag_name,
         "session_status": "active",
-        "project_path": project_path or "",
+        "project_path": project_path,
         "started_at": now,
         "paused_at": None,
         "paused_reason": None,
@@ -120,7 +138,7 @@ def start_tag(
             content=description,
             node_type="session",
             prov_activity="session-tag",
-            prov_source=project_path or "",
+            prov_source=project_path,
             prov_who=prov_who or [],
             extra=extra,
         )
@@ -281,7 +299,7 @@ def pause_tag(
     def _mutate(extra: dict) -> None:
         extra["session_status"] = "paused"
         extra["paused_at"] = _now()
-        extra["paused_reason"] = "user"
+        extra["paused_reason"] = SESSION_PAUSE_REASON_USER
 
         if summary:
             # Update current segment summary

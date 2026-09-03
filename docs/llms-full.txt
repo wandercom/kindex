@@ -188,6 +188,31 @@ Important boundary:
 - Modes: `mode_activate`, `mode_list`, `mode_show`, `mode_create`,
   `mode_export`, `mode_import`, `mode_seed`.
 
+## v0.36.0 Graph Lifecycle and Dream Safety
+
+- Resuming a paused session reactivates the exact project-scoped tag; completed
+  tags cannot be resumed.
+- Completed unlinked sessions become archive-eligible after 60 days during
+  `kin cron` step 8 or `kin archive run`. Active, paused, knowledge-linked, and
+  newer sessions stay in the fast store. Archive cycles report IDs present in
+  both fast and slow stores but preserve both copies for review.
+- Semantic traversal and graph-health metrics exclude session lifecycle nodes and
+  retained legacy Dream domain-co-membership edges. Stored counts remain explicit,
+  and machine-readable stats report `metrics_schema: 2`.
+- Dream, Kindex's background knowledge-consolidation pass, stages sparse
+  domain-link proposals for review instead of writing cliques. The pending queue
+  defaults to 50 per graph, and resolved pairs are not recreated. Suggestions
+  persist title-versus-node-ID identity and refuse ambiguous titles.
+- Before schema migration, Kindex creates a transaction-safe snapshot in the
+  database's dedicated XDG `snapshots/.../migrations/` directory, validates its
+  integrity and source schema, records it in database metadata and the normal
+  changelog, and refuses to migrate if a safety step fails. The owner-private
+  snapshot is outside the ten-file automated-merge rotation; concurrent v0.36+
+  processes serialize through a rollback-journal SQLite lock and recheck the
+  schema. Stop every Kindex process and move
+  the live DB's `-wal` and `-shm` sidecars aside before restoring one rather than
+  downgrading in place to v0.35.x.
+
 ## Release Verification
 
 For release work, verify:

@@ -2,10 +2,10 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![v0.35.0](https://img.shields.io/badge/version-0.35.0-purple.svg)](https://github.com/jmcentire/kindex/releases)
+[![v0.36.0](https://img.shields.io/badge/version-0.36.0-purple.svg)](https://github.com/jmcentire/kindex/releases)
 [![PyPI](https://img.shields.io/pypi/v/kindex.svg)](https://pypi.org/project/kindex/)
 [![MCP Market](https://img.shields.io/badge/MCP%20Market-kindex-blue.svg)](https://mcpmarket.com/server/kindex)
-[![Tests](https://img.shields.io/badge/tests-1957%20passing-brightgreen.svg)](#)
+[![Tests](https://github.com/jmcentire/kindex/actions/workflows/workflow.yml/badge.svg)](https://github.com/jmcentire/kindex/actions/workflows/workflow.yml)
 [![MCP Plugin](https://img.shields.io/badge/MCP-Plugin-orange.svg)](#install-as-agent-mcp-plugin)
 
 **The memory layer AI coding agents don't have.**
@@ -35,6 +35,51 @@ uvx --from 'kindex[mcp]' kin-mcp --help
 # from source
 git clone https://github.com/jmcentire/kindex && cd kindex && make install
 ```
+
+### Upgrading to v0.36.0
+
+> [!WARNING]
+> Before upgrading, stop every Kindex daemon, MCP server, and older CLI
+> process. A v0.35.x process does not reject schema v12 and can write
+> non-canonical session paths after migration.
+
+Dream is Kindex's background knowledge-consolidation pass: it finds related
+nodes, safely merges strong duplicates, and stages weaker links for review.
+The first v0.36.0 process to open an older graph creates a transaction-safe
+pre-migration snapshot under
+`$XDG_STATE_HOME/kindex/snapshots/<db>-<hash>/migrations/` (defaulting below
+`~/.local/state/kindex/snapshots/`) before atomically migrating schema v11 to
+v12. The owner-private snapshot passes SQLite integrity and source-version
+checks, and a partial file is deleted if creation or validation fails.
+Concurrent v0.36+ processes serialize this step through a dedicated
+rollback-journal SQLite lock and recheck the schema after waiting. Migration
+recovery points are retained outside the rotating ten-file
+automated-merge snapshot pool. Older duplicate active session tags become paused
+history, one active tag per normalized project and name is enforced, and Dream
+suggestions carry an explicit title-or-node-ID identity contract and title
+ambiguity is refused. No node or edge rows are deleted; legacy
+domain-co-membership edges remain available as stored history but no longer
+participate in semantic traversal or health metrics. `kin status` exposes the
+durably recorded recovery path; normal stores also record it in `kin changelog`.
+
+#### Rolling back the schema migration
+
+Do not open the migrated database with v0.35.x: that version has no
+forward-schema guard and can write old, non-canonical session identity. Instead:
+
+1. While v0.36 is still installed, run `kin status` and record the `Recovery`
+   path. It names the latest validated migration attempt; older attempts remain
+   in the same `migrations/` directory.
+2. Stop every Kindex process again.
+3. Move the live database's `-wal` and `-shm` sidecars aside.
+4. Copy the recorded snapshot over the live database.
+5. Only then install or run v0.35.x and verify the graph.
+
+This differs from [recovering a bad automated merge](docs/human-guide.md#recover-from-a-bad-automated-merge),
+which does not change package versions. Graph-health consumers must also
+recalibrate: existing node/edge/orphan/component outputs now describe the
+semantic graph, while explicit stored counts expose retained lifecycle and
+legacy rows. Machine-readable stats identify this contract as `metrics_schema: 2`.
 
 Then initialize the graph:
 
@@ -305,7 +350,7 @@ kin remind exec --reminder-id <id>
 
 ### Dream — Knowledge Consolidation
 
-Kindex can run fuzzy deduplication, auto-apply high-confidence pending suggestions, and stage bounded domain-link proposals for review. Resolved fuzzy matches are not recreated. The pending domain-review queue is capped per graph (50 by default), proposals are round-robin across domains, and rejected pairs stay rejected. Shared domains are never materialized directly as semantic edges. Like memory consolidation during sleep — replay important paths and prune noise without turning tags into topology.
+Kindex can run fuzzy deduplication, auto-apply high-confidence pending suggestions, and stage bounded domain-link proposals for review. Resolved fuzzy matches are not recreated. The pending domain-review queue is capped per graph (`reminders.dream_max_domain_link_suggestions`, 50 by default), proposals are round-robin across domains, and rejected pairs stay rejected. The setting lives under `reminders` because scheduled and Stop-hook Dream runs use the reminder/maintenance configuration. Shared domains are never materialized directly as semantic edges. Like memory consolidation during sleep — replay important paths and prune noise without turning tags into topology.
 
 ```bash
 # See exact merge and domain-link proposals (no changes)
@@ -390,8 +435,12 @@ kin tag pause auth-refactor --summary "Waiting for review"
 kin tag resume auth-refactor   # reactivate and render admission-controlled context
 kin tag end --summary "All done"
 
-# Completed, unlinked session tags age into the reversible slow archive;
-# active, paused, and artifact-linked sessions stay in the fast store.
+# After 60 days, `kin cron` step 8 (or `kin archive run`) moves completed,
+# unlinked session tags from the fast graph (the live database) into the slow
+# archive (separate SQLite files searched explicitly). Active, paused, and
+# artifact-linked sessions stay in the fast graph.
+kin archive run
+kin archive list  # warns if an interrupted move left an ID in both stores
 kin archive search auth-refactor
 kin archive restore <session-node-id>
 
@@ -1071,6 +1120,7 @@ reminders:
   stop_guard_enabled: false      # opt-in; blocking Stop hooks are noisy in Claude
   dream_on_stop_enabled: true    # launch throttled detached dream from Claude Stop hook
   dream_min_interval: 3600       # seconds between scheduled/hook dream starts
+  dream_max_domain_link_suggestions: 50 # pending domain-review cap per graph
   channels:
     slack:
       enabled: false
@@ -1087,7 +1137,7 @@ Use `kin attention estimate --messages 1000` to estimate cost over a fixed promp
 
 ```bash
 make dev          # install with dev + LLM dependencies
-make test         # run 1502 tests
+make test         # run the full test suite
 make check        # lint + test combined
 make clean        # remove build artifacts
 ```

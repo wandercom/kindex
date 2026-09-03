@@ -175,7 +175,10 @@ class TestAutoApplySuggestions:
         from kindex.dream import auto_apply_suggestions
         a = store.add_node("Kindex architecture overview")
         b = store.add_node("Kindex architecture overview details")
-        store.add_suggestion(a, b, reason="test", source="test")
+        store.add_suggestion(
+            a, b, reason="test", source="dream-cycle",
+            identity_kind="node_id",
+        )
 
         count = auto_apply_suggestions(store)
         assert count >= 1
@@ -189,7 +192,10 @@ class TestAutoApplySuggestions:
         from kindex.dream import auto_apply_suggestions
         a = store.add_node("Alpha concept")
         b = store.add_node("Zeta completely different")
-        store.add_suggestion(a, b, reason="test", source="test")
+        store.add_suggestion(
+            a, b, reason="test", source="dream-cycle",
+            identity_kind="node_id",
+        )
 
         count = auto_apply_suggestions(store)
         assert count == 0
@@ -198,7 +204,10 @@ class TestAutoApplySuggestions:
         from kindex.dream import auto_apply_suggestions
         a = store.add_node("Same title", status="archived")
         b = store.add_node("Same title nearby")
-        store.add_suggestion(a, b, reason="test", source="test")
+        store.add_suggestion(
+            a, b, reason="test", source="dream-cycle",
+            identity_kind="node_id",
+        )
 
         count = auto_apply_suggestions(store)
         assert count == 0
@@ -271,7 +280,9 @@ class TestDreamLightweight:
 
         a = store.add_node("Alpha anchor")
         b = store.add_node("Alpha anchored")
-        suggestion_id = store.add_suggestion(a, b, source="dream-cycle")
+        suggestion_id = store.add_suggestion(
+            a, b, source="dream-cycle", identity_kind="node_id"
+        )
         store.update_suggestion(suggestion_id, "rejected")
         monkeypatch.setattr(
             dream,
@@ -291,6 +302,8 @@ class TestDreamLightweight:
         import kindex.dream as dream
 
         config.reminders.dream_max_new_suggestions = 2
+        for node_id in ("a1", "b1", "a2", "b2", "a3", "b3"):
+            store.add_node(node_id, node_id=node_id)
         monkeypatch.setattr(
             dream,
             "find_duplicates",
@@ -562,7 +575,12 @@ class TestDomainLinkProposals:
 
         a = store.add_node("Matching concept")
         b = store.add_node("Matching concept details")
-        store.add_suggestion(a, b, source=DOMAIN_SUGGESTION_SOURCE)
+        store.add_suggestion(
+            a,
+            b,
+            source=DOMAIN_SUGGESTION_SOURCE,
+            identity_kind="node_id",
+        )
 
         assert auto_apply_suggestions(store) == 0
         assert store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0

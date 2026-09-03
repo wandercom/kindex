@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import sqlite3
 
 import pytest
 
@@ -156,6 +157,80 @@ class TestArchiveNodes:
         count = archive_nodes(cfg, store, [])
         assert count == 0
 
+    def test_archive_node_and_edges_roll_back_as_one_copy(self, setup):
+        from kindex.archive import (
+            _current_archive_path,
+            _open_archive,
+            archive_nodes,
+        )
+
+        cfg, store = setup
+        store.add_node("To archive", node_id="atomic-node")
+        store.add_node("Peer", node_id="atomic-peer")
+        store.add_edge("atomic-node", "atomic-peer")
+
+        archive = _open_archive(_current_archive_path(cfg))
+        archive.execute(
+            """CREATE TRIGGER reject_archived_edge
+                 BEFORE INSERT ON archived_edges
+                 BEGIN SELECT RAISE(ABORT, 'injected archive failure'); END"""
+        )
+        archive.commit()
+        archive.close()
+
+        with pytest.raises(sqlite3.IntegrityError, match="injected archive"):
+            archive_nodes(cfg, store, ["atomic-node"])
+
+        assert store.get_node("atomic-node") is not None
+        assert store.edges_from("atomic-node")
+        with sqlite3.connect(_current_archive_path(cfg)) as conn:
+            assert conn.execute(
+                "SELECT 1 FROM archived_nodes WHERE id = 'atomic-node'"
+            ).fetchone() is None
+
+    def test_rechecks_completed_session_after_candidate_selection(self, setup):
+        """A newly linked session survives a stale archive candidate list."""
+        from kindex.archive import archive_nodes, find_archivable_nodes
+        from kindex.sessions import complete_tag, link_node_to_tag, start_tag
+
+        cfg, store = setup
+        session_id = start_tag(store, "stale-archive-candidate")
+        complete_tag(store, "stale-archive-candidate")
+        store.conn.execute(
+            "UPDATE nodes SET updated_at = '2025-01-01T00:00:00' WHERE id = ?",
+            (session_id,),
+        )
+        store.conn.commit()
+        candidates = find_archivable_nodes(store)
+        assert session_id in candidates
+
+        node_id = store.add_node("Knowledge linked after selection")
+        link_node_to_tag(store, "stale-archive-candidate", node_id)
+
+        assert archive_nodes(cfg, store, candidates) == 0
+        assert store.get_node(session_id) is not None
+
+    def test_malformed_session_link_state_is_not_treated_as_empty(self, setup):
+        """Only an explicit linked-node array is safe to archive."""
+        from kindex.archive import find_archivable_nodes
+        from kindex.sessions import complete_tag, start_tag
+
+        _cfg, store = setup
+        session_id = start_tag(store, "malformed-link-state")
+        complete_tag(store, "malformed-link-state")
+
+        def _malform(extra):
+            extra["linked_nodes"] = "not-an-array"
+
+        store.atomic_extra_update(session_id, _malform)
+        store.conn.execute(
+            "UPDATE nodes SET updated_at = '2025-01-01T00:00:00' WHERE id = ?",
+            (session_id,),
+        )
+        store.conn.commit()
+
+        assert session_id not in find_archivable_nodes(store)
+
 
 class TestArchiveCycle:
     def test_full_cycle(self, setup):
@@ -175,11 +250,39 @@ class TestArchiveCycle:
         assert store.get_node("stale1") is None
 
     def test_nothing_to_archive(self, setup):
-        from kindex.archive import archive_cycle
+        from kindex.archive import ARCHIVE_DUPLICATE_COUNT_META, archive_cycle
 
         cfg, store = setup
         count = archive_cycle(cfg, store)
         assert count == 0
+        assert store.get_meta(ARCHIVE_DUPLICATE_COUNT_META) == "0"
+
+    def test_reports_duplicate_without_guessing_that_it_is_crash_residue(
+        self, setup
+    ):
+        from kindex.archive import (
+            ARCHIVE_DUPLICATE_COUNT_META,
+            archive_cycle,
+            archive_nodes,
+            find_archive_duplicates,
+        )
+
+        cfg, store = setup
+        store.add_node("Original", node_id="shared-id")
+        assert archive_nodes(cfg, store, ["shared-id"]) == 1
+
+        # This could be a crash retry or a genuine import collision. Equal IDs
+        # alone are insufficient authority to delete either copy.
+        store.add_node("New live owner", node_id="shared-id")
+
+        duplicates = find_archive_duplicates(cfg, store)
+        assert duplicates["count"] == 1
+        assert duplicates["samples"][0]["id"] == "shared-id"
+        assert duplicates["samples"][0]["live_title"] == "New live owner"
+        assert duplicates["samples"][0]["archived_title"] == "Original"
+        assert archive_cycle(cfg, store) == 0
+        assert store.get_meta(ARCHIVE_DUPLICATE_COUNT_META) == "1"
+        assert store.get_node("shared-id")["title"] == "New live owner"
 
 
 class TestListArchives:

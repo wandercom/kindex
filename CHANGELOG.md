@@ -2,6 +2,74 @@
 
 All notable changes to Kindex are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.36.0] - 2026-09-02
+
+### Added
+- **Real paused-session resume and reversible lifecycle retirement.** `kin tag
+  resume` and MCP `tag_resume` now reactivate a paused tag for the exact project
+  before rendering its bounded trusted context. Completed, unlinked session leaves
+  become eligible for the slow archive after 60 days during `kin cron` step 8 or
+  `kin archive run`, and restore with their lifecycle history intact. Active,
+  paused, linked, and newer sessions remain in the fast graph. Archive cycles
+  and `kin archive list` report IDs found in both fast and slow stores after an
+  interrupted move; both copies are preserved rather than reconciled from ID
+  equality alone.
+- **Bounded, reviewable Dream domain links.** Dream, Kindex's background
+  knowledge-consolidation pass, now emits sparse representative
+  proposals instead of writing every shared-domain pair as a semantic edge. Dry-run
+  output lists the exact proposed pairs. The pending queue is capped per graph by
+  `reminders.dream_max_domain_link_suggestions` (default 50), rotates across
+  domains, and never recreates an accepted or rejected pair.
+
+### Changed
+- **Breaking metric semantics: graph health now measures semantic topology.**
+  Session lifecycle nodes and legacy `dream-cycle domain co-membership` edges are
+  retained for history but excluded from traversal, components, bridges, and
+  orphan counts. CLI and MCP output distinguish semantic node/edge counts from
+  stored counts and emit `metrics_schema: 2`; consumers of the old metrics
+  should recalibrate their baselines.
+- **Deep Dream suppresses redundant summaries across runs.** Candidate clusters are
+  deduplicated by overlap and stable member signature before generation, and active
+  summary nodes' recorded members prevent the same cluster from being summarized
+  again. Candidate and representative ordering is stable across weight decay.
+- **Schema v12 creates an automatic recovery point before migration.** The first
+  open of an older graph uses SQLite's backup API to snapshot the complete
+  pre-migration state under the database's dedicated `snapshots/.../migrations/`
+  directory, validates its SQLite integrity and source schema, records the path
+  durably in database metadata (and in `kin changelog` on normal stores), and
+  refuses to migrate if any safety step fails. Snapshot directories/files are
+  owner-only, failed partial files are removed, concurrent new-version processes
+  serialize through a dedicated rollback-journal SQLite lock and recheck the
+  schema, and migration snapshots are not subject to
+  the ten-file rotation used for automated-merge snapshots. The migration
+  canonicalizes project paths and preserves duplicate active sessions as paused
+  history, marks them
+  `duplicate-active-session-migration-v12`, then creates the partial unique
+  active-tag index and suggestion-pair index. Suggestions also persist whether
+  endpoints are titles or immutable node IDs; ambiguous title resolution is
+  refused instead of selecting a row arbitrarily. `kin tag list --status paused`
+  exposes the reason, while `kin status` exposes the recovery point. A Kindex
+  build also refuses to open a schema newer than it understands instead of
+  operating on it silently. Do not run v0.35.x against a migrated database as a
+  rollback: stop all Kindex processes and restore the recorded pre-migration
+  snapshot after moving the live database's `-wal` and `-shm` sidecars aside.
+
+### Removed
+- **New Dream domain-clique writes.** Existing `dream-cycle domain co-membership`
+  rows remain stored for audit, but v0.36.0 neither creates more nor treats them
+  as semantic topology. Review and accept bounded domain-link suggestions instead.
+
+### Fixed
+- Session lookup filters status and exact project before applying limits, reused
+  names resolve deterministically, and schema enforcement prevents concurrent
+  duplicate active tags without replacing the incumbent row.
+- Hook lifecycle calls carry one sampled project path and record degraded failures
+  instead of silently losing session state.
+- Fuzzy and domain Dream suggestions respect all prior resolution states, so
+  accepted and rejected pairs stay resolved.
+- Suggestion acceptance uses its durable endpoint identity rather than guessing
+  between a node ID and a display title, and refuses duplicate-title ambiguity.
+
 ## [0.35.0] - 2026-09-02
 
 ### Added

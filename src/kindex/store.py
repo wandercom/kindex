@@ -6,9 +6,12 @@ import datetime as _dt
 import hashlib
 import hmac
 import json
+import logging
+import os
 import re
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -30,11 +33,20 @@ from .schema import (
     ALL_NODE_TYPES,
     CREATE_TABLES,
     LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE,
+    NODE_ID_SUGGESTION_SOURCES,
     EDGE_TYPES,
     SCHEMA_VERSION,
     SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
+    SEMANTIC_METRICS_SCHEMA_VERSION,
+    SESSION_PAUSE_REASON_DUPLICATE_MIGRATION,
+    SUGGESTION_IDENTITY_KINDS,
     edit_class_for,
 )
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_RECOVERY_PATH_META = "schema_recovery_snapshot_path"
+SCHEMA_RECOVERY_REASON_META = "schema_recovery_snapshot_reason"
 
 _SEMANTIC_NODE_PLACEHOLDERS = ",".join(
     "?" for _ in SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES
@@ -74,6 +86,14 @@ class LockHeldError(RuntimeError):
 
 class ProfileMismatchError(RuntimeError):
     """The database is stamped for a different profile than the active one."""
+
+
+class UnsupportedSchemaVersionError(RuntimeError):
+    """The database schema is newer than this Kindex build understands."""
+
+
+class SchemaMigrationError(RuntimeError):
+    """A schema migration could not proceed safely or complete."""
 
 
 class CandidateNotFoundError(ValueError):
@@ -308,8 +328,14 @@ class Store:
             self._conn.execute(f"PRAGMA busy_timeout={int(self._sqlite_timeout * 1000)}")
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
-            self._init_schema()
-            self._check_profile_stamp()
+            try:
+                self._init_schema()
+                self._check_profile_stamp()
+            except BaseException:
+                conn, self._conn = self._conn, None
+                if conn is not None:
+                    conn.close()
+                raise
         return self._conn
 
     def _check_profile_stamp(self) -> None:
@@ -359,25 +385,52 @@ class Store:
             cur = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'")
             row = cur.fetchone()
             if row is not None:
-                current = int(row["value"])
+                current = self._parse_schema_version(row["value"])
+                if current > SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"Database schema version {current} is newer than "
+                        f"this Kindex build supports ({SCHEMA_VERSION}). "
+                        "Upgrade Kindex or restore a compatible database backup."
+                    )
                 if current < SCHEMA_VERSION:
-                    self._migrate_schema(current)
+                    with self._schema_migration_lock():
+                        self._migrate_versioned_schema_after_lock()
                 # An already-current store performs no DDL on reopen. An
                 # upgraded store was fully verified inside its transaction.
                 return
         elif self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
         ).fetchone() is not None:
-            # Pre-versioning database: has nodes table but no meta table.
-            # Create meta table, then migrate from v1.
-            self._conn.executescript(
-                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);"
-            )
-            self._conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', '1')"
-            )
-            self._conn.commit()
-            self._migrate_schema(1)
+            # A daemon and foreground command can discover the same ancient
+            # pre-versioning store concurrently. Lock and recheck before even
+            # creating meta, just as the versioned path does.
+            with self._schema_migration_lock():
+                locked_has_meta = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'meta'"
+                ).fetchone()
+                if locked_has_meta is not None:
+                    self._migrate_versioned_schema_after_lock()
+                    return
+
+                snapshot, reason = self._snapshot_schema_migration(1)
+                self._conn.execute(
+                    "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                self._conn.execute(
+                    "INSERT INTO meta (key, value) "
+                    "VALUES ('schema_version', '1')"
+                )
+                self._conn.commit()
+                self._record_schema_recovery_metadata(snapshot, reason)
+                try:
+                    self._migrate_schema(1)
+                except Exception as exc:
+                    raise SchemaMigrationError(
+                        f"Schema migration {reason} failed ({exc}); "
+                        f"recovery snapshot: {snapshot}"
+                    ) from exc
+                self._record_schema_migration_snapshot(snapshot, reason)
             return
 
         # Now safe to apply full schema (IF NOT EXISTS is idempotent
@@ -392,6 +445,193 @@ class Store:
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    def _parse_schema_version(self, value: object) -> int:
+        """Parse a schema stamp with operator-facing recovery guidance."""
+        try:
+            return int(str(value))
+        except (TypeError, ValueError) as exc:
+            raise SchemaMigrationError(
+                f"Database {self.db_path} has an invalid schema_version "
+                f"value ({value!r}); restore a validated database snapshot"
+            ) from exc
+
+    def _migrate_versioned_schema_after_lock(self) -> None:
+        """Recheck and, if still needed, migrate while exclusion is held."""
+        # The optimistic read before the lock must never be reused here.
+        # SELECT does not leave an implicit transaction in sqlite3's default
+        # mode, and rollback makes that freshness precondition explicit.
+        self._conn.rollback()
+        locked_row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if locked_row is None:
+            raise SchemaMigrationError(
+                "Schema version disappeared while waiting for the migration "
+                "lock; database was not migrated"
+            )
+        locked_current = self._parse_schema_version(locked_row["value"])
+        if locked_current > SCHEMA_VERSION:
+            raise UnsupportedSchemaVersionError(
+                f"Database schema version {locked_current} is newer than this "
+                f"Kindex build supports ({SCHEMA_VERSION}). Upgrade Kindex or "
+                "restore a compatible database backup."
+            )
+        if locked_current == SCHEMA_VERSION:
+            return
+
+        snapshot, reason = self._snapshot_schema_migration(locked_current)
+        self._record_schema_recovery_metadata(snapshot, reason)
+        try:
+            self._migrate_schema(locked_current)
+        except Exception as exc:
+            raise SchemaMigrationError(
+                f"Schema migration {reason} failed ({exc}); recovery "
+                f"snapshot: {snapshot}"
+            ) from exc
+        self._record_schema_migration_snapshot(snapshot, reason)
+
+    @contextmanager
+    def _schema_migration_lock(self):
+        """Serialize snapshot-plus-migration with SQLite's own lock protocol.
+
+        A dedicated rollback-journal database gives every supported platform
+        the same crash-released mutex and the same local-filesystem assumptions
+        as the primary Kindex database.  The caller must re-read
+        ``schema_version`` after acquisition; that re-check closes the window
+        between its optimistic first read and ownership of the migration.
+
+        The lock database deliberately persists.  Unlinking a lock file while
+        waiters hold its old inode would let a newcomer lock a different inode
+        and enter concurrently.
+        """
+        lock_path = self.db_path.with_name(
+            f".{self.db_path.name}.schema-migration-lock.sqlite3"
+        )
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        lock_conn: sqlite3.Connection | None = None
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, 0o600)
+                else:  # pragma: no cover - Windows
+                    os.chmod(lock_path, 0o600)
+            finally:
+                os.close(fd)
+            lock_conn = sqlite3.connect(
+                str(lock_path),
+                timeout=self._sqlite_timeout,
+                isolation_level=None,
+            )
+            lock_conn.execute(
+                f"PRAGMA busy_timeout={int(self._sqlite_timeout * 1000)}"
+            )
+            lock_conn.execute("PRAGMA journal_mode=DELETE")
+            lock_conn.execute(
+                "CREATE TABLE IF NOT EXISTS migration_lock "
+                "(singleton INTEGER PRIMARY KEY CHECK (singleton = 1))"
+            )
+            lock_conn.execute("BEGIN EXCLUSIVE")
+        except (OSError, sqlite3.Error) as exc:
+            if lock_conn is not None:
+                lock_conn.close()
+            raise SchemaMigrationError(
+                "Could not acquire the schema migration lock; stop older "
+                f"Kindex processes and retry ({exc})"
+            ) from exc
+        try:
+            yield
+        finally:
+            try:
+                lock_conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            lock_conn.close()
+
+    def _snapshot_schema_migration(
+        self,
+        current_version: int,
+    ) -> tuple[Path, str]:
+        """Create the recoverable pre-state before any schema mutation."""
+        from .snapshots import snapshot_schema_migration
+
+        try:
+            return snapshot_schema_migration(
+                self.db_path,
+                self._conn,
+                current_version,
+                SCHEMA_VERSION,
+            )
+        except Exception as exc:
+            raise SchemaMigrationError(
+                f"Schema migration v{current_version} to v{SCHEMA_VERSION} "
+                f"refused because its recovery snapshot failed ({exc}); "
+                "the database was not migrated"
+            ) from exc
+
+    def _record_schema_recovery_metadata(
+        self,
+        path: Path,
+        reason: str,
+    ) -> None:
+        """Persist the apology path before applying any schema mutation."""
+        try:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (
+                    (SCHEMA_RECOVERY_PATH_META, str(path)),
+                    (SCHEMA_RECOVERY_REASON_META, reason),
+                ),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            self._conn.rollback()
+            raise SchemaMigrationError(
+                f"Schema migration {reason} refused because its recovery "
+                f"path could not be recorded ({exc}); recovery snapshot: {path}"
+            ) from exc
+
+    def _record_schema_migration_snapshot(
+        self,
+        path: Path,
+        reason: str,
+    ) -> None:
+        """Record the migration recovery point after current tables exist."""
+        from .snapshots import RESTORE_HINT
+
+        # Some migration unit fixtures (and potentially hand-built legacy
+        # stores) carry a version stamp without the earlier activity table.
+        # The on-disk recovery point is still valid and discoverable in its
+        # dedicated directory; normal released schemas always have this table.
+        has_activity_log = self._conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'activity_log'"
+        ).fetchone()
+        if has_activity_log is None:
+            return
+
+        try:
+            self._log_in_transaction(
+                self._conn,
+                "db_snapshot",
+                details={
+                    "path": str(path),
+                    "reason": reason,
+                    "restore": RESTORE_HINT,
+                },
+            )
+            self._conn.commit()
+        except Exception as exc:
+            self._conn.rollback()
+            logger.warning(
+                "schema migration completed but changelog recording failed "
+                "(%s); recovery snapshot remains recorded in meta at %s",
+                exc,
+                path,
+            )
 
     def _migrate_schema(self, current_version: int) -> None:
         """Apply incremental schema migrations. Uses self._conn directly
@@ -817,6 +1057,8 @@ class Store:
         c = self._conn
         c.execute("BEGIN IMMEDIATE")
         try:
+            from .sessions import normalize_project_path
+
             node_columns = {
                 row["name"]
                 for row in c.execute("PRAGMA table_info(nodes)").fetchall()
@@ -827,10 +1069,9 @@ class Store:
                 f"""SELECT id, extra,
                            {updated_expr} AS updated_at,
                            {created_expr} AS created_at
-                      FROM nodes
+                     FROM nodes
                      WHERE type = 'session'
                        AND json_valid(extra)
-                       AND json_extract(extra, '$.session_status') = 'active'
                        AND json_extract(extra, '$.tag') IS NOT NULL
                      ORDER BY updated_at DESC, created_at DESC, id DESC"""
             ).fetchall()
@@ -838,20 +1079,35 @@ class Store:
             paused_at = _now()
             for row in rows:
                 extra = json.loads(row["extra"])
+                original_project = str(extra.get("project_path") or "")
+                canonical_project = normalize_project_path(original_project)
+                changed = canonical_project != original_project
+                extra["project_path"] = canonical_project
+                if extra.get("session_status") != "active":
+                    if changed:
+                        c.execute(
+                            "UPDATE nodes SET extra = ? WHERE id = ?",
+                            (_jdumps(extra), row["id"]),
+                        )
+                    continue
                 key = (
                     str(extra.get("tag") or ""),
-                    str(extra.get("project_path") or ""),
+                    canonical_project,
                 )
                 if key not in active_keys:
                     active_keys.add(key)
-                    continue
-                extra["session_status"] = "paused"
-                extra["paused_at"] = extra.get("paused_at") or paused_at
-                extra["paused_reason"] = "duplicate-active-session-migration-v12"
-                c.execute(
-                    "UPDATE nodes SET extra = ? WHERE id = ?",
-                    (_jdumps(extra), row["id"]),
-                )
+                else:
+                    extra["session_status"] = "paused"
+                    extra["paused_at"] = extra.get("paused_at") or paused_at
+                    extra["paused_reason"] = (
+                        SESSION_PAUSE_REASON_DUPLICATE_MIGRATION
+                    )
+                    changed = True
+                if changed:
+                    c.execute(
+                        "UPDATE nodes SET extra = ? WHERE id = ?",
+                        (_jdumps(extra), row["id"]),
+                    )
 
             c.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_active_tag_project
@@ -868,6 +1124,26 @@ class Store:
                      WHERE type = 'table' AND name = 'suggestions'"""
             ).fetchone()
             if has_suggestions is not None:
+                suggestion_columns = {
+                    row["name"]
+                    for row in c.execute(
+                        "PRAGMA table_info(suggestions)"
+                    ).fetchall()
+                }
+                if "identity_kind" not in suggestion_columns:
+                    c.execute(
+                        "ALTER TABLE suggestions ADD COLUMN identity_kind "
+                        "TEXT NOT NULL DEFAULT 'title' "
+                        "CHECK (identity_kind IN ('title', 'node_id'))"
+                    )
+                id_source_placeholders = ",".join(
+                    "?" for _ in NODE_ID_SUGGESTION_SOURCES
+                )
+                c.execute(
+                    "UPDATE suggestions SET identity_kind = 'node_id' "
+                    f"WHERE source IN ({id_source_placeholders})",
+                    tuple(sorted(NODE_ID_SUGGESTION_SOURCES)),
+                )
                 c.execute(
                     """CREATE INDEX IF NOT EXISTS idx_suggestions_pair
                            ON suggestions(concept_a, concept_b)"""
@@ -896,6 +1172,17 @@ class Store:
                     "v12 migration verification failed: active session index"
                 )
             if has_suggestions is not None:
+                suggestion_columns = {
+                    row["name"]
+                    for row in c.execute(
+                        "PRAGMA table_info(suggestions)"
+                    ).fetchall()
+                }
+                if "identity_kind" not in suggestion_columns:
+                    raise RuntimeError(
+                        "v12 migration verification failed: suggestion "
+                        "identity kind"
+                    )
                 suggestion_index = c.execute(
                     """SELECT 1 FROM sqlite_master
                          WHERE type = 'index'
@@ -930,6 +1217,7 @@ class Store:
         },
         "edges": {"from_id", "to_id", "type", "weight"},
         "capture_candidates": {"payload_digest", "status"},
+        "suggestions": {"concept_a", "concept_b", "identity_kind"},
         "node_coactivation": {
             "node_a", "node_b", "context", "strength",
             "events", "last_event", "last_decay",
@@ -995,9 +1283,15 @@ class Store:
         """Write an activity row without committing or swallowing failures."""
         conn.execute(
             """INSERT INTO activity_log
-               (action, target_id, target_title, actor, details)
-               VALUES (?, ?, ?, ?, ?)""",
-            (action, target_id, target_title, actor, _jdumps(details or {})),
+               (timestamp, action, target_id, target_title, actor, details)
+               VALUES (datetime('now'), ?, ?, ?, ?, ?)""",
+            (
+                action,
+                target_id,
+                target_title,
+                actor,
+                _jdumps(details or {}),
+            ),
         )
 
     def recent_activity(self, limit: int = 50) -> list[dict]:
@@ -1075,13 +1369,37 @@ class Store:
 
     # ── Suggestions ───────────────────────────────────────────────────
 
-    def add_suggestion(self, concept_a: str, concept_b: str,
-                       reason: str = "", source: str = "") -> int:
+    def add_suggestion(
+        self,
+        concept_a: str,
+        concept_b: str,
+        reason: str = "",
+        source: str = "",
+        *,
+        identity_kind: str = "title",
+    ) -> int:
         """Add a bridge opportunity suggestion. Returns the suggestion ID."""
+        if identity_kind not in SUGGESTION_IDENTITY_KINDS:
+            raise ValueError(
+                "Suggestion identity_kind must be one of: "
+                + ", ".join(SUGGESTION_IDENTITY_KINDS)
+            )
+        if identity_kind == "node_id":
+            missing = [
+                value
+                for value in (concept_a, concept_b)
+                if self.get_node(value) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "Suggestion node_id endpoint(s) do not exist: "
+                    + ", ".join(missing)
+                )
         cur = self.conn.execute(
-            """INSERT INTO suggestions (concept_a, concept_b, reason, source, kind)
-               VALUES (?, ?, ?, ?, 'bridge')""",
-            (concept_a, concept_b, reason, source),
+            """INSERT INTO suggestions
+               (concept_a, concept_b, reason, source, identity_kind, kind)
+               VALUES (?, ?, ?, ?, ?, 'bridge')""",
+            (concept_a, concept_b, reason, source, identity_kind),
         )
         self.conn.commit()
         self._log("add_suggestion", f"{concept_a}->{concept_b}", "",
@@ -1099,6 +1417,48 @@ class Store:
             return [dict(r) for r in rows]
         except Exception:
             return []
+
+    def resolve_suggestion_node(
+        self,
+        value: str,
+        identity_kind: str,
+    ) -> dict | None:
+        """Resolve one endpoint from the identity contract stored on its row."""
+        if identity_kind == "node_id":
+            return self.get_node(value)
+        if identity_kind != "title":
+            raise ValueError(
+                f"Unsupported suggestion identity kind: {identity_kind!r}"
+            )
+
+        rows = self.conn.execute(
+            "SELECT * FROM nodes WHERE lower(title) = lower(?) "
+            "ORDER BY id LIMIT 2",
+            (value,),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError(
+                f"Suggestion endpoint title is ambiguous: {value!r}"
+            )
+        if rows:
+            return self._row_to_dict(rows[0])
+
+        alias_rows = self.conn.execute(
+            """SELECT DISTINCT n.*
+                 FROM nodes n,
+                      json_each(
+                          CASE WHEN json_valid(n.aka) THEN n.aka ELSE '[]' END
+                      ) alias
+                WHERE lower(CAST(alias.value AS TEXT)) = lower(?)
+                ORDER BY n.id
+                LIMIT 2""",
+            (value,),
+        ).fetchall()
+        if len(alias_rows) > 1:
+            raise ValueError(
+                f"Suggestion endpoint alias is ambiguous: {value!r}"
+            )
+        return self._row_to_dict(alias_rows[0]) if alias_rows else None
 
     def suggestion_exists(
         self,
@@ -3972,6 +4332,7 @@ class Store:
             "ignored_domain_edges": edge_counts["domain"],
             "ignored_session_edges": edge_counts["session"],
             "ignored_other_edges": edge_counts["other"],
+            "metrics_schema": SEMANTIC_METRICS_SCHEMA_VERSION,
             "orphans": orphan_count,
             "types": type_counts,
         }

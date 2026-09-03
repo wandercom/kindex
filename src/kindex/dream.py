@@ -350,10 +350,27 @@ def auto_apply_suggestions(store: Store) -> int:
         concept_b = s.get("concept_b", "")
 
         # Resolve to actual nodes
-        node_a = store.get_node(concept_a) or store.get_node_by_title(concept_a)
-        node_b = store.get_node(concept_b) or store.get_node_by_title(concept_b)
+        identity_kind = s.get("identity_kind", "title")
+        try:
+            node_a = store.resolve_suggestion_node(concept_a, identity_kind)
+            node_b = store.resolve_suggestion_node(concept_b, identity_kind)
+        except ValueError as exc:
+            logger.warning("suggestion %s was not auto-applied: %s", s["id"], exc)
+            continue
 
         if not node_a or not node_b:
+            missing = []
+            if not node_a:
+                missing.append(concept_a)
+            if not node_b:
+                missing.append(concept_b)
+            logger.warning(
+                "suggestion %s remains pending because endpoint(s) no longer "
+                "resolve under %s identity: %s",
+                s["id"],
+                identity_kind,
+                ", ".join(missing),
+            )
             continue
         if node_a.get("status") != "active" or node_b.get("status") != "active":
             continue
@@ -571,6 +588,7 @@ def dream_lightweight(
             concept_a=a_id, concept_b=b_id,
             reason=f"Fuzzy match (score={score:.3f})",
             source="dream-cycle",
+            identity_kind="node_id",
         )
         suggested += 1
 
@@ -630,6 +648,7 @@ def dream_full(
                 proposal["to_id"],
                 reason=f"Shared domain: {proposal['domain']}",
                 source=DOMAIN_SUGGESTION_SOURCE,
+                identity_kind="node_id",
             )
             created += 1
     results["domain_link_proposals"] = proposals

@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from .config import Config
     from .store import Store
 
+
+DEFAULT_ARCHIVE_MIN_AGE_DAYS = 60
+ARCHIVE_DUPLICATE_COUNT_META = "archive_duplicate_count"
+ARCHIVE_DUPLICATE_IDS_META = "archive_duplicate_ids"
+
 # Archive schema — flat snapshot, no FTS, no triggers
 _ARCHIVE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS archived_nodes (
@@ -163,73 +168,127 @@ def archive_nodes(
 
     try:
         for nid in node_ids:
-            node = store.get_node(nid)
-            if node is None:
-                continue
+            source = store.conn
+            source.execute("BEGIN IMMEDIATE")
+            try:
+                row = source.execute(
+                    "SELECT * FROM nodes WHERE id = ?", (nid,)
+                ).fetchone()
+                if row is None:
+                    source.rollback()
+                    continue
+                node = store._row_to_dict(row)
 
-            # Serialize complex fields to JSON strings for flat archive
-            def _ser(val):
-                if isinstance(val, (list, dict)):
-                    return json.dumps(val)
-                return val or ""
+                # Session lifecycle is not a force-delete surface. Re-check
+                # its completed/unlinked facts while holding the source write
+                # lock, so a link committed after candidate selection wins and
+                # keeps the session in the fast graph.
+                if node.get("type") == "session":
+                    extra_value = node.get("extra")
+                    linked = (
+                        extra_value.get("linked_nodes")
+                        if isinstance(extra_value, dict)
+                        else None
+                    )
+                    has_edge = source.execute(
+                        "SELECT 1 FROM edges "
+                        "WHERE from_id = ? OR to_id = ? LIMIT 1",
+                        (nid, nid),
+                    ).fetchone()
+                    if (
+                        not isinstance(linked, list)
+                        or linked
+                        or extra_value.get("session_status") != "completed"
+                        or has_edge is not None
+                    ):
+                        source.rollback()
+                        continue
 
-            domains = _ser(node.get("domains", []))
-            extra = _ser(node.get("extra", {}))
-            prov_who = _ser(node.get("prov_who", ""))
+                def _ser(val):
+                    if isinstance(val, (list, dict)):
+                        return json.dumps(val)
+                    return val or ""
 
-            # Write node to archive
-            archive_conn.execute(
-                """INSERT OR REPLACE INTO archived_nodes
-                   (id, title, content, type, status, weight, domains, extra,
-                    created_at, updated_at, archived_at, prov_source,
-                    prov_activity, prov_who, prov_why)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    nid,
-                    node.get("title", ""),
-                    node.get("content", ""),
-                    node.get("type", "concept"),
-                    node.get("status", "archived"),
-                    node.get("weight", 0),
-                    domains,
-                    extra,
-                    node.get("created_at", ""),
-                    node.get("updated_at", ""),
-                    now,
-                    node.get("prov_source", "") or "",
-                    node.get("prov_activity", "") or "",
-                    prov_who,
-                    node.get("prov_why", "") or "",
-                ),
-            )
+                domains = _ser(node.get("domains", []))
+                extra = _ser(node.get("extra", {}))
+                prov_who = _ser(node.get("prov_who", ""))
 
-            # Write edges involving this node to archive
-            for edge in store.edges_from(nid) + store.edges_to(nid):
+                # One archive transaction owns the node and every copied edge.
+                # The source BEGIN IMMEDIATE above prevents another writer from
+                # adding an edge between this read and the source deletion.
+                archive_conn.execute("BEGIN IMMEDIATE")
                 archive_conn.execute(
-                    """INSERT OR REPLACE INTO archived_edges
-                       (id, from_id, to_id, type, weight, provenance,
-                        created_at, archived_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT OR REPLACE INTO archived_nodes
+                       (id, title, content, type, status, weight, domains, extra,
+                        created_at, updated_at, archived_at, prov_source,
+                        prov_activity, prov_who, prov_why)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        edge.get("id", ""),
-                        edge.get("from_id", ""),
-                        edge.get("to_id", ""),
-                        edge.get("type", "relates_to"),
-                        edge.get("weight", 0),
-                        edge.get("provenance", ""),
-                        edge.get("created_at", ""),
+                        nid,
+                        node.get("title", ""),
+                        node.get("content", ""),
+                        node.get("type", "concept"),
+                        node.get("status", "archived"),
+                        node.get("weight", 0),
+                        domains,
+                        extra,
+                        node.get("created_at", ""),
+                        node.get("updated_at", ""),
                         now,
+                        node.get("prov_source", "") or "",
+                        node.get("prov_activity", "") or "",
+                        prov_who,
+                        node.get("prov_why", "") or "",
                     ),
                 )
 
-            # Remove from fast graph
-            store.delete_node(nid)
+                edges = store.edges_from(nid) + store.edges_to(nid)
+                for edge in edges:
+                    archive_conn.execute(
+                        """INSERT OR REPLACE INTO archived_edges
+                           (id, from_id, to_id, type, weight, provenance,
+                            created_at, archived_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            edge.get("id", ""),
+                            edge.get("from_id", ""),
+                            edge.get("to_id", ""),
+                            edge.get("type", "relates_to"),
+                            edge.get("weight", 0),
+                            edge.get("provenance", ""),
+                            edge.get("created_at", ""),
+                            now,
+                        ),
+                    )
+
+                # Commit the recoverable copy before deleting the authority.
+                # A crash between commits can leave a duplicate, never loss;
+                # retrying an otherwise-eligible node is idempotent because
+                # archive rows replace by ID. The next archive cycle reports
+                # any duplicate that became ineligible rather than guessing
+                # that equal IDs prove equal entities.
+                archive_conn.commit()
+                source.execute(
+                    "DELETE FROM edges WHERE from_id = ? OR to_id = ?",
+                    (nid, nid),
+                )
+                source.execute("DELETE FROM nodes WHERE id = ?", (nid,))
+                source.commit()
+            except BaseException:
+                source.rollback()
+                archive_conn.rollback()
+                raise
+
+            try:
+                from .vectors import delete_embedding
+                delete_embedding(store, nid)
+            except Exception:
+                pass
+            store._log("delete_node", nid, node.get("title", nid))
             count += 1
 
             if verbose:
                 print(f"  Archived to slow graph: {node.get('title', nid)}")
-
-        archive_conn.commit()
     finally:
         archive_conn.close()
 
@@ -239,7 +298,7 @@ def archive_nodes(
 def find_archivable_nodes(
     store: "Store",
     weight_threshold: float = 0.05,
-    min_age_days: int = 60,
+    min_age_days: int = DEFAULT_ARCHIVE_MIN_AGE_DAYS,
     limit: int = 50,
 ) -> list[str]:
     """Find nodes eligible for archival to slow graph.
@@ -268,6 +327,7 @@ def find_archivable_nodes(
                         n.type = 'session'
                         AND json_valid(n.extra)
                         AND json_extract(n.extra, '$.session_status') = 'completed'
+                        AND json_type(n.extra, '$.linked_nodes') = 'array'
                         AND COALESCE(
                             json_array_length(
                                 json_extract(n.extra, '$.linked_nodes')
@@ -288,6 +348,87 @@ def find_archivable_nodes(
     return [r["id"] for r in rows]
 
 
+def find_archive_duplicates(
+    config: "Config",
+    store: "Store",
+    *,
+    sample_limit: int = 50,
+) -> dict:
+    """Report IDs present in both fast and slow stores without deleting either.
+
+    A duplicate is the safe residue of archive-first/source-delete-second, but
+    ID equality alone cannot prove it came from that crash window rather than
+    an import collision. Fast-store presence therefore triggers visibility,
+    not an automatic destructive reconciliation.
+    """
+    count = 0
+    samples: list[dict] = []
+    for db_file in sorted(archive_dir(config).glob("*.db")):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(db_file))
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                "ATTACH DATABASE ? AS fast_graph",
+                (str(store.db_path),),
+            )
+            count += conn.execute(
+                """SELECT COUNT(*)
+                     FROM archived_nodes archived
+                     JOIN fast_graph.nodes live ON live.id = archived.id"""
+            ).fetchone()[0]
+            remaining = sample_limit - len(samples)
+            if remaining > 0:
+                rows = conn.execute(
+                    """SELECT archived.id,
+                              archived.title AS archived_title,
+                              live.title AS live_title,
+                              archived.archived_at
+                         FROM archived_nodes archived
+                         JOIN fast_graph.nodes live ON live.id = archived.id
+                        ORDER BY archived.id
+                        LIMIT ?""",
+                    (remaining,),
+                ).fetchall()
+                samples.extend({
+                    "id": row["id"],
+                    "live_title": row["live_title"],
+                    "archived_title": row["archived_title"],
+                    "archive_file": db_file.name,
+                    "archived_at": row["archived_at"],
+                } for row in rows)
+        except sqlite3.Error:
+            continue
+        finally:
+            if conn is not None:
+                conn.close()
+    return {"count": count, "samples": samples}
+
+
+def _record_archive_duplicate_state(
+    config: "Config",
+    store: "Store",
+    *,
+    verbose: bool,
+) -> dict:
+    duplicates = find_archive_duplicates(config, store)
+    store.set_meta(ARCHIVE_DUPLICATE_COUNT_META, str(duplicates["count"]))
+    store.set_meta(
+        ARCHIVE_DUPLICATE_IDS_META,
+        json.dumps([item["id"] for item in duplicates["samples"]]),
+    )
+    if verbose and duplicates["count"]:
+        sample = ", ".join(
+            item["id"] for item in duplicates["samples"][:5]
+        )
+        print(
+            "  Warning: "
+            f"{duplicates['count']} node ID(s) exist in both fast and slow "
+            f"graphs ({sample}). Copies were preserved for manual review."
+        )
+    return duplicates
+
+
 def archive_cycle(
     config: "Config",
     store: "Store",
@@ -298,9 +439,13 @@ def archive_cycle(
     Designed to be called from cron_run.
     """
     node_ids = find_archivable_nodes(store)
-    if not node_ids:
-        return 0
-    return archive_nodes(config, store, node_ids, verbose=verbose)
+    archived = (
+        archive_nodes(config, store, node_ids, verbose=verbose)
+        if node_ids
+        else 0
+    )
+    _record_archive_duplicate_state(config, store, verbose=verbose)
+    return archived
 
 
 def list_archives(config: "Config") -> list[dict]:

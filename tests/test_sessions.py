@@ -1,6 +1,7 @@
 """Tests for session tag management: start, update, segment, pause, resume, complete."""
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -28,7 +29,7 @@ def run(*args, data_dir=None):
 
 class TestStartTag:
     def test_start_creates_session_node(self, store):
-        from kindex.sessions import start_tag, get_tag
+        from kindex.sessions import get_tag, normalize_project_path, start_tag
 
         nid = start_tag(store, "my-feature", description="Working on feature X",
                         focus="Initial setup", project_path="/tmp/project")
@@ -39,7 +40,7 @@ class TestStartTag:
         assert extra["tag"] == "my-feature"
         assert extra["session_status"] == "active"
         assert extra["current_focus"] == "Initial setup"
-        assert extra["project_path"] == "/tmp/project"
+        assert extra["project_path"] == normalize_project_path("/tmp/project")
         assert len(extra["segments"]) == 1
         assert extra["segments"][0]["focus"] == "Initial setup"
 
@@ -78,6 +79,34 @@ class TestStartTag:
 
         assert get_tag(store, "shared", project_path="/project/a")["id"] == first
         assert get_tag(store, "shared", project_path="/project/b")["id"] == second
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlink setup differs on Windows")
+    def test_project_identity_resolves_symlinks_and_trailing_segments(
+        self, store, tmp_path
+    ):
+        from kindex.sessions import get_tag, start_tag
+
+        real = tmp_path / "real-project"
+        real.mkdir()
+        alias = tmp_path / "project-alias"
+        alias.symlink_to(real, target_is_directory=True)
+
+        first = start_tag(
+            store,
+            "canonical-project",
+            project_path=str(alias / "."),
+        )
+
+        assert get_tag(
+            store, "canonical-project", project_path=str(real)
+        )["id"] == first
+        assert store.get_node(first)["extra"]["project_path"] == os.path.realpath(real)
+        with pytest.raises(ValueError, match="Active tag already exists"):
+            start_tag(
+                store,
+                "canonical-project",
+                project_path=str(real),
+            )
 
     def test_start_empty_name_raises(self, store):
         from kindex.sessions import start_tag
@@ -450,6 +479,17 @@ class TestTagCLI:
         assert "show-test" in r.stdout
         assert "Showing" in r.stdout
 
+    def test_tag_list_and_show_expose_pause_reason(self, tmp_path):
+        d = str(tmp_path)
+        run("tag", "start", "paused-reason", data_dir=d)
+        run("tag", "pause", "paused-reason", data_dir=d)
+
+        listed = run("tag", "list", "--status", "paused", data_dir=d)
+        shown = run("tag", "show", "paused-reason", data_dir=d)
+
+        assert "reason=user" in listed.stdout
+        assert "Pause reason: user" in shown.stdout
+
     def test_tag_resume(self, tmp_path):
         d = str(tmp_path)
         run("tag", "start", "resume-cli", "--focus", "Resuming",
@@ -586,6 +626,9 @@ def test_session_uniqueness_migration_pauses_older_duplicates(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         migrated.add_node("duplicate", node_type="session", extra=extra)
     migrated.close()
+
+    listed = run("tag", "list", "--status", "paused", data_dir=str(tmp_path))
+    assert "reason=duplicate-active-session-migration-v12" in listed.stdout
 
 
 def test_session_uniqueness_migration_has_total_tiebreak(tmp_path):

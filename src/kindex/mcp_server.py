@@ -1004,13 +1004,37 @@ def status() -> str:
     store, _ = _get_store()
     stats = store.stats()
     op = store.operational_summary()
+    from .store import SCHEMA_RECOVERY_PATH_META, SCHEMA_RECOVERY_REASON_META
+    recovery_path = store.get_meta(SCHEMA_RECOVERY_PATH_META)
+    recovery_reason = store.get_meta(SCHEMA_RECOVERY_REASON_META)
+    from .archive import ARCHIVE_DUPLICATE_COUNT_META
+    try:
+        archive_duplicate_count = int(
+            store.get_meta(ARCHIVE_DUPLICATE_COUNT_META) or 0
+        )
+    except (TypeError, ValueError):
+        archive_duplicate_count = 0
 
     lines = [
         "# Kindex Status\n",
         f"Nodes: {stats['semantic_nodes']} semantic",
         f"Edges: {stats['edges']} semantic",
         f"Orphans: {stats['orphans']} semantic",
+        f"Metrics schema: {stats['metrics_schema']}",
     ]
+    if recovery_path:
+        display_path = "".join(
+            char if char.isprintable() else "?" for char in recovery_path
+        )[:1000]
+        lines.append(
+            f"Schema recovery: {display_path} "
+            f"({recovery_reason or 'schema migration'})"
+        )
+    if archive_duplicate_count:
+        lines.append(
+            "Archive warning: "
+            f"{archive_duplicate_count} duplicate ID(s) need review"
+        )
     stored_nodes = stats["stored_nodes"]
     stored_edges = stats["stored_edges"]
     excluded_nodes = stored_nodes - stats["semantic_nodes"]

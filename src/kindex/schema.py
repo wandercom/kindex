@@ -26,11 +26,25 @@ ALL_NODE_TYPES = NODE_TYPES + OPERATIONAL_TYPES
 # Session nodes record agent-run lifecycle. They remain queryable history, but
 # they are not knowledge-topology vertices and do not need semantic edges.
 SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES = ("session",)
+SEMANTIC_METRICS_SCHEMA_VERSION = 2
 
 # v0.35 and earlier materialized shared node domains as pairwise edges. Those
 # edges are derived from attributes already stored on each endpoint and must not
 # participate in semantic traversal or graph-health metrics.
 LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE = "dream-cycle domain co-membership"
+
+SESSION_PAUSE_REASON_USER = "user"
+SESSION_PAUSE_REASON_DUPLICATE_MIGRATION = (
+    "duplicate-active-session-migration-v12"
+)
+
+# These producers persist immutable node IDs in suggestions.concept_a/b.
+# All other producers persist display titles for legacy/API compatibility.
+NODE_ID_SUGGESTION_SOURCES = frozenset({
+    "dream-cycle",
+    "dream-cycle-domain",
+})
+SUGGESTION_IDENTITY_KINDS = ("title", "node_id")
 
 # Edge types — bidirectional by convention
 EDGE_TYPES = (
@@ -193,6 +207,8 @@ CREATE TABLE IF NOT EXISTS suggestions (
     concept_b TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
+    identity_kind TEXT NOT NULL DEFAULT 'title'
+        CHECK (identity_kind IN ('title', 'node_id')),
     kind TEXT NOT NULL DEFAULT 'bridge',
     status TEXT NOT NULL DEFAULT 'pending',  -- pending/accepted/rejected
     created_at TEXT NOT NULL DEFAULT (datetime('now'))

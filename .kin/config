@@ -30,7 +30,7 @@ voice:
 
 standards:
   code_review:
-    - 1987 tests, all must pass
+    - Full test suite must pass
     - Pydantic models for all data structures
     - SQLite migrations are forward-only, atomic, and verify COLUMNS not just tables
     - MCP tools match CLI capabilities
