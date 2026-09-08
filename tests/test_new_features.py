@@ -74,8 +74,8 @@ class TestPIIStripping:
         assert "alice@example.com" not in cleaned["content"]
         assert "[email]" in cleaned["content"]
 
-    def test_long_token_redacted(self):
-        token = "A" * 45  # 45-char token should be redacted
+    def test_explicit_api_key_redacted(self):
+        token = "A" * 45  # Explicit credential label, not length alone.
         node = {
             "content": f"API key is {token} keep it safe.",
             "prov_who": ["bob"],
@@ -83,7 +83,7 @@ class TestPIIStripping:
         }
         cleaned = self._strip_pii(node)
         assert token not in cleaned["content"]
-        assert "[redacted]" in cleaned["content"]
+        assert "[REDACTED]" in cleaned["content"]
 
     def test_prov_who_anonymized(self):
         node = {

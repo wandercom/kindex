@@ -1018,19 +1018,20 @@ def record_degraded(cmd: str, error: BaseException,
     """
     import json
     from datetime import datetime
+    from .privacy import redact, safe_error
 
     try:
         path = degraded_ledger_path(config, override_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        event = {
+        event = redact({
             "ts": datetime.now().isoformat(timespec="seconds"),
             "cmd": cmd,
             "profile": config.active_profile if config is not None else None,
             "profile_source": (config.profile_source
                                if config is not None else "unknown"),
             "error_class": type(error).__name__,
-            "msg": str(error)[:200],
-        }
+            "msg": safe_error(error),
+        })
         line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
 
         # Append — always plain O_APPEND, no lock, never blocks.

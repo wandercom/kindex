@@ -26,6 +26,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .privacy import redact, redact_text, safe_error
+from .privacy import redacting_print as print
+
 if TYPE_CHECKING:
     from .config import Config, EmbeddingConfig
     from .store import Store
@@ -151,7 +154,7 @@ def _get_model(model_name: str = "all-MiniLM-L6-v2"):
               "Install with: pip install sentence-transformers", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"Warning: local embedding model unavailable: {e}", file=sys.stderr)
+        print(f"Warning: local embedding model unavailable: {safe_error(e)}", file=sys.stderr)
         return None
 
 
@@ -178,7 +181,7 @@ def _embed_openai(text: str, model: str, dimensions: int, api_key_env: str) -> l
     try:
         req = urllib.request.Request(
             "https://api.openai.com/v1/embeddings",
-            data=json.dumps(body).encode("utf-8"),
+            data=json.dumps(redact(body)).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
@@ -188,7 +191,7 @@ def _embed_openai(text: str, model: str, dimensions: int, api_key_env: str) -> l
             result = json.loads(resp.read().decode())
             return result["data"][0]["embedding"]
     except Exception as e:
-        print(f"OpenAI embedding error: {e}", file=sys.stderr)
+        print(f"OpenAI embedding error: {safe_error(e)}", file=sys.stderr)
         return None
 
 
@@ -209,7 +212,7 @@ def _embed_gemini(text: str, model: str, dimensions: int, api_key_env: str) -> l
     try:
         req = urllib.request.Request(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent",
-            data=json.dumps(body).encode("utf-8"),
+            data=json.dumps(redact(body)).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": api_key,
@@ -221,7 +224,7 @@ def _embed_gemini(text: str, model: str, dimensions: int, api_key_env: str) -> l
                 return result["embedding"]["values"]
             return None
     except Exception as e:
-        print(f"Gemini embedding error: {e}", file=sys.stderr)
+        print(f"Gemini embedding error: {safe_error(e)}", file=sys.stderr)
         return None
 
 
@@ -257,7 +260,7 @@ def _embed_voyage_context_chunks(
     try:
         req = urllib.request.Request(
             "https://api.voyageai.com/v1/contextualizedembeddings",
-            data=json.dumps(body).encode("utf-8"),
+            data=json.dumps(redact(body)).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
@@ -270,7 +273,7 @@ def _embed_voyage_context_chunks(
             items = sorted(result["data"][0]["data"], key=lambda item: item.get("index", 0))
             return [item["embedding"] for item in items]
     except Exception as e:
-        print(f"Voyage embedding error: {e}", file=sys.stderr)
+        print(f"Voyage embedding error: {safe_error(e)}", file=sys.stderr)
         return None
 
 
@@ -309,7 +312,7 @@ def _embed_voyage(
     try:
         req = urllib.request.Request(
             "https://api.voyageai.com/v1/embeddings",
-            data=json.dumps(body).encode("utf-8"),
+            data=json.dumps(redact(body)).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
@@ -319,7 +322,7 @@ def _embed_voyage(
             result = json.loads(resp.read().decode())
             return result["data"][0]["embedding"]
     except Exception as e:
-        print(f"Voyage embedding error: {e}", file=sys.stderr)
+        print(f"Voyage embedding error: {safe_error(e)}", file=sys.stderr)
         return None
 
 
@@ -349,7 +352,7 @@ def embed_text(
         print(f"Warning: unknown embedding provider '{provider}'. "
               f"Supported: {', '.join(PROVIDER_DEFAULTS)}", file=sys.stderr)
         return None
-    return fn(text, model, dims, api_key_env, input_type)
+    return fn(redact_text(text), model, dims, api_key_env, input_type)
 
 
 def _get_embedding_dim(config: Config | None) -> int:
@@ -372,11 +375,12 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _embedding_text_for_node(node: dict) -> str:
-    return f"{node.get('title') or ''} {node.get('content') or ''}".strip()
+    return redact_text(f"{node.get('title') or ''} {node.get('content') or ''}".strip())
 
 
 def _chunk_text(text: str, *, chunk_chars: int, overlap_chars: int) -> list[str]:
     """Split text into stable overlapping chunks using character offsets."""
+    text = redact_text(text)
     if not text:
         return []
     chunk_chars = max(1, chunk_chars)
@@ -588,7 +592,8 @@ def upsert_embedding(store: Store, node_id: str, text: str) -> bool:
         return False
 
 
-def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000) -> bool:
+def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000,
+                      commit: bool = True) -> bool:
     """Queue a node for (re)embedding by the daemon. Cheap: one small SQLite
     write, no model load, no network — safe on the add/edit/supersede hot path.
 
@@ -609,7 +614,14 @@ def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000) ->
     queue = [n for n in queue if n != node_id]
     queue.append(node_id)
     try:
-        store.set_meta(EMBED_QUEUE_META, json.dumps(queue[-max_queue:]))
+        value = json.dumps(queue[-max_queue:])
+        if commit:
+            store.set_meta(EMBED_QUEUE_META, value)
+        else:
+            # The task service owns the surrounding node + receipt transaction.
+            from .privacy import redact_serialized
+            store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)",
+                               (EMBED_QUEUE_META, redact_serialized(value)))
         return True
     except Exception:
         return False

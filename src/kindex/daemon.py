@@ -6,6 +6,9 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .privacy import redact_text, safe_error
+from .privacy import redacting_print as print
+
 from .routing import (  # noqa: F401  (re-exported for backward compatibility)
     _encode_claude_project_dir,
     _session_cwd,
@@ -263,7 +266,7 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
             store = Store(cfg)
         except Exception as e:
             return {"profile": name, "fired": 0, "auto_snoozed": 0,
-                    "error": str(e)}
+                    "error": safe_error(e)}
         try:
             r = _check_reminders(cfg, store, verbose=verbose)
             try:
@@ -274,7 +277,7 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
                 pass
         except Exception as e:
             return {"profile": name, "fired": 0, "auto_snoozed": 0,
-                    "error": str(e)}
+                    "error": safe_error(e)}
         finally:
             store.close()
         return {"profile": name, "fired": r.get("fired", 0),
@@ -845,13 +848,13 @@ def _extract_session_text_quick(jsonl_path: Path, max_chars: int = 4000) -> str:
 
                 content = entry.get("content", "")
                 if isinstance(content, str):
-                    chunk = content[:800]
+                    chunk = redact_text(content)[:800]
                     texts.append(chunk)
                     total_len += len(chunk)
                 elif isinstance(content, list):
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
-                            chunk = block.get("text", "")[:800]
+                            chunk = redact_text(block.get("text", ""))[:800]
                             texts.append(chunk)
                             total_len += len(chunk)
     except OSError:

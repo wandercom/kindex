@@ -346,7 +346,7 @@ class TestWriteKinIndexHardening:
         for nid, title in [(mine_mod, "mine.py"), (mine_sym, "Mine.fn"),
                            (other_repo, "secret_payments.py"),
                            (bad_shape, "junk")]:
-            store.add_node(title, node_id=nid, node_type="artifact")
+            store.add_node(title, node_id=nid, node_type="artifact", audience="team")
 
         monkeypatch.setattr(ingest, "_detect_repo_for_index", lambda d: "api")
         out = tmp_path / "proj"

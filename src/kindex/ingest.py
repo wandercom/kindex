@@ -7,6 +7,9 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .privacy import redact, redact_text
+from .privacy import redacting_print as print
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -96,7 +99,7 @@ def _infer_title(project_root: Path, claude_md: Path) -> str:
 def _extract_project_context(claude_md: Path) -> str:
     """Extract the key content from a CLAUDE.md file."""
     try:
-        text = claude_md.read_text(errors="replace")
+        text = redact_text(claude_md.read_text(errors="replace"))
         # Limit to reasonable size but keep the important stuff
         if len(text) > 4000:
             text = text[:4000] + "\n...(truncated)"
@@ -403,7 +406,7 @@ def _extract_codex_session(jsonl_path: Path, max_chars: int = 8000) -> tuple[dic
                     if not stripped or stripped.startswith("<environment_context>"):
                         continue
                     prefix = "User" if role == "user" else "Assistant"
-                    chunk = f"{prefix}: {stripped[:1000]}"
+                    chunk = f"{prefix}: {redact_text(stripped)[:1000]}"
                     texts.append(chunk)
                     total_len += len(chunk)
                     if total_len >= max_chars:
@@ -462,13 +465,14 @@ def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
                 if role != "assistant":
                     continue
                 if isinstance(content, str):
+                    content = redact_text(content)
                     texts.append(content[:1000])
                     total_len += len(content[:1000])
                 elif isinstance(content, list):
                     for block in content:
                         if (isinstance(block, dict) and block.get("type") == "text"
                                 and isinstance(block.get("text"), str)):
-                            text = block["text"][:1000]
+                            text = redact_text(block["text"])[:1000]
                             texts.append(text)
                             total_len += len(text)
     except OSError:
@@ -1010,7 +1014,7 @@ def _kin_index_node(node: dict) -> dict:
     for clock in ("asserted_at", "true_of"):
         if node.get(clock):
             out[clock] = node[clock]
-    return out
+    return redact(out)
 
 
 def _git_ancestor_exists(path: Path) -> bool:
@@ -1081,15 +1085,16 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
     a snapshot of what Kindex knows about this project.  When run inside
     a git repo, the index is scoped to code nodes belonging to that repo only
     (repo-scoped selection is always preferred over the global fallback).
-    The non-repo fallback is a global head — since the file is meant to be
-    committed and shared, it only includes public/team-audience nodes unless
-    the repo's own .kin config declares ``audience: private``.
+    Both branches only include public/team-audience nodes unless the repo's
+    own .kin config declares ``audience: private``. The non-repo fallback
+    is a global head, so private opt-in there includes private global nodes.
 
     Raises RuntimeError (from _detect_repo_for_index) when git detection
     fails inside what is visibly a git repo — the global fallback head must
     never be committed into a real repo by accident.
     """
     repo_slug = _detect_repo_for_index(output_dir)
+    include_private = _kin_declared_audience(output_dir) == "private"
 
     if repo_slug:
         # Query code nodes belonging to this repo by ID prefix
@@ -1110,8 +1115,9 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
             rf"^code-(mod|sym)-{re.escape(repo_slug)}-[0-9a-f]{{12}}$"
         )
         nodes = [n for n in (store._row_to_dict(r) for r in rows)
-                 if id_shape.match(n["id"])]
-    elif _kin_declared_audience(output_dir) == "private":
+                 if id_shape.match(n["id"])
+                 and (include_private or n.get("audience") in ("public", "team"))]
+    elif include_private:
         # Explicitly private index: the repo owner opted in to a full snapshot.
         rows = store.conn.execute(
             "SELECT * FROM nodes ORDER BY id ASC LIMIT ?",

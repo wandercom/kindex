@@ -12,6 +12,8 @@ from typing import Any
 from .budget import BudgetLedger
 from .config import Config
 from .llm import _estimate_cost
+from .privacy import redact, redact_text
+from .privacy import redacting_print as print
 
 
 def _get_client(config: Config):
@@ -96,8 +98,8 @@ def llm_extract(
     if client is None:
         return None
 
-    titles_str = ", ".join(existing_titles[:100])
-    prompt = EXTRACT_PROMPT.format(text=text[:4000], existing_titles=titles_str)
+    titles_str = ", ".join(redact(existing_titles[:100]))
+    prompt = EXTRACT_PROMPT.format(text=redact_text(text)[:4000], existing_titles=titles_str)
 
     try:
         response = client.messages.create(
@@ -122,7 +124,7 @@ def llm_extract(
         elif "```" in text_out:
             text_out = text_out.split("```")[1].split("```")[0]
 
-        return json.loads(text_out)
+        return redact(json.loads(text_out))
     except Exception:
         return None
 
@@ -135,6 +137,7 @@ def keyword_extract(text: str, existing_titles: list[str] | None = None) -> dict
     Extracts concepts (capitalized phrases, noun phrases, quoted terms),
     decisions, questions, connections, and bridge opportunities.
     """
+    text = redact_text(text)
     if existing_titles is None:
         existing_titles = []
     existing_lower = {t.lower(): t for t in existing_titles}
@@ -409,7 +412,7 @@ def llm_summarize_session(text: str, config: Config, ledger: BudgetLedger) -> st
     if client is None:
         return None
 
-    prompt = SESSION_SUMMARIZE_PROMPT.format(text=text[:4000])
+    prompt = SESSION_SUMMARIZE_PROMPT.format(text=redact_text(text)[:4000])
 
     try:
         response = client.messages.create(
@@ -427,6 +430,6 @@ def llm_summarize_session(text: str, config: Config, ledger: BudgetLedger) -> st
                       tokens_in=response.usage.input_tokens,
                       tokens_out=response.usage.output_tokens)
 
-        return response.content[0].text.strip()
+        return redact_text(response.content[0].text.strip())
     except Exception:
         return None

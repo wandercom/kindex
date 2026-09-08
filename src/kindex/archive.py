@@ -18,6 +18,9 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .privacy import redact
+from .privacy import redacting_print as print
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -178,6 +181,10 @@ def archive_nodes(
                     source.rollback()
                     continue
                 node = store._row_to_dict(row)
+                if redact(node) != node:
+                    # Existing evidence is immutable here. Do not copy raw
+                    # credentials or silently change digest-bound history.
+                    raise ValueError("Archive source requires explicit credential remediation")
 
                 # Session lifecycle is not a force-delete surface. Re-check
                 # its completed/unlinked facts while holding the source write
@@ -243,6 +250,8 @@ def archive_nodes(
                 )
 
                 edges = store.edges_from(nid) + store.edges_to(nid)
+                if redact(edges) != edges:
+                    raise ValueError("Archive edges require explicit credential remediation")
                 for edge in edges:
                     archive_conn.execute(
                         """INSERT OR REPLACE INTO archived_edges

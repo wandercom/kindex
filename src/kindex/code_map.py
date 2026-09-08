@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 
 UA_VERSION = "1.0.0"
 _LINE_SUFFIX_RE = re.compile(r"^(?P<path>.*):(?P<line>\d+)$")
-logger = logging.getLogger(__name__)
+from .privacy import protect_logger
+from .privacy import redacting_print as print
+
+logger = protect_logger(logging.getLogger(__name__))
 
 
 def _sha(value: str, length: int = 12) -> str:

@@ -2,23 +2,31 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![v0.36.0](https://img.shields.io/badge/version-0.36.0-purple.svg)](https://github.com/jmcentire/kindex/releases)
+[![v0.36.0](https://img.shields.io/badge/version-0.36.0-purple.svg)](https://github.com/wandercom/kindex/releases)
 [![PyPI](https://img.shields.io/pypi/v/kindex.svg)](https://pypi.org/project/kindex/)
 [![MCP Market](https://img.shields.io/badge/MCP%20Market-kindex-blue.svg)](https://mcpmarket.com/server/kindex)
-[![Tests](https://github.com/jmcentire/kindex/actions/workflows/workflow.yml/badge.svg)](https://github.com/jmcentire/kindex/actions/workflows/workflow.yml)
+[![Tests](https://github.com/wandercom/kindex/actions/workflows/workflow.yml/badge.svg)](https://github.com/wandercom/kindex/actions/workflows/workflow.yml)
 [![MCP Plugin](https://img.shields.io/badge/MCP-Plugin-orange.svg)](#install-as-agent-mcp-plugin)
 
-**The memory layer AI coding agents don't have.**
+**Every agent is smart inside its own silo. Kindex lets them work together.**
 
 Kindex does one thing. It knows what you know.
 
-It's a persistent knowledge graph for AI-assisted workflows. It indexes your conversations, projects, and intellectual work so that Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other MCP-capable agents never start a session blind. Available as a **free MCP plugin** or standalone CLI.
+Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other MCP-capable agents each remember for themselves, and none of them can read the others. Kindex is the local knowledge graph they all read and write: continuity across sessions and restarts, handoffs between vendors, shared decisions and constraints, and live coordination while several of them work at once. Available as a **free MCP plugin** or standalone CLI.
 
-> **Memory plugins capture what happened. Kindex captures what it means and how it connects.** Most memory tools are session archives with search. Kindex is a weighted knowledge graph that grows intelligence over time — understanding relationships, surfacing constraints, and managing exactly how much context to inject based on your available token budget.
+> **Memory plugins capture what happened. Kindex captures what it means and how it connects.** Most memory tools are session archives with search. Kindex is a weighted knowledge graph with typed nodes, provenance, and decay, that surfaces constraints and decisions and manages exactly how much context to inject based on your available token budget.
 
-Docs: [kindex.tools](https://kindex.tools/) is the canonical public site, served by the companion Fly static app. This repo also publishes its `docs/` directory at [jmcentire.github.io/kindex](https://jmcentire.github.io/kindex/). Human setup lives in [docs/human-guide.md](docs/human-guide.md); agent operating rules live in [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md).
+Kindex is the index for an individual and a codebase: your own graph, and the repository's git-tracked `.kin/`. [Kinbase](https://kinbase.tools) is the company product above it, in development: engineering direction, architecture, standards, ownership, and history, held by named authorities and composed into every coding session. Same engine, same protocol, physically separate stores.
+
+Docs: [kindex.tools](https://kindex.tools/) is the canonical public site, served by the companion Fly static app. This repo also publishes its `docs/` directory at [wandercom.github.io/kindex](https://wandercom.github.io/kindex/). Human setup lives in [docs/human-guide.md](docs/human-guide.md); agent operating rules live in [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md).
 
 ## Install
+
+Development preview: [Claude function hooks and signet-eval coexistence](docs/claude-function-hooks.md)
+adds repo-local durable tasks, secret minimization at Kindex-owned boundaries,
+and separately selectable modern/legacy adapters. The default remains compatible
+legacy hooks. Function hooks are qualified on Claude Code 2.1.263; this is not a
+promise that all Claude logs can be redacted or a published 1.0 release.
 
 Pick whichever installer you already use. They all install the same `kin` and `kin-mcp` binaries.
 
@@ -33,7 +41,7 @@ uv tool install 'kindex[mcp]'
 uvx --from 'kindex[mcp]' kin-mcp --help
 
 # from source
-git clone https://github.com/jmcentire/kindex && cd kindex && make install
+git clone https://github.com/wandercom/kindex && cd kindex && make install
 ```
 
 ### Upgrading to v0.36.0
@@ -1144,6 +1152,6 @@ make clean        # remove build artifacts
 
 ## License
 
-MIT
+MIT. Copyright (c) 2026 Wander. Kindex is a Wander project.
 
 <!-- mcp-name: io.github.jmcentire/kindex -->

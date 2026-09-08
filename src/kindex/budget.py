@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from .config import BudgetConfig
+from .privacy import redact
 
 
 def _today() -> str:
@@ -82,7 +83,7 @@ class BudgetLedger:
             entry["cache_creation_tokens"] = cache_creation_tokens
         if cache_read_tokens:
             entry["cache_read_tokens"] = cache_read_tokens
-        self.entries.append(entry)
+        self.entries.append(redact(entry))
         self._save()
 
     def _spend_since(

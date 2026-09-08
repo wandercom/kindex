@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "kindex"
 version = "0.36.0"
-description = "The memory layer AI coding agents don't have — persistent knowledge graph for AI workflows"
+description = "Every agent is smart inside its own silo. Kindex lets them work together: a local-first knowledge graph and MCP server shared by Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and Cursor."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Jeremy McEntire", email = "jmcentire@users.noreply.github.com" }]
+authors = [{ name = "Wander" }]
 keywords = ["knowledge-graph", "ai", "context", "claude"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -45,8 +45,8 @@ all = ["anthropic>=0.40", "sqlite-vec>=0.1", "mcp[cli]>=1.26.0,<2.0", "dateparse
 [project.urls]
 Homepage = "https://kindex.tools/"
 Documentation = "https://kindex.tools/"
-Repository = "https://github.com/jmcentire/kindex"
-Issues = "https://github.com/jmcentire/kindex/issues"
+Repository = "https://github.com/wandercom/kindex"
+Issues = "https://github.com/wandercom/kindex/issues"
 
 [project.scripts]
 kin = "kindex.cli:main"
@@ -64,6 +64,10 @@ code = "kindex.adapters.code:adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kindex"]
+
+[tool.hatch.build.targets.sdist]
+# Runtime state is private even when a build backend does not honor Git ignores.
+exclude = ["/.kin/local", "/.kin/local/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

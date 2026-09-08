@@ -29,7 +29,9 @@ if TYPE_CHECKING:
     from .config import Config
     from .store import Store
 
-log = logging.getLogger(__name__)
+from .privacy import protect_logger
+
+log = protect_logger(logging.getLogger(__name__))
 
 # Two titles count as the same knowledge above this similarity. Deliberately
 # loose: an extractor that says "SQLite FTS5 sync trigger" for a node titled

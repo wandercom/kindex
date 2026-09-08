@@ -51,6 +51,6 @@ If Kindex ever adds cloud features or data collection, this policy will be updat
 
 ## Contact
 
-- Email: jmc@cageandmirror.com
-- Source: [github.com/jmcentire/kindex](https://github.com/jmcentire/kindex)
+- Questions: [github.com/wandercom/kindex/issues](https://github.com/wandercom/kindex/issues)
+- Source: [github.com/wandercom/kindex](https://github.com/wandercom/kindex)
 - Web: [kindex.tools/privacy](https://kindex.tools/privacy)

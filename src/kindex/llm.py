@@ -6,6 +6,7 @@ Falls back gracefully to keyword matching when LLM is unavailable or over budget
 from __future__ import annotations
 
 import json
+import copy
 import os
 import sys
 import urllib.error
@@ -14,6 +15,45 @@ from types import SimpleNamespace
 
 from .budget import BudgetLedger
 from .config import Config
+from .privacy import redact, redact_text
+from .privacy import redacting_print as print
+
+
+class _PrivateMessages:
+    """Keep the provider SDK and operational credentials outside prompt data."""
+
+    def __init__(self, messages):
+        self._messages = messages
+
+    def __getattr__(self, name):
+        return getattr(self._messages, name)
+
+    def create(self, **kwargs):
+        response = self._messages.create(**redact(kwargs))
+        blocks = getattr(response, "content", None)
+        if isinstance(blocks, list):
+            cleaned = []
+            for block in blocks:
+                if isinstance(block, dict):
+                    cleaned.append(redact(block))
+                elif isinstance(getattr(block, "text", None), str):
+                    projected = copy.copy(block)
+                    projected.text = redact_text(block.text)
+                    cleaned.append(projected)
+                else:
+                    cleaned.append(block)
+            response = copy.copy(response)
+            response.content = cleaned
+        return response
+
+
+class _PrivateClient:
+    def __init__(self, client):
+        self._client = client
+        self.messages = _PrivateMessages(client.messages)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 # Authoritative pricing per token (cache-aware)
 PRICING = {
@@ -85,6 +125,7 @@ class _OpenAIResponsesMessages:
         self.api_key = api_key
 
     def create(self, *, model: str, max_tokens: int, messages: list[dict]) -> SimpleNamespace:
+        messages = redact(messages)
         payload = {
             "model": model,
             "input": [
@@ -109,8 +150,9 @@ class _OpenAIResponsesMessages:
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI API error {exc.code}: {body}") from exc
+            # Provider response bodies can echo prompts or authorization data.
+            # Status is sufficient for this adapter's fallback behavior.
+            raise RuntimeError(f"OpenAI API error {exc.code}") from None
 
         usage = data.get("usage") or {}
         cached = _nested_usage_value(
@@ -127,7 +169,7 @@ class _OpenAIResponsesMessages:
             cache_read_input_tokens=cached,
         )
         return SimpleNamespace(
-            content=[SimpleNamespace(text=_extract_openai_text(data))],
+            content=[SimpleNamespace(text=redact_text(_extract_openai_text(data)))],
             usage=usage_obj,
         )
 
@@ -209,7 +251,7 @@ def get_client(config: Config):
 
     provider = config.llm.provider.lower()
     if provider == "openai":
-        return _OpenAIResponsesClient(api_key)
+        return _PrivateClient(_OpenAIResponsesClient(api_key))
 
     if provider != "anthropic":
         print(
@@ -221,7 +263,7 @@ def get_client(config: Config):
 
     try:
         import anthropic
-        return anthropic.Anthropic(api_key=api_key)
+        return _PrivateClient(anthropic.Anthropic(api_key=api_key))
     except ImportError:
         print("Warning: LLM enabled but 'anthropic' package not installed. "
               "Install with: pip install kindex[llm]", file=sys.stderr)
@@ -311,7 +353,7 @@ is_skill: false  # true if this describes an ability/capability
         response = client.messages.create(
             model=config.llm.model,
             max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": redact_text(prompt)}],
         )
 
         tokens_in = response.usage.input_tokens
@@ -362,7 +404,7 @@ Respond with ONLY a comma-separated list of slugs, most relevant first. Max 10."
         response = client.messages.create(
             model=config.llm.model,
             max_tokens=150,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": redact_text(prompt)}],
         )
 
         tokens_in = response.usage.input_tokens

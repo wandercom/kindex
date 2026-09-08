@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .privacy import redact, redact_text
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -89,7 +91,7 @@ def prime_context(
     for r in raw_results:
         try:
             if not node_expired(r) and not adapter_scoped_out(r.get("tags"), adapter):
-                results.append(r)
+                results.append(redact(r))
         except Exception:
             continue
 
@@ -145,7 +147,7 @@ def prime_context(
         for n in v:
             try:
                 if not node_expired(n) and not adapter_scoped_out(n.get("tags"), adapter):
-                    kept.append(n)
+                    kept.append(redact(n))
             except Exception:
                 continue
         ops[k] = kept
@@ -216,7 +218,7 @@ def prime_context(
     # section and the rest of the prime still renders.
     try:
         yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
-        recent = store.activity_since(yesterday)
+        recent = redact(store.activity_since(yesterday))
         if recent:
             lines.append("### Recent activity (last 24h)")
             # Group by action. Notable titles for nodes scoped to a different client
@@ -262,7 +264,7 @@ def prime_context(
     try:
         from .sessions import get_active_tag
 
-        active_tag = get_active_tag(store, project_path=os.getcwd())
+        active_tag = redact(get_active_tag(store, project_path=os.getcwd()))
         if active_tag and node_expired(active_tag):
             active_tag = None
         if active_tag:
@@ -295,7 +297,7 @@ def prime_context(
             from .config import resolve_agent_id
             from .coordination import active_collabs_for_agent
 
-            collabs = active_collabs_for_agent(store, resolve_agent_id(config))
+            collabs = redact(active_collabs_for_agent(store, resolve_agent_id(config)))
             if collabs:
                 lines.append("### Active collabs")
                 for c in collabs[:3]:
@@ -361,7 +363,7 @@ def prime_context(
                 if r["next_due"] <= upcoming_iso
             ]
             due_ids = {d["id"] for d in due_now}
-            all_reminders = due_now + [r for r in upcoming if r["id"] not in due_ids]
+            all_reminders = redact(due_now + [r for r in upcoming if r["id"] not in due_ids])
 
             if all_reminders:
                 lines.append("### Reminders")
@@ -412,7 +414,7 @@ def prime_context(
             if gt["id"] not in seen_ids:
                 context_tasks.append(gt)
 
-        context_tasks = [t for t in context_tasks if not node_expired(t)]
+        context_tasks = [redact(t) for t in context_tasks if not node_expired(t)]
 
         if context_tasks:
             lines.append("### Tasks")
@@ -467,7 +469,7 @@ def prime_context(
     for section, err in section_failures:
         _record_section_degraded(section, err, config)
 
-    return "\n".join(lines) + "\n"
+    return redact_text("\n".join(lines) + "\n")
 
 
 def capture_session_end(
@@ -605,6 +607,9 @@ def write_inbox_item(
 
     Returns the path to the created file.
     """
+    content = redact_text(content)
+    source = redact_text(source)
+    topic_hint = redact_text(topic_hint)
     inbox_dir = config.inbox_dir
     inbox_dir.mkdir(parents=True, exist_ok=True)
 

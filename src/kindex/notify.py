@@ -7,6 +7,9 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from .privacy import redact, redact_text
+from .privacy import redacting_print as print
+
 if TYPE_CHECKING:
     from .config import Config
 
@@ -17,6 +20,9 @@ class NotifyResult:
     success: bool
     channel: str
     message: str = ""
+
+    def __post_init__(self):
+        self.message = redact_text(self.message)
 
 
 @runtime_checkable
@@ -318,6 +324,7 @@ def dispatch(
     Tries each channel in order. Stops at first success.
     Falls back to terminal if all others fail.
     """
+    reminder = redact(reminder)
     names = channel_names or config.reminders.default_channels
 
     results = []

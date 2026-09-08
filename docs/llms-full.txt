@@ -1,18 +1,24 @@
 # Kindex Full LLM Guide
 
-Kindex is the durable memory layer for AI-assisted work. It stores knowledge in
-a local SQLite graph, exposes it through a CLI and MCP server, and gives agents
-explicit operating rules for using that graph without waiting for the user to
-ask.
+Kindex is the local knowledge graph that every coding agent reads and writes:
+Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other
+MCP clients. Every agent is smart inside its own silo; Kindex lets them work
+together, with continuity across sessions and restarts, handoffs between vendors,
+shared decisions and constraints, and live coordination channels. It stores
+knowledge in a local SQLite graph plus the repository's git-tracked .kin/, exposes
+it through a CLI and MCP server, and gives agents explicit operating rules for
+using that graph without waiting for the user to ask. Kinbase
+(https://kinbase.tools) is the company product above it, in development, on the
+same engine and protocol with physically separate stores.
 
 Public surfaces:
 
 - Canonical website: https://kindex.tools/
-- GitHub Pages docs build: https://jmcentire.github.io/kindex/
+- GitHub Pages docs build: https://wandercom.github.io/kindex/
 - Human setup guide: https://kindex.tools/human-guide.md
 - MCP agent guide: https://kindex.tools/mcp-agent-guide.md
 - MCP server card: https://kindex.tools/.well-known/mcp/server-card.json
-- Source: https://github.com/jmcentire/kindex
+- Source: https://github.com/wandercom/kindex
 - PyPI: https://pypi.org/project/kindex/
 
 ## Install
@@ -21,7 +27,7 @@ Public surfaces:
 pip install 'kindex[mcp]'
 uv tool install 'kindex[mcp]'
 uvx --from 'kindex[mcp]' kin-mcp --help
-git clone https://github.com/jmcentire/kindex && cd kindex && make install
+git clone https://github.com/wandercom/kindex && cd kindex && make install
 kin init
 ```
 

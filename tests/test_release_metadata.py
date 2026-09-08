@@ -16,6 +16,13 @@ from kindex.cli import build_parser
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_source_distribution_explicitly_excludes_private_runtime_state():
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    excluded = config["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
+    assert "/.kin/local" in excluded
+    assert "/.kin/local/**" in excluded
+
+
 def test_version_is_consistent_across_release_surfaces():
     version = kindex.__version__
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
@@ -58,7 +65,7 @@ def test_public_command_counts_match_registered_surfaces():
     )
 
     assert f"{tool_count} MCP Tools" in docs
-    assert tool_count == 61
+    assert tool_count == 65
     assert len(choices) >= 80
     assert "80+ CLI Commands" in docs
 

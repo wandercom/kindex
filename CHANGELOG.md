@@ -2,6 +2,37 @@
 
 All notable changes to Kindex are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- Optional Claude function-hook adapter, qualified against 2.1.263, with repo-local
+  task routing, contextual retrieval, quarantined turn capture and visible owner
+  health. Modern and legacy adapters are separately selected; no legacy handlers
+  run through the modern adapter.
+- Versioned typed task service with scoped operation IDs, atomic mutation/receipt/
+  audit-outbox commits, optimistic versions, durable replay, cancellation and
+  explicit reconciliation. Native task-state tools do not fall back to Claude's
+  ephemeral list. Agent execution controls are unaffected.
+- signet-eval capability negotiation and pre-effect semantic admission. Kindex owns
+  task/knowledge data; signet-eval owns local coding-model policy and host redaction.
+  Signet's outward-world product is not an installation dependency.
+- `.kin/knowledge.json` transport for explicitly selected shareable semantic
+  evidence and relationships. Clone imports remain quarantined; no implicit
+  Personal fallback or unsigned Company authority.
+
+### Fixed
+- Claude advisory context no longer emits a permission auto-allow.
+- Shared credential sanitizer protects Kindex-owned persistence, logging, export,
+  candidate, model and embedding boundaries without entropy-based destruction of
+  ordinary hashes/IDs. Historical cleanup and host pre-hook logs remain separate.
+- Task reopen/terminal-claim transitions, claim ownership, scoped pagination,
+  dependency validation, atomic linked creation, date parsing and CLI error codes.
+- Hook installation tracks exact owned commands, preserves foreign siblings,
+  reports unknown wrappers, backs up settings and uses correct Claude timeout units.
+
+See [function-hook boundaries and migration](docs/claude-function-hooks.md). A public
+major release is not cut by this development change.
+
 ## [0.36.0] - 2026-09-02
 
 ### Added

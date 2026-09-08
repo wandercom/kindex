@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .base import Adapter
 
-log = logging.getLogger(__name__)
+from ..privacy import protect_logger
+
+log = protect_logger(logging.getLogger(__name__))
 
 _BUILTIN: dict[str, Adapter] = {}
 _cache: dict[str, Adapter] | None = None

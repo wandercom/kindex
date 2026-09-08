@@ -19,6 +19,8 @@ import datetime
 import subprocess
 from typing import TYPE_CHECKING
 
+from .privacy import redact_text, safe_error
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -125,8 +127,8 @@ def execute_action(
         return {"status": status, "output": result["output"]}
 
     except Exception as e:
-        _update_action_status(store, rid, reminder, "failed", str(e))
-        return {"status": "failed", "output": str(e)}
+        _update_action_status(store, rid, reminder, "failed", safe_error(e))
+        return {"status": "failed", "output": safe_error(e)}
 
 
 # ── Internal helpers ───────────────────────────────────────────────
@@ -158,7 +160,7 @@ def _update_action_status(
     """Write ``action_status`` and ``action_result`` into the reminder's extra."""
     extra = dict(reminder.get("extra") or {})
     extra["action_status"] = status
-    extra["action_result"] = result[:4000]
+    extra["action_result"] = redact_text(result)[:4000]
     extra["action_executed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     store.update_reminder(rid, extra=extra)
 
@@ -173,7 +175,7 @@ def _run_shell(command: str, *, timeout: int = 300) -> dict:
         output = proc.stdout
         if proc.stderr:
             output += "\n[stderr]\n" + proc.stderr
-        return {"ok": proc.returncode == 0, "output": output.strip()}
+        return {"ok": proc.returncode == 0, "output": redact_text(output.strip())}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": f"Timed out after {timeout}s"}
 
@@ -199,7 +201,7 @@ def _build_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
             content = (node.get("content") or "")[:500]
             parts.append(f"\n## Related Knowledge\n**{node['title']}**: {content}")
 
-    return "\n".join(parts)
+    return redact_text("\n".join(parts))
 
 
 def _build_claude_prompt(reminder: dict, fields: dict, store: Store) -> str:
@@ -232,7 +234,7 @@ def _run_claude(
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
         )
-        return {"ok": proc.returncode == 0, "output": proc.stdout.strip()[:4000]}
+        return {"ok": proc.returncode == 0, "output": redact_text(proc.stdout.strip())[:4000]}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": f"claude -p timed out after {timeout}s"}
     except FileNotFoundError:
@@ -273,7 +275,7 @@ def _run_codex(
         output = proc.stdout
         if proc.stderr:
             output += "\n[stderr]\n" + proc.stderr
-        return {"ok": proc.returncode == 0, "output": output.strip()[:4000]}
+        return {"ok": proc.returncode == 0, "output": redact_text(output.strip())[:4000]}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": f"codex exec timed out after {timeout}s"}
     except FileNotFoundError:
@@ -313,7 +315,7 @@ def _run_opencode(
         output = proc.stdout
         if proc.stderr:
             output += "\n[stderr]\n" + proc.stderr
-        return {"ok": proc.returncode == 0, "output": output.strip()[:4000]}
+        return {"ok": proc.returncode == 0, "output": redact_text(output.strip())[:4000]}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": f"opencode run timed out after {timeout}s"}
     except FileNotFoundError:

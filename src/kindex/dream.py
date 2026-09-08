@@ -31,7 +31,10 @@ if TYPE_CHECKING:
 
 from .schema import EDIT_POLICY
 
-logger = logging.getLogger(__name__)
+from .privacy import protect_logger
+from .privacy import redacting_print as print
+
+logger = protect_logger(logging.getLogger(__name__))
 
 # Node types that dream must never touch (CD008). Derived from the schema
 # edit policy as the single source of truth: additive types (history matters

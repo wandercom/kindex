@@ -41,10 +41,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .attention import injection_node_id, pheromone_context
+from .privacy import protect_logger, redact_text
 from .budget import BudgetLedger
 from .config import Config
 
-log = logging.getLogger(__name__)
+log = protect_logger(logging.getLogger(__name__))
 
 if TYPE_CHECKING:
     from .store import Store
@@ -101,7 +102,7 @@ def _bounded_trace(transcript_path: str, max_chars: int) -> str:
         with open(transcript_path, "r", errors="replace") as fh:
             if size > max_chars:
                 fh.seek(size - max_chars)
-            return fh.read()
+            return redact_text(fh.read())
     except Exception:
         return ""
 
@@ -322,8 +323,8 @@ def reinforce_session(
     if client is None:
         return {"status": "llm_unavailable", "outcomes": []}
 
-    prompt = build_reinforce_prompt(
-        trace, injected, config.attention.max_context_chars * 3)
+    prompt = redact_text(build_reinforce_prompt(
+        redact_text(trace), injected, config.attention.max_context_chars * 3))
 
     from .llm import estimate_cost
     est = estimate_cost(config.llm.model, len(prompt) // 4,

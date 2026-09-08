@@ -16,17 +16,27 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .privacy import POLICY_VERSION, protect_logger, redact, redact_serialized, redact_text
+from .privacy import redacting_print as print
+
 
 def _json_default(obj):
     if isinstance(obj, (_dt.date, _dt.datetime)):
         return obj.isoformat()
     if isinstance(obj, Path):
-        return str(obj)
+        return redact_text(str(obj))
     raise TypeError(f"Not JSON serializable: {type(obj)}")
 
 
 def _jdumps(obj):
-    return json.dumps(obj, default=_json_default)
+    return json.dumps(redact(obj), default=_json_default)
+
+
+def _guard_action_credentials(extra):
+    """Do not persist a broken executable command by replacing its secret."""
+    command = extra.get("action_command") if isinstance(extra, dict) else None
+    if isinstance(command, str) and redact_text(command) != command:
+        raise ValueError("Reminder commands must reference credentials through environment variables")
 
 from .config import Config
 from .schema import (
@@ -43,7 +53,7 @@ from .schema import (
     edit_class_for,
 )
 
-logger = logging.getLogger(__name__)
+logger = protect_logger(logging.getLogger(__name__))
 
 SCHEMA_RECOVERY_PATH_META = "schema_recovery_snapshot_path"
 SCHEMA_RECOVERY_REASON_META = "schema_recovery_snapshot_reason"
@@ -178,7 +188,12 @@ def _normalize_binding(
 
     referent_json = None
     if referent is not None:
-        referent_json = _jdumps(validate_referent(referent))
+        clean_referent = validate_referent(referent)
+        if redact(clean_referent) != clean_referent:
+            # A replacement URL/path would name a different external object.
+            # Refuse the binding without echoing its credential-bearing value.
+            raise ValueError("Referent contains credentials; remove them before binding")
+        referent_json = _jdumps(clean_referent)
     asserted_norm = (
         normalize_rfc3339(asserted_at, field="asserted_at")
         if asserted_at is not None else None
@@ -198,7 +213,7 @@ def _trunc(value: Any, limit: int = _DIFF_TRUNCATE) -> str | None:
     """Stringify a diff value and truncate it for activity-log storage."""
     if value is None:
         return None
-    s = value if isinstance(value, str) else _jdumps(value)
+    s = redact_text(value) if isinstance(value, str) else _jdumps(value)
     return s if len(s) <= limit else s[:limit]
 
 
@@ -223,7 +238,7 @@ def _clean_audit_text(value: str, *, field: str) -> str:
         raise ValueError(f"{field} must be at most {_AUDIT_TEXT_LIMIT} characters")
     if _ANY_CONTROL_RE.search(cleaned):
         raise ValueError(f"{field} must not contain control characters")
-    return cleaned
+    return redact_text(cleaned)
 
 
 def _clean_capture_text(
@@ -243,7 +258,7 @@ def _clean_capture_text(
     controls = _TERMINAL_CONTROL_RE if content else _ANY_CONTROL_RE
     if controls.search(cleaned):
         raise ValueError(f"{field} must not contain terminal control characters")
-    return cleaned
+    return redact_text(cleaned)
 
 
 def active_lock(node: dict) -> dict | None:
@@ -1286,10 +1301,10 @@ class Store:
                (timestamp, action, target_id, target_title, actor, details)
                VALUES (datetime('now'), ?, ?, ?, ?, ?)""",
             (
-                action,
-                target_id,
-                target_title,
-                actor,
+                redact_text(action),
+                redact_text(target_id),
+                redact_text(target_title),
+                redact_text(actor),
                 _jdumps(details or {}),
             ),
         )
@@ -1395,6 +1410,9 @@ class Store:
                     "Suggestion node_id endpoint(s) do not exist: "
                     + ", ".join(missing)
                 )
+        concept_a, concept_b, reason, source = (
+            redact_text(value) for value in (concept_a, concept_b, reason, source)
+        )
         cur = self.conn.execute(
             """INSERT INTO suggestions
                (concept_a, concept_b, reason, source, identity_kind, kind)
@@ -1536,10 +1554,17 @@ class Store:
         # Merge user-supplied tags into domains (supplement, never replace)
         if tags:
             domains = list(set((domains or []) + tags))
+        title, content, intent, prov_activity, prov_why, prov_source = (
+            redact_text(value) for value in
+            (title, content, intent, prov_activity, prov_why, prov_source)
+        )
+        prov_who = redact(prov_who)
         referent_json, asserted_norm, true_of_norm = _normalize_binding(
             referent, asserted_at, true_of
         )
         nid = node_id or _uuid()
+        if redact_text(nid) != nid:
+            raise ValueError("Node IDs must not contain recognizable credentials")
         now = _now()
         when = prov_when or now
         self.conn.execute(
@@ -1683,6 +1708,7 @@ class Store:
         for k, v in fields.items():
             if k not in allowed:
                 continue
+            v = redact(v)
             if isinstance(v, (list, dict)):
                 v = _jdumps(v)
             updates[k] = v
@@ -1999,7 +2025,9 @@ class Store:
             )
         self._check_mutable_status(node, force)
         self._check_lock(node, actor, force, remedy=_SUPERSEDE_LOCK_REMEDY)
-        text = (new_text or "").strip()
+        text = redact_text((new_text or "").strip())
+        actor = redact_text(actor) if actor is not None else None
+        reason = redact_text(reason) if reason is not None else None
         if not text:
             raise ValueError("supersede_node requires non-empty new_text")
         if expires is not None:
@@ -2059,9 +2087,9 @@ class Store:
                     created_at, updated_at, last_accessed, extra)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (new_id, node.get("type", "concept"), title, text,
-                 _jdumps([]), node.get("intent") or "",
+                 _jdumps([]), redact_text(node.get("intent") or ""),
                  _jdumps([actor] if actor else []), now, "supersede",
-                 reason or f"Supersedes '{node.get('title', '')}'", node_id,
+                 reason or redact_text(f"Supersedes '{node.get('title', '')}'"), node_id,
                  node.get("weight", 0.5), _jdumps(node.get("domains") or []),
                  "active", node.get("audience", "private"),
                  now, now, now, _jdumps(new_extra)),
@@ -2133,7 +2161,7 @@ class Store:
             if not isinstance(extra, dict):
                 extra = {}
             replacement = mutator(extra)
-            final = extra if replacement is None else replacement
+            final = redact(extra if replacement is None else replacement)
             conn.execute(
                 "UPDATE nodes SET extra = ?, updated_at = ? WHERE id = ?",
                 (_jdumps(final), _now(), node_id),
@@ -2262,6 +2290,8 @@ class Store:
         from .trust import normalize_rfc3339
 
         validated = validate_referent(referent)
+        if redact(validated) != validated:
+            raise ValueError("Referent contains credentials; remove them before binding")
         conn = self.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -2412,7 +2442,7 @@ class Store:
                     "from_title": from_title,
                     "to_title": to_title,
                     "type": edge_type,
-                    "why": why,
+                    "why": redact_text(why),
                 }
             )
         # Connection ordering is not semantic. Sort and deduplicate so replayed
@@ -2732,6 +2762,14 @@ class Store:
             if row is None:
                 raise CandidateNotFoundError(f"Candidate not found: {candidate_id}")
             candidate = self._candidate_to_dict(row)
+            payload = {key: candidate.get(key) for key in
+                       ("title", "content", "node_type", "domains", "connections")}
+            if redact(payload) != payload:
+                # Historical candidates retain their exact review-bound bytes.
+                # Do not silently rewrite one under an already-issued token.
+                raise CandidateStateError(
+                    "Candidate contains credentials; reject and restage sanitized content"
+                )
             status = candidate.get("status")
             if status not in _LIVE_CANDIDATE_STATUSES:
                 raise CandidateStateError(f"Candidate is already terminal: {status}")
@@ -2840,6 +2878,7 @@ class Store:
                         {
                             "capture_candidate_id": candidate_id,
                             "payload_digest": candidate["payload_digest"],
+                            "redaction_policy": POLICY_VERSION,
                         }
                     ),
                 ),
@@ -3083,6 +3122,7 @@ class Store:
                  weight: float = 0.5, provenance: str = "",
                  bidirectional: bool = True) -> None:
         """Add an edge. Bidirectional by default (enforces graph invariant)."""
+        provenance = redact_text(provenance)
         now = _utc_now()
         self.conn.execute(
             """INSERT OR REPLACE INTO edges
@@ -4004,9 +4044,11 @@ class Store:
 
     def set_meta(self, key: str, value: str) -> None:
         """Write a value to the meta table (upsert)."""
+        if redact_text(key) != key:
+            raise ValueError("Metadata keys must not contain recognizable credentials")
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-            (key, value),
+            (key, redact_serialized(value)),
         )
         self.conn.commit()
 
@@ -4150,6 +4192,7 @@ class Store:
         extra: dict | None = None,
     ) -> str:
         """Insert a reminder. Returns its ID."""
+        _guard_action_credentials(extra)
         rid = reminder_id or _uuid()
         now = _now()
         self.conn.execute(
@@ -4158,7 +4201,7 @@ class Store:
                 next_due, channels, related_node_id, tags, extra,
                 created_at, updated_at)
                VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (rid, title, body, priority, reminder_type, schedule,
+            (rid, redact_text(title), redact_text(body), priority, reminder_type, schedule,
              next_due, _jdumps(channels or []), related_node_id or "",
              tags, _jdumps(extra or {}), now, now),
         )
@@ -4179,6 +4222,8 @@ class Store:
 
     def update_reminder(self, reminder_id: str, **fields) -> None:
         """Update specific fields on a reminder."""
+        if "extra" in fields:
+            _guard_action_credentials(fields["extra"])
         allowed = {
             "title", "body", "priority", "status", "reminder_type",
             "schedule", "next_due", "last_fired", "snooze_until",
@@ -4189,6 +4234,7 @@ class Store:
         for k, v in fields.items():
             if k not in allowed:
                 continue
+            v = redact(v)
             if k in ("channels", "extra"):
                 v = _jdumps(v)
             updates.append(f"{k} = ?")

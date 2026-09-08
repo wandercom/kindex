@@ -39,7 +39,9 @@ if TYPE_CHECKING:
     from .config import Config
     from .store import Store
 
-log = logging.getLogger(__name__)
+from .privacy import protect_logger
+
+log = protect_logger(logging.getLogger(__name__))
 
 LLM = "llm"
 KEYWORD = "keyword"

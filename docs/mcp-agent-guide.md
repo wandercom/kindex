@@ -1,8 +1,9 @@
 # Kindex MCP Agent Guide
 
 This guide is for AI coding agents connected to the `kindex` MCP server.
-Kindex is the user's durable memory layer: a persistent knowledge graph for
-projects, decisions, tasks, constraints, reminders, and session context.
+Kindex is the knowledge graph every agent on the machine shares, whatever vendor
+made it: a persistent graph of projects, decisions, tasks, constraints, reminders,
+and session context.
 
 ## Core Rule
 

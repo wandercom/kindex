@@ -6,6 +6,8 @@ constraints (date filters, dry-run mode, verbose output).
 
 from __future__ import annotations
 
+from ..privacy import redacting_print as print
+
 import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any

@@ -157,8 +157,8 @@ def render_hook_context(
         "hookEventName": hook_event,
         "additionalContext": context,
     }
-    if canonical == "claude" and hook_event == "PreToolUse":
-        hook_output["permissionDecision"] = "allow"
+    # Context is advisory. It must not approve a tool or override an
+    # enforcement hook (including signet-eval) later in the chain.
     payload = {"hookSpecificOutput": hook_output}
     # Codex parses suppressOutput but does not implement it yet. Emitting it
     # causes a failed hook run without hiding the context.

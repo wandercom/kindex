@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "kin prime --for hook",
-            "timeout": 5000
+            "command": "/bin/bash -lc 'source ~/.profile >/dev/null 2>&1 || true; exec kin prime --for hook'",
+            "timeout": 5
           }
         ]
       }
@@ -18,8 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "kin compact-hook --emit-context",
-            "timeout": 10000
+            "command": "/bin/bash -lc 'source ~/.profile >/dev/null 2>&1 || true; exec kin compact-hook --emit-context'",
+            "timeout": 10
           }
         ]
       }
@@ -30,8 +30,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "kin prompt-check",
-            "timeout": 2000
+            "command": "/bin/bash -lc 'source ~/.profile >/dev/null 2>&1 || true; exec kin prompt-check'",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash -lc 'source ~/.profile >/dev/null 2>&1 || true; exec kin attention-hook --adapter claude --event PreToolUse --deadline-ms 3500'",
+            "timeout": 5
           }
         ]
       }
@@ -42,13 +54,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "kin stop-guard",
-            "timeout": 5000
+            "command": "/bin/bash -lc 'payload=$(cat); if printf '\"'\"'%s'\"'\"' \"$payload\" | python3 -c '\"'\"'import json,sys; raw=sys.stdin.read(); \ntry:\n data=json.loads(raw or '\"'\"'\"'\"'\"'\"'\"'\"'{}'\"'\"'\"'\"'\"'\"'\"'\"') if raw.strip() else {}\nexcept Exception:\n data={}\nsys.exit(0 if data.get('\"'\"'\"'\"'\"'\"'\"'\"'stop_hook_active'\"'\"'\"'\"'\"'\"'\"'\"') else 1)'\"'\"'; then exit 0; fi; source ~/.profile >/dev/null 2>&1 || true; printf '\"'\"'%s'\"'\"' \"$payload\" | kin compact-hook'",
+            "timeout": 10
           },
           {
             "type": "command",
-            "command": "kin compact-hook --text \"Session ended\"",
-            "timeout": 5000
+            "command": "/bin/bash -lc 'payload=$(cat); if printf '\"'\"'%s'\"'\"' \"$payload\" | python3 -c '\"'\"'import json,sys; raw=sys.stdin.read(); \ntry:\n data=json.loads(raw or '\"'\"'\"'\"'\"'\"'\"'\"'{}'\"'\"'\"'\"'\"'\"'\"'\"') if raw.strip() else {}\nexcept Exception:\n data={}\nsys.exit(0 if data.get('\"'\"'\"'\"'\"'\"'\"'\"'stop_hook_active'\"'\"'\"'\"'\"'\"'\"'\"') else 1)'\"'\"'; then exit 0; fi; source ~/.profile >/dev/null 2>&1 || true; printf '\"'\"'%s'\"'\"' \"$payload\" | kin attention reinforce --enqueue'",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "/bin/bash -lc 'payload=$(cat); if printf '\"'\"'%s'\"'\"' \"$payload\" | python3 -c '\"'\"'import json,sys; raw=sys.stdin.read(); \ntry:\n data=json.loads(raw or '\"'\"'\"'\"'\"'\"'\"'\"'{}'\"'\"'\"'\"'\"'\"'\"'\"') if raw.strip() else {}\nexcept Exception:\n data={}\nsys.exit(0 if data.get('\"'\"'\"'\"'\"'\"'\"'\"'stop_hook_active'\"'\"'\"'\"'\"'\"'\"'\"') else 1)'\"'\"'; then exit 0; fi; source ~/.profile >/dev/null 2>&1 || true; printf '\"'\"'%s'\"'\"' \"$payload\" | kin dream --detach --lightweight'",
+            "timeout": 3
           }
         ]
       }

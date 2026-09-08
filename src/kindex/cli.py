@@ -12,6 +12,20 @@ from pathlib import Path
 import yaml
 
 from . import __version__
+from .privacy import redacting_print as print
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        from .privacy import redact_text
+        super().error(redact_text(message))
+
+
+def _redacted_excepthook(error_type, error, traceback_object):
+    """Keep useful unexpected-error traces without exposing credential values."""
+    import traceback
+    print("".join(traceback.format_exception(error_type, error, traceback_object)),
+          file=sys.stderr, end="")
 
 
 def _json_default(obj):
@@ -1683,14 +1697,14 @@ def cmd_supersede(args):
 def _strip_pii(node: dict) -> dict:
     """Strip personally identifiable information from a node dict."""
     import re
-    node = dict(node)  # shallow copy
+    from .privacy import redact
+    node = redact(node)
     node["prov_who"] = ["anonymous"]
     node["prov_source"] = Path(node.get("prov_source", "")).name if node.get("prov_source") else ""
     # Strip emails from content
     content = node.get("content", "")
     content = re.sub(r'\S+@\S+\.\S+', '[email]', content)
-    # Strip long tokens/keys (API keys, tokens, hashes)
-    content = re.sub(r'[A-Za-z0-9_-]{40,}', '[redacted]', content)
+    # Credentials use the common policy; ordinary evidence hashes remain intact.
     node["content"] = content
     # Strip actor from activity log entries stored in extra
     extra = node.get("extra")
@@ -1805,7 +1819,8 @@ def cmd_export(args):
         for clock in ("asserted_at", "true_of"):
             if n.get(clock):
                 record[clock] = n[clock]
-        output.append(record)
+        from .privacy import redact
+        output.append(redact(record))
 
     if args.format == "jsonl":
         for item in output:
@@ -4115,18 +4130,27 @@ def _now_short() -> str:
 
 
 def cmd_task(args):
-    """Graph-connected task management."""
+    """Task CLI with meaningful errors and guaranteed store close."""
     store = _store(args)
+    try:
+        _cmd_task(args, store)
+    except ValueError as exc:
+        from .privacy import safe_error
+        print(f"Error: {safe_error(exc)}", file=sys.stderr)
+        raise SystemExit(2)
+    finally:
+        store.close()
+
+
+def _cmd_task(args, store):
+    """Graph-connected task management."""
     action = getattr(args, "task_action", "list")
 
     if action == "add":
         from .tasks import create_task
         title = " ".join(getattr(args, "title_words", []) or [])
         if not title:
-            print("Usage: kin task add <title> [--priority N] [--due ...] [--link ...]",
-                  file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task add <title> [--priority N] [--due ...] [--link ...]")
         link_to = None
         if getattr(args, "link_to", None):
             link_to = [s.strip() for s in args.link_to.split(",") if s.strip()]
@@ -4138,7 +4162,9 @@ def cmd_task(args):
             scope=getattr(args, "scope", "contextual") or "contextual",
             effort=getattr(args, "effort", None),
             link_to=link_to,
-            project_path=os.getcwd(),
+            project_path=getattr(args, "project_path", None) or os.getcwd(),
+            session_id=getattr(args, "session_id", None),
+            content=getattr(args, "content", "") or "",
         )
         if getattr(args, "json", False):
             print(_dumps(store.get_node(task_id)))
@@ -4151,8 +4177,11 @@ def cmd_task(args):
         tasks = list_tasks(
             store,
             status=status_filter,
-            scope=getattr(args, "scope", None) if getattr(args, "scope", "contextual") != "contextual" else None,
+            scope=getattr(args, "scope", None),
             domain=getattr(args, "domain", None),
+            project_path=getattr(args, "project_path", None),
+            max_priority=getattr(args, "priority", None),
+            limit=getattr(args, "limit", 20),
         )
         if getattr(args, "json", False):
             print(_dumps(tasks))
@@ -4165,9 +4194,7 @@ def cmd_task(args):
         from .tasks import format_task
         task_id = getattr(args, "task_id", None)
         if not task_id:
-            print("Usage: kin task show --task-id <id>", file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task show --task-id <id>")
         node = store.get_node(task_id)
         if node and node.get("type") == "task":
             if getattr(args, "json", False):
@@ -4175,7 +4202,7 @@ def cmd_task(args):
             else:
                 print(format_task(node))
         else:
-            print(f"Task not found: {task_id}", file=sys.stderr)
+            raise ValueError(f"Task not found: {task_id}")
 
     elif action == "claim":
         from .config import resolve_agent_id
@@ -4183,9 +4210,7 @@ def cmd_task(args):
         task_id = getattr(args, "task_id", None)
         agent = getattr(args, "agent", None) or resolve_agent_id(_config(args))
         if not task_id:
-            print("Usage: kin task claim --task-id <id> [--agent <name>]", file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task claim --task-id <id> [--agent <name>]")
         try:
             result = claim_task(
                 store,
@@ -4199,18 +4224,16 @@ def cmd_task(args):
                 claim = (result.get("extra") or {}).get("claim") or {}
                 print(f"Claimed: {result['title']} by {claim.get('agent')}")
             else:
-                print(f"Task not found: {task_id}", file=sys.stderr)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
+                raise ValueError(f"Task not found: {task_id}")
+        except ValueError:
+            raise
 
     elif action == "release":
         from .config import resolve_agent_id
         from .tasks import release_task_claim
         task_id = getattr(args, "task_id", None)
         if not task_id:
-            print("Usage: kin task release --task-id <id> [--agent <name>]", file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task release --task-id <id> [--agent <name>]")
         try:
             result = release_task_claim(
                 store,
@@ -4221,9 +4244,9 @@ def cmd_task(args):
             if result:
                 print(f"Released claim: {result['title']}")
             else:
-                print(f"Task not found: {task_id}", file=sys.stderr)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
+                raise ValueError(f"Task not found: {task_id}")
+        except ValueError:
+            raise
 
     elif action == "cleanup":
         from .tasks import cleanup_expired_claims
@@ -4234,40 +4257,33 @@ def cmd_task(args):
         from .tasks import complete_task
         task_id = getattr(args, "task_id", None)
         if not task_id:
-            print("Usage: kin task done --task-id <id>", file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task done --task-id <id>")
         result = complete_task(store, task_id)
         if result:
             print(f"Completed: {result['title']}")
         else:
-            print(f"Task not found: {task_id}", file=sys.stderr)
+            raise ValueError(f"Task not found: {task_id}")
 
     elif action == "cancel":
         from .tasks import cancel_task
         task_id = getattr(args, "task_id", None)
         if not task_id:
-            print("Usage: kin task cancel --task-id <id>", file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task cancel --task-id <id>")
         result = cancel_task(store, task_id)
         if result:
             print(f"Cancelled: {result['title']}")
         else:
-            print(f"Task not found: {task_id}", file=sys.stderr)
+            raise ValueError(f"Task not found: {task_id}")
 
     elif action == "update":
         from .tasks import update_task
         task_id = getattr(args, "task_id", None)
         if not task_id:
-            print("Usage: kin task update --task-id <id> [--priority N] [--due ...]",
-                  file=sys.stderr)
-            store.close()
-            return
+            raise ValueError("Usage: kin task update --task-id <id> [--priority N] [--due ...]")
         fields = {}
         if getattr(args, "priority", None):
             fields["priority"] = args.priority
-        if getattr(args, "due", None):
+        if getattr(args, "due", None) is not None:
             fields["due"] = args.due
         if getattr(args, "effort", None):
             fields["effort"] = args.effort
@@ -4275,11 +4291,16 @@ def cmd_task(args):
             fields["scope"] = args.scope
         if getattr(args, "status", None):
             fields["task_status"] = args.status
+        for key in ("content", "expected_version"):
+            if getattr(args, key, None) is not None:
+                fields[key] = getattr(args, key)
+        if getattr(args, "title_words", None):
+            fields["title"] = " ".join(args.title_words)
         result = update_task(store, task_id, **fields)
         if result:
             print(f"Updated: {result['title']}")
         else:
-            print(f"Task not found: {task_id}", file=sys.stderr)
+            raise ValueError(f"Task not found: {task_id}")
 
     elif action == "nearby":
         from .tasks import nearby_tasks, format_task_list
@@ -5855,47 +5876,81 @@ def cmd_tag(args):
 # ── setup ─────────────────────────────────────────────────────────────
 
 def cmd_setup_hooks(args):
-    """Install/uninstall Kindex hooks in Claude Code's settings.json."""
-    from .setup import install_claude_hooks
-    cfg = _config(args)
-    dry_run = getattr(args, "dry_run", False)
+    """Select/install one Claude adapter, preserving unrelated hook handlers."""
+    from .claude_install import install
+    for action in install(_config(args), mode=getattr(args, "mode", "legacy"),
+                          dry_run=getattr(args, "dry_run", False),
+                          uninstall=getattr(args, "uninstall", False),
+                          retire_commands=getattr(args, "retire_command", None)):
+        print(action)
 
-    if getattr(args, "uninstall", False):
-        # Remove hooks by loading settings and filtering out kindex entries
-        settings_path = cfg.claude_path / "settings.json"
-        if settings_path.exists():
-            import json as _json
-            data = _json.loads(settings_path.read_text())
-            hooks = data.get("hooks", {})
-            changed = False
-            for key in ["SessionStart", "PreCompact", "UserPromptSubmit", "PreToolUse", "Stop"]:
-                if key in hooks:
-                    before = len(hooks[key])
-                    hooks[key] = [
-                        h for h in hooks[key]
-                        if "kin prime" not in str(h)
-                        and "compact-hook" not in str(h)
-                        and "prompt-check" not in str(h)
-                        and "attention-hook" not in str(h)
-                        and "stop-guard" not in str(h)
-                        and "dream --detach" not in str(h)
-                        and "kindex" not in str(h).lower()
-                    ]
-                    if len(hooks[key]) < before:
-                        changed = True
-                        print(f"Removed Kindex {key} hook")
-            if changed and not dry_run:
-                settings_path.write_text(_json.dumps(data, indent=2) + "\n")
-                print(f"Updated {settings_path}")
-            elif not changed:
-                print("No Kindex hooks found to remove")
+
+def cmd_hook_rpc(args):
+    """Versioned structured adapter RPC; never emit prose on stdout."""
+    from .integrations import dispatch
+    try:
+        raw = sys.stdin.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("Kindex hook request exceeds 1 MiB")
+        request = json.loads(raw)
+        if not isinstance(request, dict):
+            raise ValueError("Kindex hook request must be an object")
+        result = dispatch(request)
+    except Exception as error:
+        from .privacy import safe_error
+        result = {"ok": False, "error": {"code": "invalid_request", "message": safe_error(error)}}
+    print(json.dumps(result))
+
+
+def cmd_integration_doctor(args):
+    """Report actual storage, ownership, and host qualification, without enabling."""
+    from .integrations import describe, project_scope
+    from .privacy import safe_error
+    try:
+        scope = project_scope({"project_path": str(Path(getattr(args, "project_path", None) or os.getcwd()).resolve()),
+                               "session_id": "doctor", "agent": "claude"})
+        result = describe(scope)
+        from .claude_install import QUALIFIED_CLAUDE_VERSION
+        result["qualified_claude_version"] = QUALIFIED_CLAUDE_VERSION
+        cfg = _config(args)
+        record = cfg.claude_path / "kindex-adapter.json"
+        result["adapter"] = json.loads(record.read_text()) if record.exists() else {"mode": "unmanaged"}
+    except Exception as error:
+        result = {"ok": False, "error": safe_error(error)}
+    print(json.dumps(result, indent=2))
+
+
+def cmd_integration_reconcile(args):
+    """Bounded delivery recovery; never repeat the committed task effect."""
+    from .integrations import reconcile_outcomes
+    from .privacy import safe_error
+    try:
+        result = reconcile_outcomes({
+            "project_path": str(Path(args.project_path or os.getcwd()).resolve()),
+            "session_id": "integration-reconcile", "agent": "human",
+        }, max_attempts=args.max_attempts)
+    except Exception as error:
+        result = {"ok": False, "error": safe_error(error)}
+    print(json.dumps(result, indent=2))
+    if not result["ok"]:
+        raise SystemExit(2)
+
+
+def cmd_repo_memory(args):
+    """Transport selected shareable evidence with code, not Personal data."""
+    from .integrations import open_project_store, project_scope
+    from .repo_memory import publish, import_candidates
+    scope = project_scope({"project_path": str(Path(args.project_path or os.getcwd()).resolve()),
+                           "session_id": "repo-memory-cli", "agent": "human"})
+    store = open_project_store(scope)
+    try:
+        if args.repo_memory_action == "publish":
+            result = publish(store, scope["project_path"], args.node_ids)
         else:
-            print("No Claude Code settings.json found")
-        return
-
-    actions = install_claude_hooks(cfg, dry_run=dry_run)
-    for a in actions:
-        print(f"  {a}")
+            result = import_candidates(store, scope["project_path"])
+        print(json.dumps(result, indent=2))
+    finally:
+        store.close()
 
 
 def cmd_setup_codex_hooks(args):
@@ -6662,7 +6717,7 @@ def _common(p):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="kin",
+    p = _ArgumentParser(prog="kin",
                                 description="Knowledge graph that learns from your conversations")
     p.add_argument("--version", action="store_true")
     sub = p.add_subparsers(dest="command")
@@ -7151,10 +7206,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     # setup-hooks
     s = sub.add_parser("setup-hooks", help="Install Kindex hooks into Claude Code")
+    s.add_argument("--mode", choices=["legacy", "modern"], default="legacy",
+                   help="Select one adapter; modern is qualified early-access function hooks")
+    s.add_argument("--retire-command", action="append", help="Explicitly retire this exact inspected legacy wrapper command")
     s.add_argument("--dry-run", action="store_true", help="Show what would be done")
     s.add_argument("--uninstall", action="store_true", help="Remove installed hooks")
     _common(s)
     s.set_defaults(func=cmd_setup_hooks)
+
+    s = sub.add_parser("hook-rpc", help="Internal versioned JSON adapter boundary")
+    s.set_defaults(func=cmd_hook_rpc)
+
+    s = sub.add_parser("integration-doctor", help="Inspect adapter ownership and qualification")
+    _common(s)
+    s.set_defaults(func=cmd_integration_doctor)
+
+    reconcile_parser = sub.add_parser("integration-reconcile", help="Retry pending audit outcomes across this worktree's sessions; never repeat task effects")
+    reconcile_parser.add_argument("--project-path", help="Explicit Git worktree (defaults to cwd)")
+    reconcile_parser.add_argument("--max-attempts", type=int, default=16, help="At most 1-16 deliveries within a 20 second budget")
+    reconcile_parser.set_defaults(func=cmd_integration_reconcile)
+
+    s = sub.add_parser("repo-memory", help="Publish/import selected shareable evidence in .kin/knowledge.json")
+    rs = s.add_subparsers(dest="repo_memory_action", required=True)
+    for action in ("publish", "import"):
+        repo_parser = rs.add_parser(action)
+        repo_parser.add_argument("--project-path", help="Explicit Git worktree")
+        if action == "publish":
+            repo_parser.add_argument("node_ids", nargs="+", help="Explicit public/team node IDs selected for sharing")
+        repo_parser.set_defaults(func=cmd_repo_memory)
 
     # setup-codex-hooks
     s = sub.add_parser("setup-codex-hooks", help="Install Kindex prompt hooks into Codex")
@@ -7463,15 +7542,19 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["add", "list", "show", "claim", "release", "cleanup",
                             "done", "cancel", "update", "nearby"])
     s.add_argument("title_words", nargs="*", help="Task title (for add)")
-    s.add_argument("--priority", type=int, choices=[1, 2, 3, 4, 5], default=3,
+    s.add_argument("--priority", type=int, choices=[1, 2, 3, 4, 5], default=None,
                    help="Priority: 1=urgent 2=high 3=normal 4=low 5=someday")
     s.add_argument("--due", help="Due date: 'tomorrow', '2026-03-15', 'in 3 days'")
-    s.add_argument("--scope", choices=["global", "contextual"], default="contextual")
+    s.add_argument("--scope", choices=["global", "contextual"], default=None)
     s.add_argument("--link", dest="link_to", help="Link to nodes (ID or title, comma-separated)")
     s.add_argument("--task-id", help="Task ID (for show/done/cancel/update)")
     s.add_argument("--status", help="Filter: open, in_progress, done, all")
     s.add_argument("--effort", choices=["small", "medium", "large"])
     s.add_argument("--domain", help="Filter by domain")
+    s.add_argument("--limit", type=int, default=20, help="Maximum matching tasks")
+    s.add_argument("--session-id", help="Host session ID for contextual reminders")
+    s.add_argument("--content", help="Task description (add/update)")
+    s.add_argument("--expected-version", type=int, help="Refuse update if the task version changed")
     s.add_argument("--agent", help="Agent name for claim/release")
     s.add_argument("--ttl", type=int, default=120, help="Claim TTL in minutes")
     s.add_argument("--note", help="Claim note")
@@ -7679,6 +7762,7 @@ def _degrade_hook_failure(args, exc: BaseException) -> None:
 
 
 def main():
+    sys.excepthook = _redacted_excepthook
     from .store import (
         ProfileMismatchError,
         SchemaMigrationError,

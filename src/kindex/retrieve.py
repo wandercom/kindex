@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING
 
 from .agent_adapters import adapter_scoped_out
 
-_log = logging.getLogger(__name__)
+from .privacy import protect_logger
+
+_log = protect_logger(logging.getLogger(__name__))
 
 if TYPE_CHECKING:
     from .store import Store

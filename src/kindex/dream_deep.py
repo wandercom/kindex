@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 from .dream import PROTECTED_TYPES, dream_full
 
-logger = logging.getLogger(__name__)
+from .privacy import protect_logger, redact_text
+from .privacy import redacting_print as print
+
+logger = protect_logger(logging.getLogger(__name__))
 
 DEFAULT_CLUSTER_OVERLAP_THRESHOLD = 0.6
 CLUSTER_SUMMARY_SOURCE = "dream-deep-cluster-summary"
@@ -254,8 +257,8 @@ def _llm_summarise_cluster(
     cluster: list[dict], timeout: int = 300,
 ) -> dict | None:
     """Use claude -p to generate a summary node for a cluster."""
-    titles = [n.get("title", "") for n in cluster]
-    contents = [n.get("content", "")[:200] for n in cluster]
+    titles = [redact_text(n.get("title", "")) for n in cluster]
+    contents = [redact_text(n.get("content", ""))[:200] for n in cluster]
 
     prompt = (
         "You are summarising a cluster of related knowledge graph nodes.\n"
@@ -280,7 +283,7 @@ def _llm_summarise_cluster(
             logger.warning("claude -p failed: %s", proc.stderr[:200])
             return None
 
-        output = proc.stdout.strip()
+        output = redact_text(proc.stdout.strip())
         title = ""
         content = ""
         for line in output.splitlines():

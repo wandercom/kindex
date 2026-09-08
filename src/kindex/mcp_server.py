@@ -14,6 +14,7 @@ import os
 import sqlite3
 import sys
 from typing import Any
+from .privacy import redact, redact_serialized, safe_error, redacting_print as print
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -21,7 +22,7 @@ except ImportError:
     print(
         "Error: the 'mcp' package is not installed.\n"
         "Install with: pip install kindex[mcp]  (or: uv tool install kindex[mcp])\n"
-        "See: https://github.com/jmcentire/kindex#installation",
+        "See: https://github.com/wandercom/kindex#installation",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -134,6 +135,18 @@ class MemoryUnavailableError(RuntimeError):
         super().__init__(f"memory unavailable ({self.error_class})")
 
 
+def _safe_output(fn):
+    """Project historical data at model egress without rewriting stored bytes."""
+    @functools.wraps(fn)
+    def projected(*args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as error:
+            raise RuntimeError(safe_error(error)) from None
+        return redact_serialized(result) if isinstance(result, str) else redact(result)
+    return projected
+
+
 def _tool(*dargs, **dkwargs):
     """mcp.tool() plus the memory-unavailable guard: a broken store turns
     into a typed tool result on every tool, never a protocol error."""
@@ -155,7 +168,7 @@ def _tool(*dargs, **dkwargs):
                 except Exception:
                     pass
                 return f"Error: memory unavailable ({type(e).__name__})"
-        return mcp.tool(*dargs, **dkwargs)(guarded)
+        return mcp.tool(*dargs, **dkwargs)(_safe_output(guarded))
     return decorate
 
 
@@ -1699,6 +1712,7 @@ def ingest(source: str, limit: int = 0, repo: str = "", since: str = "") -> str:
 
 
 @mcp.resource("kindex://status")
+@_safe_output
 def resource_status() -> str:
     """Current knowledge graph statistics."""
     store, _ = _get_store()
@@ -1707,6 +1721,7 @@ def resource_status() -> str:
 
 
 @mcp.resource("kindex://node/{node_id}")
+@_safe_output
 def resource_node(node_id: str) -> str:
     """Full details of a specific knowledge node."""
     store, _ = _get_store()
@@ -1717,6 +1732,7 @@ def resource_node(node_id: str) -> str:
 
 
 @mcp.resource("kindex://recent")
+@_safe_output
 def resource_recent() -> str:
     """Recently active nodes in the knowledge graph."""
     store, _ = _get_store()
@@ -1726,6 +1742,7 @@ def resource_recent() -> str:
 
 
 @mcp.resource("kindex://orphans")
+@_safe_output
 def resource_orphans() -> str:
     """Nodes with no connections (candidates for linking or removal)."""
     store, _ = _get_store()
@@ -1740,6 +1757,7 @@ def resource_orphans() -> str:
 
 
 @mcp.prompt()
+@_safe_output
 def prime(topic: str = "") -> str:
     """Generate a full context priming block for the current session.
 
@@ -1771,6 +1789,7 @@ def prime(topic: str = "") -> str:
 
 
 @mcp.prompt()
+@_safe_output
 def orient() -> str:
     """Quick orientation: graph stats, recent activity, and key nodes."""
     store, _ = _get_store()
@@ -1998,7 +2017,7 @@ def tag_resume(name: str = "", tokens: int = 1500) -> str:
 @_tool()
 def task_add(text: str, priority: int = 3, due: str = "",
              scope: str = "contextual", link_to: str = "",
-             effort: str = "") -> str:
+             effort: str = "", project_path: str = "", session_id: str = "") -> str:
     """Add a task to the knowledge graph.
 
     Tasks are graph-connected -- link them to concepts, projects, or other
@@ -2012,18 +2031,20 @@ def task_add(text: str, priority: int = 3, due: str = "",
         scope: 'global' (always visible) or 'contextual' (surfaces by proximity).
         link_to: Comma-separated node IDs or titles to link this task to.
         effort: Optional effort estimate (small, medium, large).
+        project_path: Explicit repository path; do not infer from the MCP process cwd.
+        session_id: Optional host conversation ID for contextual reminders.
     """
     store, _ = _get_store()
     from .tasks import create_task
     links = [s.strip() for s in link_to.split(",") if s.strip()] if link_to else None
-    task_id = create_task(
-        store, text,
-        priority=priority,
-        due=due or None,
-        scope=scope,
-        effort=effort or None,
-        link_to=links,
-    )
+    try:
+        task_id = create_task(
+            store, text, priority=priority, due=due or None, scope=scope,
+            effort=effort or None, link_to=links,
+            project_path=project_path or None, session_id=session_id or None,
+        )
+    except ValueError as exc:
+        return f"Could not create task: {exc}"
     node = store.get_node(task_id)
     extra = node.get("extra", {}) if node else {}
     p_label = {1: "urgent", 2: "high", 3: "normal", 4: "low", 5: "someday"}.get(
@@ -2034,28 +2055,27 @@ def task_add(text: str, priority: int = 3, due: str = "",
 
 @_tool()
 def task_list(status: str = "open", scope: str = "",
-              priority: str = "") -> str:
+              priority: str = "", project_path: str = "", limit: int = 20) -> str:
     """List tasks, optionally filtered.
 
     Args:
         status: Filter: open, in_progress, done, all. Default: open.
         scope: Filter: global, contextual, or empty for both.
         priority: Max priority level to show (1-5). Empty for all.
+        project_path: Optional explicit project filter.
+        limit: Maximum number of matching tasks to return.
     """
     store, _ = _get_store()
     from .tasks import list_tasks, format_task_list
-    tasks = list_tasks(
-        store,
-        status=status,
-        scope=scope or None,
-    )
+    max_pri = None
     if priority:
         try:
             max_pri = int(priority)
-            tasks = [t for t in tasks
-                     if (t.get("extra") or {}).get("priority", 3) <= max_pri]
         except ValueError:
             pass
+    tasks = list_tasks(store, status=status, scope=scope or None,
+                       project_path=project_path or None, max_priority=max_pri,
+                       limit=max(1, min(limit, 500)))
     if not tasks:
         return "No tasks found."
     return format_task_list(tasks)
@@ -2120,12 +2140,81 @@ def task_release(id: str, agent: str = "", force: bool = False) -> str:
     store, _ = _get_store()
     from .tasks import release_task_claim
     try:
-        result = release_task_claim(store, id, agent=agent, force=force)
+        result = release_task_claim(store, id, agent=_default_agent(agent), force=force)
     except ValueError as e:
         return f"Could not release task claim: {e}"
     if not result:
         return f"Task not found: {id}"
     return f"Released task claim: {result['title']} ({id})"
+
+
+@_tool()
+def task_get(id: str) -> dict:
+    """Get a complete structured durable task by its exact graph ID."""
+    from .tasks import get_task
+    from .task_service import task_record
+    store, _ = _get_store()
+    node = get_task(store, id)
+    return {"ok": True, "task": task_record(node)} if node else {
+        "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
+
+
+@_tool()
+def task_update(id: str, title: str | None = None, content: str | None = None,
+                status: str | None = None, priority: int | None = None,
+                due: str | None = None, owner: str | None = None,
+                dependencies: list[str] | None = None,
+                expected_version: int | None = None) -> dict:
+    """Update task fields; omitted fields stay unchanged. Empty due clears it.
+
+    expected_version provides compare-and-swap protection against concurrent edits.
+    Use task_execute for explicit host scope and durable operation replay.
+    """
+    from .tasks import update_task
+    from .task_service import task_record
+    from .privacy import safe_error
+    store, _ = _get_store()
+    fields = {key: value for key, value in {
+        "title": title, "content": content, "task_status": status,
+        "priority": priority, "due": due, "owner": owner,
+        "dependencies": dependencies, "expected_version": expected_version,
+    }.items() if value is not None}
+    try:
+        node = update_task(store, id, **fields)
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "invalid_argument", "message": safe_error(exc)}}
+    return {"ok": True, "task": task_record(node)} if node else {
+        "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
+
+
+@_tool()
+def task_cancel(id: str, expected_version: int | None = None) -> dict:
+    """Cancel a task without deleting its durable record or history."""
+    return task_update(id, status="cancelled", expected_version=expected_version)
+
+
+@_tool()
+def task_execute(operation: str, arguments: dict, project_path: str,
+                 session_id: str, profile: str = "", agent: str = "",
+                 include_global: bool = False) -> dict:
+    """Scoped typed task operation for host adapters, including durable retries.
+
+    Mutations require arguments.operation_id; update accepts expected_version.
+    Operations: create/get/list/update/complete/cancel/claim/release/reconcile.
+    Explicit project/session scope comes from the caller, never the MCP cwd.
+    """
+    from .integrations import open_project_store, execute_task, project_scope
+    scope = project_scope({
+        "project_path": project_path, "session_id": session_id, "profile": profile,
+        "agent": _default_agent(agent), "include_global": include_global,
+    })
+    if include_global:
+        return {"ok": False, "error": {"code": "invalid_scope", "message": "Modern task_execute is repo-local; use explicit legacy task tools for global tasks"}}
+    store = open_project_store(scope)
+    try:
+        return execute_task(store, operation, arguments, scope, source_tool="kindex.task_execute")
+    finally:
+        store.close()
 
 
 # ── Coordination ─────────────────────────────────────────────────────

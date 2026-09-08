@@ -1,0 +1,86 @@
+{
+  "records": {
+    "12795919411d2e855b40422a8b67a51473b4635f5dda32dffb285a1adac6f639": {
+      "audience": "public",
+      "connections": [
+        {
+          "target": "kindex-hooks-2-compatibility",
+          "target_title": "Function hook compatibility and evidence limits",
+          "type": "depends_on",
+          "why": "Modern storage is selected through qualified adapter"
+        },
+        {
+          "target": "kindex-hooks-2-ownership",
+          "target_title": "Local coding integration ownership",
+          "type": "context_of",
+          "why": "Hooks integration ownership and storage boundary"
+        }
+      ],
+      "content": "The modern adapter opens .kin/local/kindex in the actual Git worktree and does not fall back to Personal or read clone-controlled data_dir settings. Legacy profiles remain explicitly available. Shared .kin/knowledge.json contains selected public/team semantic evidence; imports remain quarantined, not Company authority.",
+      "domains": [
+        "kindex"
+      ],
+      "id": "kindex-hooks-2-storage",
+      "provenance": {
+        "prov_activity": "hooks-2-implementation",
+        "prov_source": "user-authorized implementation and runtime probes",
+        "prov_when": "2026-09-06T23:02:58"
+      },
+      "title": "Modern coding sessions use actual worktree storage",
+      "type": "decision",
+      "updated_at": "2026-09-06T23:02:58",
+      "verification": {}
+    },
+    "2e4591fb830eb2173da98b0410b1ae455f0b48e4e7f9b52b23ff2ab2cc65126e": {
+      "audience": "public",
+      "connections": [
+        {
+          "target": "kindex-hooks-2-storage",
+          "target_title": "Modern coding sessions use actual worktree storage",
+          "type": "depends_on",
+          "why": "Modern storage is selected through qualified adapter"
+        }
+      ],
+      "content": "Claude function hooks are qualified against 2.1.263 and installed separately from legacy command hooks. Raw prompt enqueue precedes function hooks, so all-host-log secrecy is not claimed. Typed task effects commit with scoped replay receipts and audit outbox. Full Kindex 1.0 release remains uncut; early-access host qualification is separate from core compatibility.",
+      "domains": [
+        "kindex"
+      ],
+      "id": "kindex-hooks-2-compatibility",
+      "provenance": {
+        "prov_activity": "hooks-2-implementation",
+        "prov_source": "user-authorized implementation and runtime probes",
+        "prov_when": "2026-09-06T23:02:58"
+      },
+      "title": "Function hook compatibility and evidence limits",
+      "type": "decision",
+      "updated_at": "2026-09-06T23:02:58",
+      "verification": {}
+    },
+    "539642834b049fe52291431c0d941af78b08b1415b29f85065f6ec56b2e9c1d7": {
+      "audience": "public",
+      "connections": [
+        {
+          "target": "kindex-hooks-2-storage",
+          "target_title": "Modern coding sessions use actual worktree storage",
+          "type": "context_of",
+          "why": "Hooks integration ownership and storage boundary"
+        }
+      ],
+      "content": "Kindex owns durable task and knowledge state. signet-eval owns local coding-model enforcement and host interception; Signet is the separate outward-action product. Kindex sink containment remains local even with signet-eval installed. No third package is required for this integration.",
+      "domains": [
+        "kindex"
+      ],
+      "id": "kindex-hooks-2-ownership",
+      "provenance": {
+        "prov_activity": "hooks-2-implementation",
+        "prov_source": "user-authorized implementation and runtime probes",
+        "prov_when": "2026-09-06T23:02:58"
+      },
+      "title": "Local coding integration ownership",
+      "type": "decision",
+      "updated_at": "2026-09-06T23:02:58",
+      "verification": {}
+    }
+  },
+  "schema": "kindex-evidence/1"
+}

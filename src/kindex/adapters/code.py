@@ -13,6 +13,8 @@ Tools degrade gracefully:
 
 from __future__ import annotations
 
+from ..privacy import redacting_print as print
+
 import hashlib
 import json
 import re

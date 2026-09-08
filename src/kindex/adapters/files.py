@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import AdapterMeta, AdapterOption, IngestResult
+from ..privacy import redacting_print as print
 
 if TYPE_CHECKING:
     from ..store import Store

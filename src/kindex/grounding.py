@@ -32,7 +32,9 @@ if TYPE_CHECKING:
     from .config import Config
     from .store import Store
 
-logger = logging.getLogger(__name__)
+from .privacy import protect_logger
+
+logger = protect_logger(logging.getLogger(__name__))
 
 # Verdicts, worst to best. `uncalibrated` is deliberately distinct from
 # `ungrounded`: "we have no yardstick" is a different fact from "we measured

@@ -5,7 +5,7 @@
   "description": "Persistent knowledge graph and MCP server for AI workflows with git-tracked project context.",
   "version": "0.36.0",
   "repository": {
-    "url": "https://github.com/jmcentire/kindex",
+    "url": "https://github.com/wandercom/kindex",
     "source": "github"
   },
   "websiteUrl": "https://kindex.tools/",

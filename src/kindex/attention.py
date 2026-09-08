@@ -25,11 +25,12 @@ from .agent_adapters import (
 )
 from .budget import BudgetLedger
 from .config import Config
+from .privacy import protect_logger, redact, redact_text, safe_error
 
 if False:  # pragma: no cover - type checking without runtime imports
     from .store import Store
 
-log = logging.getLogger(__name__)
+log = protect_logger(logging.getLogger(__name__))
 
 
 ATTENTION_PURPOSE = "attention"
@@ -277,19 +278,19 @@ def extract_conversation_text(
 ) -> str:
     """Extract the current user-visible conversation snippet."""
     if explicit:
-        return explicit
+        return redact_text(explicit)
 
     payload = hook_payload or {}
     for key in ("prompt", "message", "text", "user_prompt", "input"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
-            return value
+            return redact_text(value)
     tool_name, tool_input = extract_tool_call(payload)
     if tool_name or tool_input:
         try:
-            tool_text = json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
+            tool_text = json.dumps(redact(tool_input), ensure_ascii=False, sort_keys=True)
         except TypeError:
-            tool_text = str(tool_input)
+            tool_text = redact_text(str(tool_input))
         return f"tool_name: {tool_name or ''}\ntool_input: {tool_text}".strip()
     return ""
 
@@ -799,7 +800,7 @@ def estimate_message_window(
         )
         for i in range(candidate_count)
     ]
-    prompt = build_attention_prompt(snippet, candidates)
+    prompt = redact_text(build_attention_prompt(redact_text(snippet), candidates))
     per_check = estimate_prompt_cost(config, prompt)
     estimated_window = per_check["amount"] * checks
 
@@ -868,7 +869,7 @@ def judge_candidates(
     if not ledger.can_spend():
         return [], {"status": "over_global_budget"}
 
-    prompt = build_attention_prompt(snippet, candidates)
+    prompt = redact_text(build_attention_prompt(redact_text(snippet), candidates))
     estimate = estimate_prompt_cost(config, prompt)
     conversation_spend = ledger.conversation_spend(
         conversation_id,
@@ -917,7 +918,7 @@ def judge_candidates(
         text_out = response.content[0].text
         parsed = _parse_json_response(text_out)
     except Exception as exc:
-        return [], {"status": "llm_error", "error": str(exc), "estimate": estimate}
+        return [], {"status": "llm_error", "error": safe_error(exc), "estimate": estimate}
 
     candidate_by_id = {c.id: c for c in candidates}
     injections: list[AttentionInjection] = []
@@ -967,6 +968,7 @@ def _prepare_attention_job(
     if not conversation_id:
         return {"status": "missing_conversation_id", "injections": []}
 
+    snippet = redact_text(snippet)
     status = runtime_status(store, config, conversation_id)
     if not status["enabled"]:
         return {"status": "disabled", "injections": [], "runtime": status}

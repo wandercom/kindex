@@ -6,14 +6,14 @@
     "title": "Kindex",
     "description": "Persistent knowledge graph for Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other AI-assisted workflows. Quarantined automatic capture, explicit verification and invalidation, trusted-only retrieval, bounded trusted resume, hybrid FTS5 + graph retrieval, operational guardrails, reminders, and git-tracked .kin project context.",
     "homepage": "https://kindex.tools",
-    "mirror": "https://jmcentire.github.io/kindex/",
-    "repository": "https://github.com/jmcentire/kindex",
+    "mirror": "https://wandercom.github.io/kindex/",
+    "repository": "https://github.com/wandercom/kindex",
     "documentation": "https://kindex.tools/mcp-agent-guide.md",
     "humanGuide": "https://kindex.tools/human-guide.md",
     "license": "MIT",
     "vendor": {
-      "name": "Jeremy McEntire",
-      "url": "https://github.com/jmcentire"
+      "name": "Wander",
+      "url": "https://github.com/wandercom"
     }
   },
   "transport": {
@@ -116,7 +116,11 @@
       "mode_create",
       "mode_export",
       "mode_import",
-      "mode_seed"
+      "mode_seed",
+      "task_cancel",
+      "task_execute",
+      "task_get",
+      "task_update"
     ],
     "resources": [],
     "prompts": []
@@ -126,7 +130,7 @@
     "llmsFull": "https://kindex.tools/llms-full.txt",
     "humanGuide": "https://kindex.tools/human-guide.md",
     "agentGuide": "https://kindex.tools/mcp-agent-guide.md",
-    "registry": "https://github.com/jmcentire/kindex/blob/main/server.json",
-    "githubPages": "https://jmcentire.github.io/kindex/"
+    "registry": "https://github.com/wandercom/kindex/blob/main/server.json",
+    "githubPages": "https://wandercom.github.io/kindex/"
   }
 }

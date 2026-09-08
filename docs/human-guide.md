@@ -6,8 +6,8 @@ operating contract lives in [mcp-agent-guide.md](mcp-agent-guide.md).
 ## Public Docs
 
 - Canonical public website: <https://kindex.tools/>
-- GitHub Pages docs build from this repo: <https://jmcentire.github.io/kindex/>
-- Source and releases: <https://github.com/jmcentire/kindex>
+- GitHub Pages docs build from this repo: <https://wandercom.github.io/kindex/>
+- Source and releases: <https://github.com/wandercom/kindex>
 - PyPI package: <https://pypi.org/project/kindex/>
 
 The canonical `kindex.tools` site is served by the companion `Kindex-Tools`
@@ -23,7 +23,7 @@ Pick one installer:
 pip install 'kindex[mcp]'
 uv tool install 'kindex[mcp]'
 uvx --from 'kindex[mcp]' kin-mcp --help
-git clone https://github.com/jmcentire/kindex && cd kindex && make install
+git clone https://github.com/wandercom/kindex && cd kindex && make install
 ```
 
 Then initialize the graph:

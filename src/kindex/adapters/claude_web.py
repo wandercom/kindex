@@ -12,7 +12,9 @@ from .base import AdapterMeta, AdapterOption, IngestResult
 if TYPE_CHECKING:
     from ..store import Store
 
-log = logging.getLogger(__name__)
+from ..privacy import protect_logger
+
+log = protect_logger(logging.getLogger(__name__))
 
 # Must match fetch_conversations.py's DEFAULT_OUTPUT. These two drifted once
 # (fetcher -> ~/Downloads/_Claude, adapter -> ~/_Claude) and a bare

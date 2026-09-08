@@ -125,6 +125,8 @@ class Vault:
 
     def _atomic_write(self, path: Path, content: str) -> None:
         """Write to tmp, then os.replace() for crash safety."""
+        from .privacy import redact_text
+        content = redact_text(content)
         self.config.tmp_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=self.config.tmp_dir, suffix=".md")
         try:

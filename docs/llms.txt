@@ -1,15 +1,15 @@
 # Kindex
 
-Kindex is a local-first persistent knowledge graph and MCP server for AI-assisted workflows. It helps Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other MCP-capable agents preserve durable project memory across sessions.
+Kindex is a local-first persistent knowledge graph and MCP server that Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other MCP-capable agents all read and write. Every agent is smart inside its own silo; Kindex lets them work together: continuity across sessions and restarts, handoffs between vendors, shared decisions and constraints, and live coordination channels. Kindex is the individual and codebase index (a personal SQLite graph plus the repository's git-tracked .kin/). Kinbase (https://kinbase.tools) is the company product above it, in development: organization-wide direction, architecture, standards, and ownership held by named authorities. Same engine, same protocol, physically separate stores.
 
 Core docs:
 
 - Human setup guide: https://kindex.tools/human-guide.md
 - AI/MCP agent guide: https://kindex.tools/mcp-agent-guide.md
-- GitHub repo: https://github.com/jmcentire/kindex
+- GitHub repo: https://github.com/wandercom/kindex
 - PyPI package: https://pypi.org/project/kindex/
-- GitHub Pages docs build: https://jmcentire.github.io/kindex/
-- Changelog: https://github.com/jmcentire/kindex/blob/main/CHANGELOG.md
+- GitHub Pages docs build: https://wandercom.github.io/kindex/
+- Changelog: https://github.com/wandercom/kindex/blob/main/CHANGELOG.md
 
 Install:
 

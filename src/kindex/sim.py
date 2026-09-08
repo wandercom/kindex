@@ -55,6 +55,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from .privacy import redact_text, safe_error
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -506,16 +507,16 @@ def call_sim(
             proc = subprocess.run(
                 os.path.expanduser(sc.command),
                 shell=True,
-                input=prompt,
+                input=redact_text(prompt),
                 capture_output=True,
                 text=True,
                 timeout=sc.command_timeout,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            return None, {"status": "sim_command_error", "error": str(exc)}
+            return None, {"status": "sim_command_error", "error": safe_error(exc)}
         if proc.returncode != 0:
-            return None, {"status": "sim_command_failed", "error": proc.stderr[:200]}
-        parsed = _parse_sim(proc.stdout)
+            return None, {"status": "sim_command_failed", "error": redact_text(proc.stderr)[:200]}
+        parsed = _parse_sim(redact_text(proc.stdout))
         return _result_from_parsed(parsed), {"status": "ok", "via": "command"}
 
     # ── LLM-as-supervisor ───────────────────────────────────────────────────
@@ -1009,7 +1010,7 @@ def maybe_escalate_to_advocate(
 
         proc = subprocess.run(
             os.path.expanduser(ac.command),
-            shell=True, input=prompt, capture_output=True, text=True,
+            shell=True, input=redact_text(prompt), capture_output=True, text=True,
             timeout=ac.timeout,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -1017,7 +1018,7 @@ def maybe_escalate_to_advocate(
     # From here Advocate executed and spent on its persona calls: ran=True even if
     # the exit code is non-zero (partial persona failure still writes findings) or
     # verification later drops everything.
-    findings = _parse_advocate_findings(proc.stdout)
+    findings = _parse_advocate_findings(redact_text(proc.stdout))
     if not findings:
         return True, []
     survivors = _verify_findings(
@@ -1048,8 +1049,10 @@ def _compose_sim_message(mine: dict) -> str:
         reason = str(mine.get("escalate_reason") or "").strip()
         tail = f" ({reason})" if reason else ""
         return (
-            f"{note}\n[Looks expensive to reverse{tail} — consider an Advocate/Helland "
-            f"review before you commit to it.]"
+            f"{note}\n[Noted: expensive to reverse{tail}. A NOTE, not a gate — these are "
+            f"professional engineers who know what a one-way door is. Do not stop and ask "
+            f"for confirmation on reversal cost alone; an Advocate/Helland review is "
+            f"available if the DECISION itself looks doubtful.]"
         )
     return note
 

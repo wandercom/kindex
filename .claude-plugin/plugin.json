@@ -1,13 +1,13 @@
 {
   "name": "kindex",
-  "description": "The memory layer Claude Code doesn't have. A persistent knowledge graph that learns from your conversations — your AI assistant never starts a session blind.",
-  "version": "0.15.0",
+  "description": "Every agent is smart inside its own silo. Kindex lets them work together: a persistent knowledge graph that Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and Cursor all read and write.",
+  "version": "0.36.0",
   "author": {
-    "name": "Jeremy McEntire",
-    "url": "https://github.com/jmcentire"
+    "name": "Wander",
+    "url": "https://github.com/wandercom"
   },
-  "homepage": "https://jmcentire.github.io/kindex/",
-  "repository": "https://github.com/jmcentire/kindex",
+  "homepage": "https://kindex.tools/",
+  "repository": "https://github.com/wandercom/kindex",
   "license": "MIT",
   "keywords": [
     "knowledge-graph",
