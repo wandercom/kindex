@@ -1700,10 +1700,11 @@ def _strip_pii(node: dict) -> dict:
     from .privacy import redact
     node = redact(node)
     node["prov_who"] = ["anonymous"]
+    from pathlib import PureWindowsPath
     from urllib.parse import urlsplit
     source = node.get("prov_source", "")
     if urlsplit(source).scheme not in ("http", "https"):
-        node["prov_source"] = Path(source).name
+        node["prov_source"] = PureWindowsPath(source).name
     # Strip emails from content
     content = node.get("content", "")
     content = re.sub(r'\S+@\S+\.\S+', '[email]', content)

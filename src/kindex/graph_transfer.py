@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
+from pathlib import PureWindowsPath
 from urllib.parse import urlsplit
 
 from .privacy import redact
@@ -47,7 +47,7 @@ def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, publi
         # Preserve canonical evidence URLs, not machine-local paths or actor prose.
         source = record.get("prov_source", "")
         if urlsplit(source).scheme not in ("http", "https"):
-            record["prov_source"] = Path(source).name
+            record["prov_source"] = PureWindowsPath(source).name
         for key in ("intent", "prov_why", "prov_activity"):
             record.pop(key, None)
         record["extra"].pop("supersede_reason", None)
@@ -66,7 +66,7 @@ def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, publi
                 binding = {k: v for k, v in binding.items() if k in
                            ("path", "url", "content_digest", "digest_scope", "path_redacted", "url_redacted")}
                 container[key] = binding
-            if isinstance(binding, dict) and Path(binding.get("path", "")).is_absolute():
+            if isinstance(binding, dict) and PureWindowsPath(binding.get("path", "")).anchor:
                 binding = dict(binding)
                 binding.pop("path")
                 binding["path_redacted"] = True
@@ -128,9 +128,9 @@ def _fields(item: dict) -> dict:
         if "referent" in fields:
             fields["referent"] = json.loads(binding) if binding else None
         # Never invent freshness clocks for legacy evidence lacking them.
-        if "asserted_at" in fields:
+        if fields.get("asserted_at") is not None:
             fields["asserted_at"] = asserted
-        if "true_of" in fields:
+        if fields.get("true_of") is not None:
             fields["true_of"] = observed
     for key in ("valid_at", "invalid_at"):
         if key in fields:
@@ -203,7 +203,7 @@ def import_records(store, items: list[dict], *, replace: bool = False, dry_run: 
                 if incoming_extra:
                     fields["extra"] = {**old_extra, **incoming_extra}
                 fields = {k: v for k, v in fields.items() if v != existing.get(k)}
-                if not replace and any(existing.get(k) not in (None, "", [], {}) for k in fields):
+                if not replace and any(existing.get(k) not in (None, "", [], {}) for k in fields if k != "extra"):
                     raise ValueError(f"Import conflict for {node_id}; inspect evidence before using --mode replace")
                 if not fields:
                     counts["skipped"] += 1
@@ -232,33 +232,7 @@ def import_records(store, items: list[dict], *, replace: bool = False, dry_run: 
             store._log_in_transaction(store.conn, "import_node", node_id, fields.get("title", ""))
             changed.append(node_id)
 
-        # All endpoints now exist, regardless of input ordering.
-        for from_id, edges in bindings:
-            if not isinstance(edges, list):
-                raise ValueError("edges must be a list")
-            for edge in edges:
-                if not isinstance(edge, dict) or not isinstance(edge.get("to"), str) or not edge["to"]:
-                    raise ValueError("Edge requires a target ID or unambiguous legacy title")
-                target = _resolve(store, edge["to"]) or _resolve(store, edge["to"], by_title=True)
-                if not target:
-                    raise ValueError("Unresolved edge target; import all nodes before importing edges")
-                weight = edge.get("weight", 0.5)
-                _weight(weight)
-                kind, provenance = edge.get("type", "relates_to"), edge.get("provenance", "import")
-                if not isinstance(kind, str) or not kind or not isinstance(provenance, str):
-                    raise ValueError("Edge type and provenance must be text")
-                bidirectional = edge.get("bidirectional", True)
-                if not isinstance(bidirectional, bool):
-                    raise ValueError("bidirectional must be boolean")
-                arcs = [(from_id, target["id"], weight)]
-                if bidirectional:
-                    arcs.append((target["id"], from_id, weight * 0.8))
-                for source, dest, arc_weight in arcs:
-                    cursor = store.conn.execute(
-                        "INSERT INTO edges (from_id, to_id, type, weight, provenance) VALUES (?, ?, ?, ?, ?) "
-                        "ON CONFLICT(from_id, to_id, type) DO NOTHING",
-                        (source, dest, redact(kind), arc_weight, redact(provenance)))
-                    counts["edges"] += cursor.rowcount
+        counts["edges"] = _import_edges(store, bindings, replace=replace)
         if counts["edges"]:
             store._log_in_transaction(store.conn, "import_edges", details={"count": counts["edges"]})
         if not dry_run:
@@ -273,3 +247,63 @@ def import_records(store, items: list[dict], *, replace: bool = False, dry_run: 
         store.conn.rollback()
         raise
     return counts
+
+
+def _import_edges(store, bindings, *, replace: bool) -> int:
+    """Import declared arcs before legacy implicit reverse arcs, in the caller's transaction."""
+    declared, reverse = {}, set()
+    for from_id, edges in bindings:
+        if not isinstance(edges, list):
+            raise ValueError("edges must be a list")
+        for edge in edges:
+            if not isinstance(edge, dict) or not isinstance(edge.get("to"), str) or not edge["to"]:
+                raise ValueError("Edge requires a target ID or unambiguous legacy title")
+            target = _resolve(store, edge["to"]) or _resolve(store, edge["to"], by_title=True)
+            if not target:
+                raise ValueError("Unresolved edge target; import all nodes before importing edges")
+            _weight(edge.get("weight", 0.5))
+            kind, provenance = edge.get("type", "relates_to"), edge.get("provenance", "import")
+            if not isinstance(kind, str) or not kind or not isinstance(provenance, str):
+                raise ValueError("Edge type and provenance must be text")
+            bidirectional = edge.get("bidirectional", True)
+            if not isinstance(bidirectional, bool):
+                raise ValueError("bidirectional must be boolean")
+            key = (from_id, target["id"], redact(kind))
+            fields = redact({k: edge[k] for k in ("weight", "provenance") if k in edge})
+            previous = declared.setdefault(key, {})
+            if any(k in previous and previous[k] != v for k, v in fields.items()):
+                raise ValueError("Import conflict: duplicate edge declarations disagree")
+            previous.update(fields)
+            if bidirectional:
+                reverse.add(key)
+
+    count = 0
+    for key, fields in declared.items():
+        existing = store.conn.execute(
+            "SELECT weight, provenance FROM edges WHERE from_id = ? AND to_id = ? AND type = ?", key,
+        ).fetchone()
+        values = {"weight": 0.5, "provenance": "import", **(dict(existing) if existing else {}), **fields}
+        declared[key] = values
+        if existing and dict(existing) == values:
+            continue
+        if existing and not replace:
+            raise ValueError(f"Import conflict for edge {key}; inspect evidence before using --mode replace")
+        store.conn.execute(
+            "INSERT INTO edges (from_id, to_id, type, weight, provenance, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(from_id, to_id, type) DO UPDATE SET "
+            "weight = excluded.weight, provenance = excluded.provenance, updated_at = excluded.updated_at",
+            (*key, values["weight"], values["provenance"], _now()),
+        )
+        count += 1
+
+    # An implied reverse is a legacy convenience, not a replacement for an
+    # explicitly recorded arc. Deferring it also makes old two-way exports order-independent.
+    for key in sorted(reverse):
+        source, target, kind = key
+        values = declared[key]
+        count += store.conn.execute(
+            "INSERT INTO edges (from_id, to_id, type, weight, provenance, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(from_id, to_id, type) DO NOTHING",
+            (target, source, kind, values["weight"] * 0.8, values["provenance"], _now()),
+        ).rowcount
+    return count

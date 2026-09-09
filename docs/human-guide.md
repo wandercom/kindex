@@ -419,8 +419,11 @@ an identical snapshot adds no nodes, edges, audit rows or changed timestamps.
 Explicit IDs never fall back to matching titles; legacy title-only records require
 an unambiguous match. Forward edges work because all nodes are imported first.
 Exported edges are directed arcs; legacy edges without `bidirectional` retain the
-old bidirectional convention. For separately batched graphs, import every node
-before the edge-only pass; missing fields in that pass cannot clear content.
+old bidirectional convention. Explicit arcs take precedence over implied reverse
+arcs regardless of file order. Changed edge weights/provenance fail merge and are
+updated only in replace mode; omitted fields preserve existing evidence. Conflicting
+duplicate declarations in one file fail either mode. For separately batched graphs,
+import every node before the edge-only pass; missing fields in that pass cannot clear content.
 
 Default `--mode merge` fills missing information but refuses conflicting claims;
 it never concatenates two different statements. Inspect a conflict before using
@@ -438,6 +441,15 @@ canonical evidence URLs and digests. A redacted path is imported as unbound
 `extra.imported_referent`, not rebound to a misleading basename. The common
 credential redactor also runs on all exports/imports. Curate the content's audience
 before sharing: a label is not proof that arbitrary prose contains no private data.
+
+Validation uses `pytest tests/test_graph_transfer.py` for real CLI subprocesses,
+SQLite rollback/replay, three-hop JSON/JSONL transfers, cross-platform privacy and
+the installed `kin` console entry point. Run the same suite with the built wheel
+installed in a fresh environment to check the packaged artifact, not just an
+editable checkout; also run the full `pytest tests/` and `make test-isolation`.
+For full code-adapter coverage, install `.[dev,all]`, `tree-sitter`,
+`tree-sitter-python`, `tree-sitter-rust`, and Universal Ctags with JSON support
+(`ctags --list-features` must include `json`, not macOS's bundled BSD Ctags).
 
 ## Release Surface Checklist
 

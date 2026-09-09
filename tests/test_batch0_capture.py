@@ -323,7 +323,7 @@ def test_r1_2_fresh_install_stop_entry_has_no_text_and_is_idempotent(tmp_path):
 
 
 @pytest.mark.red_now
-def test_r1_2_rerun_migrates_old_broken_entry_preserving_siblings(tmp_path):
+def test_r1_2_rerun_migrates_old_broken_entry_preserving_siblings(tmp_path, monkeypatch):
     """spec@1f0cdd71 R1.2 (re-run-is-the-migration, issue-#15 pattern);
     strat@e58068c2 oracle row R1.2 (red_now).
 
@@ -339,6 +339,9 @@ def test_r1_2_rerun_migrates_old_broken_entry_preserving_siblings(tmp_path):
     """
     from kindex.setup import install_claude_hooks
 
+    # The released fixture names this binary. Exact handler ownership must
+    # be tested against that installation, not the test runner's venv path.
+    monkeypatch.setattr("kindex.setup._find_kin_path", lambda: "/opt/homebrew/bin/kin")
     old_stop = json.loads(_OLD_STOP_ENTRY_JSON)
     cfg, settings = _claude_cfg(
         tmp_path, seed_settings={"hooks": {"Stop": old_stop}})

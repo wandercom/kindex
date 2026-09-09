@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -282,3 +283,169 @@ def test_export_does_not_silently_truncate_large_graphs(tmp_path):
     exported = cli(data_dir, "export", "--audience", "private", "--format", "json")
     assert exported.returncode == 0, exported.stderr
     assert len(json.loads(exported.stdout)) == 10001
+
+
+@pytest.mark.parametrize("fmt", ["json", "jsonl"])
+@pytest.mark.parametrize("clocks", [
+    {}, {"asserted_at": None, "true_of": None},
+    {"asserted_at": "2026-01-01T00:00:00Z", "true_of": None},
+    {"asserted_at": None, "true_of": "2026-01-01T00:00:00Z"},
+])
+def test_unknown_clocks_survive_every_cli_hop(tmp_path, clocks, fmt):
+    transfer = tmp_path / f"snapshot.{fmt}"
+    item = {"id": "bound", "title": "Unknown observation time", **clocks,
+            "referent": {"url": "https://example.com", "content_digest": "a" * 64}}
+    transfer.write_text(json.dumps([item]) if fmt == "json" else json.dumps(item))
+    for hop in range(3):
+        data_dir = tmp_path / f"hop-{hop}"
+        result = cli(data_dir, "import", str(transfer))
+        assert result.returncode == 0, result.stderr
+        store = Store(Config(data_dir=str(data_dir)))
+        node = store.get_node("bound")
+        assert {k: node[k] for k in ("asserted_at", "true_of")} == {
+            k: clocks.get(k) for k in ("asserted_at", "true_of")}
+        before = snapshot(store)
+        replay = cli(data_dir, "import", str(transfer))
+        assert replay.returncode == 0, replay.stderr
+        assert snapshot(store) == before
+        store.close()
+        exported = cli(data_dir, "export", "--audience", "private", "--format", fmt)
+        assert exported.returncode == 0, exported.stderr
+        transfer.write_text(exported.stdout)
+
+
+def test_cli_merge_fills_extra_keys_and_still_rejects_conflicts(tmp_path):
+    data_dir = tmp_path / "data"
+    store = Store(Config(data_dir=str(data_dir)))
+    store.add_node("Claim", node_id="claim", content="Unchanged", extra={"expires": "2027-01-01"})
+    transfer = tmp_path / "metadata.json"
+    added = {"referent_stale": {"reason": "digest-mismatch"},
+             "imported_verification": {"verified_by": "upstream-reviewer"}}
+    transfer.write_text(json.dumps({"id": "claim", "extra": added}))
+    result = cli(data_dir, "import", str(transfer))
+    assert result.returncode == 0, result.stderr
+    node = store.get_node("claim")
+    assert node["extra"] == {"expires": "2027-01-01", **added}
+    assert node["content"] == "Unchanged"
+    assert node_trust_decision(store, node).reason == "unverified"
+    before = snapshot(store)
+    assert cli(data_dir, "import", str(transfer)).returncode == 0
+    assert snapshot(store) == before
+    transfer.write_text(json.dumps({"id": "claim", "extra": {"expires": "2026-01-01"}}))
+    assert cli(data_dir, "import", str(transfer)).returncode != 0
+    assert snapshot(store) == before
+    store.close()
+
+
+@pytest.mark.parametrize("path", [r"C:\Users\private-user\code.py", r"C:private-user\code.py",
+                                  r"\\server\private-user\code.py", "/Users/private-user/code.py"])
+@pytest.mark.parametrize("audience", ["org", "public"])
+def test_shared_path_redaction_is_cross_platform(tmp_path, path, audience):
+    data_dir = tmp_path / "data"
+    store = Store(Config(data_dir=str(data_dir)))
+    binding = {"path": path, "content_digest": "a" * 64, "digest_scope": "file"}
+    store.add_node("Claim", node_id="claim", audience="public", referent=binding,
+                   prov_source=path, extra={"imported_referent": binding})
+    store.close()
+    exported = cli(data_dir, "export", "--audience", audience, "--format", "json")
+    assert exported.returncode == 0, exported.stderr
+    assert "private-user" not in exported.stdout
+    node, = json.loads(exported.stdout)
+    assert node["prov_source"] == "code.py"
+    assert node["referent"]["path_redacted"] is True
+    assert node["extra"]["imported_referent"]["path_redacted"] is True
+
+
+@pytest.mark.parametrize("changed", [{"weight": 0.9}, {"provenance": "new evidence"}])
+def test_cli_edge_conflicts_rollback_and_replace_explicitly(tmp_path, changed):
+    data_dir = tmp_path / "data"
+    store = Store(Config(data_dir=str(data_dir)))
+    for node_id in ("a", "b"):
+        store.add_node(node_id, node_id=node_id)
+    store.add_edge("a", "b", weight=0.5, provenance="old evidence", bidirectional=False)
+    before = snapshot(store)
+    transfer = tmp_path / "edges.json"
+    transfer.write_text(json.dumps([
+        {"id": "new", "title": "Must roll back"},
+        {"id": "a", "edges": [{"to": "b", "bidirectional": False, **changed}]},
+    ]))
+    result = cli(data_dir, "import", str(transfer))
+    assert result.returncode != 0
+    assert "conflict" in result.stderr.lower()
+    assert snapshot(store) == before
+    assert cli(data_dir, "import", str(transfer), "--mode", "replace", "--dry-run").returncode == 0
+    assert snapshot(store) == before
+    result = cli(data_dir, "import", str(transfer), "--mode", "replace")
+    assert result.returncode == 0, result.stderr
+    edge, = store.edges_from("a")
+    assert edge["weight"] == changed.get("weight", 0.5)
+    assert edge["provenance"] == changed.get("provenance", "old evidence")
+    before = snapshot(store)
+    assert cli(data_dir, "import", str(transfer), "--mode", "replace").returncode == 0
+    assert snapshot(store) == before
+    store.close()
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_legacy_two_way_edges_keep_declared_weights_regardless_of_order(tmp_path, reverse_order):
+    records = [{"id": "a", "title": "A", "edges": [{"to": "b", "weight": 0.5}]},
+               {"id": "b", "title": "B", "edges": [{"to": "a", "weight": 0.4}]}]
+    transfer = tmp_path / "legacy.json"
+    transfer.write_text(json.dumps(records[::-1] if reverse_order else records))
+    data_dir = tmp_path / "data"
+    result = cli(data_dir, "import", str(transfer))
+    assert result.returncode == 0, result.stderr
+    store = Store(Config(data_dir=str(data_dir)))
+    assert store.edges_from("a")[0]["weight"] == 0.5
+    assert store.edges_from("b")[0]["weight"] == 0.4
+    before = snapshot(store)
+    assert cli(data_dir, "import", str(transfer)).returncode == 0
+    assert snapshot(store) == before
+    store.close()
+
+
+@pytest.mark.parametrize("mode", ["merge", "replace"])
+def test_conflicting_duplicate_arcs_in_one_file_are_rejected(tmp_path, mode):
+    data_dir = tmp_path / "data"
+    store = Store(Config(data_dir=str(data_dir)))
+    before = snapshot(store)
+    transfer = tmp_path / "bad-edges.json"
+    transfer.write_text(json.dumps([
+        {"id": "a", "title": "A", "edges": [{"to": "b", "weight": 0.1}, {"to": "b", "weight": 0.9}]},
+        {"id": "b", "title": "B"},
+    ]))
+    result = cli(data_dir, "import", str(transfer), "--mode", mode)
+    assert result.returncode != 0
+    assert "conflict" in result.stderr.lower()
+    assert snapshot(store) == before
+    store.close()
+
+
+def test_installed_console_script_transfers_and_reopens_for_recall(tmp_path):
+    executable = Path(sys.executable).with_name("kin")
+    assert executable.is_file(), "Install the package before running its console E2E test"
+
+    def run(data_dir, *args):
+        return subprocess.run([str(executable), *args, "--data-dir", str(data_dir), "--config", "/dev/null"],
+                              capture_output=True, text=True, timeout=30)
+
+    transfer = tmp_path / "input.json"
+    transfer.write_text(json.dumps([{
+        "id": "claim", "title": "transfercanary", "content": "transfercanary unverified evidence",
+        "audience": "org", "verified_by": "upstream", "verified_at": "2026-01-01T00:00:00Z",
+        "prov_method": "claimed review", "prov_source": "https://example.com/evidence",
+    }]))
+    source, dest = tmp_path / "source", tmp_path / "dest"
+    assert run(source, "import", str(transfer)).returncode == 0
+    result = run(source, "export", "--audience", "org", "--format", "jsonl")
+    assert result.returncode == 0, result.stderr
+    transfer = tmp_path / "export.jsonl"
+    transfer.write_text(result.stdout)
+    assert run(dest, "import", str(transfer)).returncode == 0
+    recall = run(dest, "search", "transfercanary", "--json")
+    assert recall.returncode == 0, recall.stderr
+    assert [n["id"] for n in json.loads(recall.stdout)] == ["claim"]
+    trusted = run(dest, "search", "transfercanary", "--trusted-only", "--json")
+    assert trusted.returncode == 0, trusted.stderr
+    assert not trusted.stdout.strip()
+    assert "No results." in trusted.stderr
