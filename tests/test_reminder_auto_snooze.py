@@ -102,3 +102,91 @@ def test_legacy_unmarked_snooze_keeps_deliberate_deferral_semantics(cycle):
                           last_fired="2026-06-01T12:00:00", snooze_count=12)
     reminders.check_and_fire(store, config)
     run.assert_called_once()
+
+
+class BeforeReminderWrite:
+    """Commit through a second connection immediately before the snooze write."""
+
+    def __init__(self, conn, callback):
+        self.conn = conn
+        self.callback = callback
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+    def execute(self, sql, *args):
+        if self.callback and (
+            sql.lstrip().startswith("UPDATE reminders") or sql == "BEGIN IMMEDIATE"
+        ):
+            callback, self.callback = self.callback, None
+            callback()
+        return self.conn.execute(sql, *args)
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_snooze_does_not_replay_concurrent_manual_completion(cycle, monkeypatch, automatic):
+    store, config, now, notify, run = cycle
+    rid = add_action(store, due=now[0].isoformat())
+    config.reminders.action_enabled = False
+    reminders.check_and_fire(store, config)
+    config.reminders.action_enabled = True
+    other = Store(config)
+    try:
+        def finish_action():
+            assert actions.execute_action(other, other.get_reminder(rid), config,
+                                          manual=True)["status"] == "completed"
+
+        monkeypatch.setattr(store, "_conn", BeforeReminderWrite(store.conn, finish_action))
+        now[0] += datetime.timedelta(seconds=config.reminders.auto_snooze_timeout)
+        if automatic:
+            assert reminders.auto_snooze_stale(store, config) == 1
+        else:
+            reminders.snooze_reminder(store, rid, config=config)
+        now[0] += datetime.timedelta(seconds=config.reminders.snooze_duration)
+        reminders.check_and_fire(store, config)
+        run.assert_called_once()
+        extra = store.get_reminder(rid)["extra"]
+        assert extra["action_status"] == "completed"
+        assert extra["action_result"] == "mocked"
+    finally:
+        other.close()
+
+
+def test_action_finishing_after_auto_snooze_keeps_stale_deadline(cycle, monkeypatch):
+    store, config, now, notify, run = cycle
+    rid = add_action(store)
+    reminders.check_and_fire(store, config)
+    other = Store(config)
+    try:
+        def snooze_during_action(*args, **kwargs):
+            now[0] += datetime.timedelta(seconds=config.reminders.auto_snooze_timeout)
+            assert reminders.auto_snooze_stale(other, config) == 1
+            return {"ok": False, "output": "failed manual attempt"}
+
+        run.side_effect = snooze_during_action
+        assert actions.execute_action(store, store.get_reminder(rid), config,
+                                      manual=True)["status"] == "failed"
+        run.side_effect = None
+        now[0] += datetime.timedelta(seconds=config.reminders.snooze_duration)
+        reminders.check_and_fire(store, config)
+        run.assert_called_once()
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize("terminal", ["completed", "cancelled"])
+def test_auto_snooze_does_not_reopen_concurrent_terminal_reminder(cycle, monkeypatch, terminal):
+    store, config, now, notify, run = cycle
+    rid = add_action(store)
+    reminders.check_and_fire(store, config)
+    other = Store(config)
+    try:
+        monkeypatch.setattr(store, "_conn", BeforeReminderWrite(
+            store.conn, lambda: other.update_reminder(rid, status=terminal),
+        ))
+        now[0] += datetime.timedelta(seconds=config.reminders.auto_snooze_timeout)
+        assert reminders.auto_snooze_stale(store, config) == 0
+        assert store.get_reminder(rid)["status"] == terminal
+        run.assert_not_called()
+    finally:
+        other.close()

@@ -4306,18 +4306,25 @@ class Store:
     def snooze_reminder(
         self, reminder_id: str, snooze_until: str, increment_count: bool = True,
         *, automatic: bool = False,
-    ) -> None:
+    ) -> bool:
         """Snooze notifications; only a deliberate snooze defers action freshness.
 
         Old records have no separate action deadline. Preserve their existing
         snooze on the first automatic retry rather than guessing its origin.
+        Returns whether a row was snoozed. Automatic retries only claim fired
+        rows; completion/cancellation and manual snoozes win if committed first.
         """
-        fields: dict[str, Any] = {
-            "status": "snoozed",
-            "snooze_until": snooze_until,
-        }
-        r = self.get_reminder(reminder_id)
-        if r:
+        conn = self.conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            r = self.get_reminder(reminder_id)
+            if not r or (automatic and r["status"] != "fired"):
+                conn.rollback()
+                return False
+            fields: dict[str, Any] = {
+                "status": "snoozed",
+                "snooze_until": snooze_until,
+            }
             extra = dict(r.get("extra") or {})
             if automatic:
                 extra.setdefault("action_snooze_until", r.get("snooze_until"))
@@ -4326,9 +4333,32 @@ class Store:
             fields["extra"] = extra
             if increment_count:
                 fields["snooze_count"] = r.get("snooze_count", 0) + 1
-        self.update_reminder(reminder_id, **fields)
+            self.update_reminder(reminder_id, **fields)
+        except BaseException:
+            conn.rollback()
+            raise
         self._log("snooze_reminder", reminder_id, "",
                   details={"snooze_until": snooze_until, "automatic": automatic})
+        return True
+
+    def update_reminder_action(
+        self, reminder_id: str, *, status: str, result: str, executed_at: str,
+    ) -> None:
+        """Update action fields without losing a concurrent snooze's deadline."""
+        conn = self.conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            r = self.get_reminder(reminder_id)
+            if not r:
+                conn.rollback()
+                return
+            extra = dict(r.get("extra") or {})
+            extra.update(action_status=status, action_result=result,
+                         action_executed_at=executed_at)
+            self.update_reminder(reminder_id, extra=extra)
+        except BaseException:
+            conn.rollback()
+            raise
 
     def complete_reminder(self, reminder_id: str) -> None:
         """Mark a reminder as completed."""
