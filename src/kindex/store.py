@@ -3312,6 +3312,31 @@ class Store:
 
     # ── FTS5 search ────────────────────────────────────────────────────
 
+    def check_fts_integrity(self) -> None:
+        """Raise a SQLite error if the index disagrees with stored node text.
+
+        nodes_fts is an external-content table: ordinary reads (including
+        COUNT(*)) read nodes, not the indexed postings. rank=1 also checks
+        those postings against the complete external content population.
+
+        The check uses INSERT syntax, so isolate and roll it back to release
+        its write transaction without committing any caller's pending data.
+        """
+        conn = self.conn
+        conn.execute("SAVEPOINT check_fts_integrity")
+        try:
+            conn.execute(
+                "INSERT INTO nodes_fts(nodes_fts, rank) VALUES('integrity-check', 1)"
+            )
+        finally:
+            # Interrupts and some I/O errors roll back the whole transaction,
+            # removing the savepoint. Do not mask their original SQLite error.
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK TO check_fts_integrity")
+                finally:
+                    conn.execute("RELEASE check_fts_integrity")
+
     def fts_search(self, query: str, limit: int = 20,
                    include_archived: bool = False) -> list[dict]:
         """Full-text search using FTS5 BM25 ranking.
