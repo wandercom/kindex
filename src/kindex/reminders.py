@@ -455,6 +455,19 @@ def advance_recurring(store: Store, reminder_id: str) -> str | None:
 
     Returns the new next_due ISO string, or None if no more occurrences.
     """
+    # Schedule cleanup and action-state reset must use the same fresh snapshot.
+    # Otherwise a concurrent manual resume can be overwritten with stale paused
+    # metadata when we remove the previous occurrence's snooze deadline.
+    store.conn.execute("BEGIN IMMEDIATE")
+    try:
+        return _advance_recurring_locked(store, reminder_id)
+    except BaseException:
+        store.conn.rollback()
+        raise
+
+
+def _advance_recurring_locked(store: Store, reminder_id: str) -> str | None:
+    """Advance under the write lock; the store update commits the transaction."""
     r = store.get_reminder(reminder_id)
     if r is None:
         raise ValueError(f"Reminder not found: {reminder_id}")

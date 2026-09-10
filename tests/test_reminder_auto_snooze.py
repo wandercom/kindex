@@ -190,3 +190,29 @@ def test_auto_snooze_does_not_reopen_concurrent_terminal_reminder(cycle, monkeyp
         run.assert_not_called()
     finally:
         other.close()
+
+
+def test_recurring_cleanup_preserves_concurrent_manual_resume(cycle, monkeypatch):
+    store, config, now, notify, run = cycle
+    rid = add_action(store)
+    store.update_reminder(rid, reminder_type="recurring", schedule="FREQ=HOURLY")
+    reminders.check_and_fire(store, config)  # stale recurrence becomes paused
+    assert store.get_reminder(rid)["extra"]["action_status"] == "paused"
+    now[0] += datetime.timedelta(hours=1)
+    reminders.snooze_reminder(store, rid, duration_seconds=1)
+    now[0] += datetime.timedelta(seconds=1)
+    other = Store(config)
+    try:
+        def resume_action():
+            assert actions.execute_action(other, other.get_reminder(rid), config,
+                                          manual=True)["status"] == "completed"
+
+        monkeypatch.setattr(store, "_conn", BeforeReminderWrite(store.conn, resume_action))
+        reminders.check_and_fire(store, config)
+        run.assert_called_once()  # the deliberate resume during advancement
+        now[0] += datetime.timedelta(hours=1)
+        reminders.check_and_fire(store, config)
+        assert run.call_count == 2  # the next occurrence must remain resumed
+        assert store.get_reminder(rid)["extra"]["action_status"] == "pending"
+    finally:
+        other.close()
