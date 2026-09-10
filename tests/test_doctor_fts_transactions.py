@@ -84,13 +84,14 @@ def test_failed_post_rebuild_validation_rolls_back_and_reports_failure(store, mo
 
 
 def test_interrupted_check_preserves_original_sqlite_error(store):
-    def interrupt_once():
-        store.conn.set_progress_handler(None, 0)
-        return 1
+    statements = []
 
     def trace(statement):
+        statements.append(statement)
         if "VALUES('integrity-check', 1)" in statement:
-            store.conn.set_progress_handler(interrupt_once, 1)
+            # Older SQLite versions need the handler to remain armed until
+            # the interruption propagates out of the FTS virtual table.
+            store.conn.set_progress_handler(lambda: 1, 1)
 
     store.conn.set_trace_callback(trace)
     try:
@@ -100,3 +101,6 @@ def test_interrupted_check_preserves_original_sqlite_error(store):
         store.conn.set_trace_callback(None)
         store.conn.set_progress_handler(None, 0)
     assert not store.conn.in_transaction
+    # A still-armed handler can also interrupt erroneous cleanup, hiding the
+    # missing-savepoint regression behind another "interrupted" exception.
+    assert not any(sql.startswith(("ROLLBACK TO", "RELEASE")) for sql in statements)

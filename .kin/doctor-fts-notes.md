@@ -25,3 +25,9 @@ postings, equal-count swaps, stale text, full indexed fields and long content,
 trigger maintenance, transaction/lock cleanup, interruption, and repair rollback.
 The check scans the full index and canonical text and briefly requires a writer
 lock. It does not validate trigger definitions or change schema/search policy.
+
+The interruption fixture must keep its progress handler armed until the SQLite
+error propagates (verified on Python 3.12.2 / SQLite 3.45.1 and Python 3.13.7 /
+SQLite 3.50.4). Also assert no discarded-savepoint cleanup was attempted: an
+armed handler can interrupt that erroneous cleanup too, hiding a missing guard.
+Removing the transaction guard makes this regression fail on both combinations.
