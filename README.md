@@ -1124,6 +1124,7 @@ reminders:
   default_channels: [system]     # system, slack, email, claude, terminal
   snooze_duration: 900           # 15 min default snooze
   auto_snooze_timeout: 300       # auto-snooze after 5 min inaction
+  max_action_overdue: 86400      # stale actions notify only; 0 disables guard
   idle_suppress_after: 600       # suppress if idle > 10 min
   stop_guard_enabled: false      # opt-in; blocking Stop hooks are noisy in Claude
   dream_on_stop_enabled: true    # launch throttled detached dream from Claude Stop hook
@@ -1138,6 +1139,13 @@ reminders:
       smtp_host: ""
       to_addr: ""
 ```
+
+Automatic snoozes retry notifications without extending an action's freshness
+window. A deliberate `kin remind snooze` defers that window to the snooze expiry;
+`kin remind exec` runs an action deliberately. Older snoozes without provenance
+retain their previous deferral semantics, since automatic and manual snoozes
+were historically stored identically. This change does not classify or repair
+an existing reminder backlog.
 
 Use `kin attention estimate --messages 1000` to estimate cost over a fixed prompt window. Conversation accounting is retained when a client provides a stable session id. Hook-driven attention does not fall back to cwd as a fake conversation id, because that would cross-pollute two chats open in the same repo.
 
