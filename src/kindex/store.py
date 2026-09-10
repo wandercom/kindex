@@ -4305,19 +4305,30 @@ class Store:
 
     def snooze_reminder(
         self, reminder_id: str, snooze_until: str, increment_count: bool = True,
+        *, automatic: bool = False,
     ) -> None:
-        """Set a reminder to snoozed status."""
+        """Snooze notifications; only a deliberate snooze defers action freshness.
+
+        Old records have no separate action deadline. Preserve their existing
+        snooze on the first automatic retry rather than guessing its origin.
+        """
         fields: dict[str, Any] = {
             "status": "snoozed",
             "snooze_until": snooze_until,
         }
-        if increment_count:
-            r = self.get_reminder(reminder_id)
-            if r:
+        r = self.get_reminder(reminder_id)
+        if r:
+            extra = dict(r.get("extra") or {})
+            if automatic:
+                extra.setdefault("action_snooze_until", r.get("snooze_until"))
+            else:
+                extra["action_snooze_until"] = snooze_until
+            fields["extra"] = extra
+            if increment_count:
                 fields["snooze_count"] = r.get("snooze_count", 0) + 1
         self.update_reminder(reminder_id, **fields)
         self._log("snooze_reminder", reminder_id, "",
-                  details={"snooze_until": snooze_until})
+                  details={"snooze_until": snooze_until, "automatic": automatic})
 
     def complete_reminder(self, reminder_id: str) -> None:
         """Mark a reminder as completed."""

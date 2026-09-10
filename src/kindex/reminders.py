@@ -501,6 +501,9 @@ def advance_recurring(store: Store, reminder_id: str) -> str | None:
     # "paused" (staleness parking) is also preserved — only a deliberate
     # manual exec may resume a parked job.
     extra = dict(r.get("extra") or {})
+    if "action_snooze_until" in extra:
+        del extra["action_snooze_until"]
+        updates["extra"] = extra
     if extra.get("action_status") and extra["action_status"] not in ("running", "paused"):
         extra["action_status"] = "pending"
         updates["extra"] = extra
@@ -578,17 +581,18 @@ def _release_check_lock(store: Store, token: str) -> None:
 def _action_is_stale(reminder: dict, config: Config) -> bool:
     """True when a due reminder's action is too overdue to auto-execute.
 
-    Staleness anchors to the effective trigger time: a snoozed reminder was
-    explicitly deferred, so its snooze expiry — not the original next_due —
-    is when it became actionable. Without that anchor a deliberate 48h snooze
-    would be misclassified as an abandoned backlog the moment it expired.
+    A deliberate snooze defers the action deadline; automatic notification
+    retries do not. Legacy snoozes without provenance retain their existing
+    semantics, since they may be deliberate long deferrals.
     """
     max_overdue = int(getattr(config.reminders, "max_action_overdue", 86400) or 0)
     if max_overdue <= 0:
         return False
     try:
         anchor = datetime.datetime.fromisoformat(reminder["next_due"])
-        snooze = reminder.get("snooze_until")
+        snooze = (reminder.get("extra") or {}).get(
+            "action_snooze_until", reminder.get("snooze_until")
+        )
         if snooze:
             anchor = max(anchor, datetime.datetime.fromisoformat(snooze))
         return (_now_dt() - anchor).total_seconds() > max_overdue
@@ -736,7 +740,7 @@ def auto_snooze_stale(store: Store, config: Config) -> int:
         snooze_until = (now + datetime.timedelta(seconds=snooze_duration)).isoformat(
             timespec="seconds"
         )
-        store.snooze_reminder(r["id"], snooze_until)
+        store.snooze_reminder(r["id"], snooze_until, automatic=True)
         count += 1
 
     return count
