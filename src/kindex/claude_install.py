@@ -59,7 +59,36 @@ def legacy_manifest(config, kin_path: str) -> dict:
     return {event: [{"matcher": "", "hooks": handlers}] for event, handlers in items.items()}
 
 
-def _known_commands(config, kin_path):
+def _historical_kin_paths(data: dict) -> set[str]:
+    """Find candidate old executable paths without treating them as ownership.
+
+    An installation may have moved (or its settings may come from another
+    machine). Decode shell quoting only; the complete command must still match
+    a generated historical template before it can be removed.
+    """
+    paths = set()
+    for entries in data.get("hooks", {}).values():
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                continue
+            for handler in entry["hooks"]:
+                if not isinstance(handler, dict) or handler.get("type") != "command":
+                    continue
+                command = handler.get("command")
+                if not isinstance(command, str):
+                    continue
+                try:
+                    parts = shlex.split(command)
+                    if len(parts) == 3 and parts[:2] == ["/bin/bash", "-lc"]:
+                        parts = shlex.split(parts[2])
+                except ValueError:
+                    continue
+                paths.update(part for part in parts
+                             if Path(part).is_absolute() and Path(part).name == "kin")
+    return paths
+
+
+def _known_commands(config, kin_path, historical_paths=()):
     from .setup import _kin_hook_command, _kin_stop_hook_command
     commands = {h["command"] for entries in legacy_manifest(config, kin_path).values()
                 for entry in entries for h in entry["hooks"]}
@@ -72,7 +101,7 @@ def _known_commands(config, kin_path):
                   "attention reinforce --enqueue", "dream --detach --lightweight",
                   'compact-hook --text "Session ended"']
     for args in historical:
-        for binary in dict.fromkeys(["kin", kin_path]):
+        for binary in dict.fromkeys(["kin", kin_path, *historical_paths]):
             commands.add(f"{binary} {args}")
             commands.add(_kin_hook_command(binary, shlex.split(args)))
             commands.add(_kin_stop_hook_command(binary, shlex.split(args)))
@@ -129,7 +158,8 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
     original_data = json.loads(json.dumps(data))
     record = json.loads(record_path.read_text()) if record_path.exists() else {}
     kin_path = _find_kin_path()
-    commands = _known_commands(config, kin_path) | set(record.get("commands", [])) | set(retire_commands or [])
+    commands = (_known_commands(config, kin_path, _historical_kin_paths(data))
+                | set(record.get("commands", [])) | set(retire_commands or []))
     removed = remove_owned(data, commands)
     actions = [f"Removed {removed} exact Kindex legacy handlers (foreign handlers preserved)"]
     plugin = base / "skills" / PLUGIN_NAME

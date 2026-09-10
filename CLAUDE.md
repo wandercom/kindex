@@ -17,6 +17,12 @@ pytest tests/test_store.py -v
 pytest tests/ --cov=kindex --cov-report=term-missing
 ```
 
+GitHub Actions runs the full `pytest` suite on every pull request, pushes to
+`main`, and `v*` release tags using the same Python 3.12 job and `.[dev,mcp]`
+dependencies. Release builds and PyPI publishing require that job to pass;
+non-tag runs only execute tests. The `test` check must be required in branch
+protection to prevent merging a failing suite.
+
 ## Key File Locations
 
 | Path | Purpose |
