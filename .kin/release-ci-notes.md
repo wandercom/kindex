@@ -13,10 +13,12 @@ ending in `/kin`. Commands from other locations require the installer's recorded
 ownership or explicit retirement. Foreign siblings and their entry metadata
 must survive migration.
 
-The same workflow test job now runs full pytest with Python 3.12 and
-`.[dev,mcp]` on pull requests, main pushes, and release tags. Only tag pushes
-can build, and publication depends on the tested build. Keep these events on
-one job so PR validation cannot drift from the release gate.
+The `CI` workflow in `.github/workflows/ci.yml` owns the full pytest job with
+Python 3.12 and `.[dev,mcp]`. It runs on pull requests and main pushes and supports
+manual dispatch and reusable calls. `Publish to PyPI` in `workflow.yml` triggers
+only on `v*` tags and invokes that same CI workflow before build and publication.
+Keep the test implementation in CI so PR validation cannot drift from release
+validation or appear to publish a package.
 
 On 2026-09-10, main had no branch protection and the repository had no rulesets.
 Running the PR check does not itself make passing tests mandatory for merging;
