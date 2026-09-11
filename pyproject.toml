@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kindex"
-version = "0.36.0"
+version = "0.36.2"
 description = "Every agent is smart inside its own silo. Kindex lets them work together: a local-first knowledge graph and MCP server shared by Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and Cursor."
 readme = "README.md"
 requires-python = ">=3.10"

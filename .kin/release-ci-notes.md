@@ -21,3 +21,8 @@ one job so PR validation cannot drift from the release gate.
 On 2026-09-10, main had no branch protection and the repository had no rulesets.
 Running the PR check does not itself make passing tests mandatory for merging;
 that requires making `test` a required check in repository settings.
+
+The next prepared package version is `0.36.2`. Keep pyproject, runtime version,
+both Claude plugin manifests, MCP registry metadata, server card, public badges,
+and changelog aligned. The failed `v0.36.1` tag contains `0.36.0` metadata and
+must not be reused or moved.
