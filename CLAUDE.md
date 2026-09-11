@@ -17,6 +17,12 @@ pytest tests/test_store.py -v
 pytest tests/ --cov=kindex --cov-report=term-missing
 ```
 
+The `CI` workflow runs full `pytest` with Python 3.12 and `.[dev,mcp]` on pull
+requests and pushes to `main`. It also supports manual dispatch and reusable
+workflow calls. `Publish to PyPI` runs only on `v*` tag pushes and invokes `CI`
+before building and publishing. The `test` check must be required in branch
+protection to prevent merging a failing suite.
+
 ## Key File Locations
 
 | Path | Purpose |
