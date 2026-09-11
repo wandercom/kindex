@@ -69,6 +69,8 @@ def test_failed_post_rebuild_validation_rolls_back_and_reports_failure(store, mo
 
     monkeypatch.setattr(store, "check_fts_integrity", check)
     monkeypatch.setattr(cli, "_store", lambda args: store)
+    monkeypatch.setenv("KIN_PROFILE", "unregistered-doctor-test-profile")
+    monkeypatch.setattr(cli, "_config", lambda args: store.config)
     args = argparse.Namespace(json=True, fix=True, data_dir=str(store.db_path.parent))
     cli.cmd_doctor(args)
     report = json.loads(capsys.readouterr().out)

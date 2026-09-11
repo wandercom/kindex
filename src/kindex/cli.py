@@ -1462,38 +1462,8 @@ def cmd_doctor(args):
                 if cross_pct < 0.10:
                     warnings.append(
                         f"Low cross-domain bridging: {cross_domain}/{total_edges_g} edges "
-                        f"({cross_pct:.0%}) cross domain boundaries (< 10%)")
-                    if do_fix:
-                        # Suggest edges between nodes in different domains
-                        import random
-                        domain_nodes: dict[str, list[str]] = {}
-                        for nid, doms in domain_sets.items():
-                            for d in doms:
-                                domain_nodes.setdefault(d, []).append(nid)
-                        dom_list = list(domain_nodes.keys())
-                        suggested = 0
-                        for i in range(len(dom_list)):
-                            for j in range(i + 1, len(dom_list)):
-                                pool_a = domain_nodes[dom_list[i]]
-                                pool_b = domain_nodes[dom_list[j]]
-                                if pool_a and pool_b:
-                                    a = random.choice(pool_a)
-                                    b = random.choice(pool_b)
-                                    a_title = G.nodes[a].get("title", a)
-                                    b_title = G.nodes[b].get("title", b)
-                                    store.add_suggestion(
-                                        a_title, b_title,
-                                        reason=f"Cross-domain bridge: {dom_list[i]} <-> {dom_list[j]}",
-                                        source="doctor --fix",
-                                    )
-                                    suggested += 1
-                                    if suggested >= 5:
-                                        break
-                            if suggested >= 5:
-                                break
-                        if suggested:
-                            warnings[-1] += f" (suggested {suggested} bridge edges — see `kin suggest`)"
-                            fixes_applied += 1
+                        f"({cross_pct:.0%}) cross domain boundaries (< 10%) — "
+                        "run `kin dream` to discover connections")
 
     # ── Trailhead coverage ──
     if stats["nodes"] > 10 and stats["edges"] >= 4:

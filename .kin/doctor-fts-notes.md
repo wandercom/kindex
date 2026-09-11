@@ -31,3 +31,15 @@ error propagates (verified on Python 3.12.2 / SQLite 3.45.1 and Python 3.13.7 /
 SQLite 3.50.4). Also assert no discarded-savepoint cleanup was attempted: an
 armed handler can interrupt that erroneous cleanup too, hiding a missing guard.
 Removing the transaction guard makes this regression fail on both combinations.
+
+Doctor repairs integrity rather than enriching the graph. Low cross-domain
+bridging remains an advisory warning pointing to `kin dream`; `doctor --fix`
+no longer generates random bridge suggestions or counts them as repairs.
+After successful repair on a stable supported database, repeated `--fix`
+preserves durable logical state. This does not promise identical output or
+zero SQLite filesystem activity: the first report retains repair history,
+and integrity checks still use a rolled-back write transaction.
+
+Dream owns graph enrichment. Its current full mode stages bounded shared-domain
+proposals for review; it does not automatically improve disjoint-domain bridge
+density. More pending suggestions are not evidence of better graph connectivity.
