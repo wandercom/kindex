@@ -103,6 +103,27 @@ def _ledger(args):
 
 # ── search ─────────────────────────────────────────────────────────────
 
+def cmd_kinbase_sync(args):
+    """Read signed Kinbase evidence into this Kindex graph."""
+    from .kinbase import sync_kinbase
+    store = _store(args)
+    try:
+        result = sync_kinbase(store, args.repo, mode=args.mode, binary=args.binary)
+        if args.json:
+            print(_dumps(result, indent=2))
+        else:
+            print(f"Kinbase {result['mode']}: {result['imported']} imported, "
+                  f"{result['unchanged']} unchanged, {result['quarantined']} quarantined, "
+                  f"{result['deactivated']} deactivated (local event keys).")
+            for item in result['quarantine']:
+                print(f"  Quarantined {item['path']}: {item['reason']}")
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    finally:
+        store.close()
+
+
 def cmd_search(args):
     """Hybrid search: FTS5 + graph traversal, merged via RRF."""
     store = _store(args)
@@ -171,6 +192,9 @@ def cmd_search(args):
         out = [{
             "id": r["id"], "type": r["type"], "title": r["title"],
             "weight": r["weight"], "rrf_score": r.get("rrf_score", 0),
+            "standing": r.get("standing", "unruled"),
+            "kinbase": (r.get("extra") or {}).get("kinbase"),
+            "kinbase_unknowns": r.get("kinbase_unknowns", []),
             "content_preview": (r.get("content") or "")[:300],
             "edges": [{"to": e["to_id"], "type": e["type"], "weight": e["weight"]}
                       for e in r.get("edges_out", [])],
@@ -190,6 +214,9 @@ def cmd_search(args):
             print(f"## [{ntype}] {title} (w={weight:.2f})")
             if content:
                 print(f"  {content}")
+            from .kinbase import evidence_note
+            if note := evidence_note(r):
+                print(f"  {note}")
             if edges:
                 connected = ", ".join(e.get("to_title", e["to_id"]) for e in edges[:5])
                 print(f"  → {connected}")
@@ -1146,6 +1173,7 @@ def cmd_migrate(args):
             content=topic.body,
             node_type="concept",
             weight=topic.weight or 0.5,
+            standing=topic.standing,
             domains=topic.domains,
             status=str(topic.status) if topic.status else "active",
             extra=topic.__pydantic_extra__ or {},
@@ -1706,6 +1734,36 @@ def _strip_pii(node: dict) -> dict:
     content = re.sub(r'\S+@\S+\.\S+', '[email]', content)
     # Credentials use the common policy; ordinary evidence hashes remain intact.
     node["content"] = content
+    # Kinbase's preserved source document can repeat statement/owner data.
+    # Apply this sharing boundary recursively, retaining the receipt's scope:
+    # signatures were verified against original external bytes, not this copy.
+    def scrub_metadata(value):
+        if isinstance(value, str):
+            return re.sub(r'\S+@\S+\.\S+', '[email]', value)
+        if isinstance(value, list):
+            return [scrub_metadata(item) for item in value]
+        if isinstance(value, dict):
+            return {scrub_metadata(key): scrub_metadata(item) for key, item in value.items()}
+        return value
+
+    metadata = (node.get("extra") or {}).get("kinbase")
+    if isinstance(metadata, dict):
+        scrubbed = scrub_metadata(metadata)
+        # Source paths and owner identities are provenance PII even when they
+        # do not happen to contain an email address.
+        import hashlib
+        source_repo = metadata.get("repo", "")
+        # Opaque but stable grouping survives export/import without disclosing
+        # a home path or merging unrelated repositories' contested keys.
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", source_repo):
+            scrubbed["repo"] = source_repo
+        else:
+            scrubbed["repo"] = "sha256:" + hashlib.sha256(source_repo.encode()).hexdigest()
+        if scrubbed.get("owner_identity"):
+            scrubbed["owner_identity"] = "[owner identity redacted]"
+        scrubbed["source_document_redacted"] = True
+        scrubbed["signature_verification_scope"] = "original external source bytes; shared copy redacted"
+        node["extra"] = {**node["extra"], "kinbase": scrubbed}
     # Strip actor from activity log entries stored in extra
     extra = node.get("extra")
     if isinstance(extra, dict):
@@ -1809,10 +1867,14 @@ def cmd_export(args):
             "id": n["id"], "type": n["type"], "title": n["title"],
             "content": n.get("content", ""),
             "weight": n["weight"], "domains": n.get("domains", []),
+            "standing": n.get("standing", "unruled"),
+            "status": n.get("status", "active"),
             "audience": n.get("audience", "private"),
             "edges": [{"to": e["to_id"], "type": e["type"], "weight": e["weight"]}
                       for e in filtered_edges],
         }
+        if isinstance((n.get("extra") or {}).get("kinbase"), dict):
+            record["extra"] = {"kinbase": n["extra"]["kinbase"]}
         # R0 referent binding + clocks round-trip through export/import.
         if isinstance(n.get("referent"), dict):
             record["referent"] = n["referent"]
@@ -2342,6 +2404,9 @@ def cmd_agent_prime_hook(args):
     adapter = normalize_adapter(getattr(args, "adapter", "plain"))
     client = normalize_adapter(getattr(args, "client", None) or adapter)
     payload = read_hook_payload()
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
     conversation_id = resolve_conversation_id(
         getattr(args, "conversation_id", None),
         payload,
@@ -2399,6 +2464,9 @@ def cmd_agent_stop_hook(args):
 
     adapter = normalize_adapter(getattr(args, "adapter", "plain"))
     payload = read_hook_payload()
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
     store = _store(args)
     conversation_id = resolve_conversation_id(
         getattr(args, "conversation_id", None),
@@ -3756,21 +3824,27 @@ def cmd_import_graph(args):
         existing = None
         if node_id:
             existing = store.get_node(node_id)
-        if not existing and title:
+        if not existing and title and not (item.get("extra") or {}).get("kinbase"):
             existing = store.get_node_by_title(title)
 
         if existing:
             if merge:
+                metadata = {key: item[key] for key in ("standing", "extra", "status")
+                            if key in item and item[key] != existing.get(key)}
                 # Merge: update content if new content is provided
                 new_content = item.get("content", "")
                 old_content = existing.get("content", "")
                 if new_content and new_content != old_content:
                     if not dry_run:
                         combined = old_content + "\n\n" + new_content if old_content else new_content
-                        store.update_node(existing["id"], content=combined)
+                        store.update_node(existing["id"], content=combined, **metadata)
                     updated += 1
                     if dry_run:
                         print(f"  Would update: {title}")
+                elif metadata:
+                    if not dry_run:
+                        store.update_node(existing["id"], **metadata)
+                    updated += 1
                 else:
                     skipped += 1
             else:
@@ -3779,7 +3853,10 @@ def cmd_import_graph(args):
                     store.update_node(existing["id"],
                                       title=title,
                                       content=item.get("content", ""),
-                                      weight=item.get("weight", existing["weight"]))
+                                      weight=item.get("weight", existing["weight"]),
+                                      standing=item.get("standing", existing.get("standing", "unruled")),
+                                      extra=item.get("extra", existing.get("extra", {})),
+                                      status=item.get("status", existing.get("status", "active")))
                 updated += 1
                 if dry_run:
                     print(f"  Would replace: {title}")
@@ -3813,6 +3890,9 @@ def cmd_import_graph(args):
                     node_type=item.get("type", "concept"),
                     domains=item.get("domains", []),
                     weight=item.get("weight", 0.5),
+                    standing=item.get("standing", "unruled"),
+                    extra=item.get("extra", {}),
+                    status=item.get("status", "active"),
                     audience=item.get("audience", "private"),
                     prov_activity="import",
                     prov_source=str(filepath),
@@ -4985,6 +5065,39 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
     return lines
 
 
+def _supervisor_hook_result(args, payload, adapter):
+    from .supervisor import hook_request
+    from .privacy import safe_error
+    try:
+        explicit = any(getattr(args, name, None) for name in ("config", "data_dir", "profile"))
+        cfg = _config(args) if explicit else None
+        return hook_request(payload, "claude" if adapter == "plain" else adapter,
+                            config=cfg, project_path=getattr(args, "project_path", None))
+    except (Exception, SystemExit) as error:
+        return {"ok": False, "context": "Kindex supervisor unavailable; no fresh lookback completed. " + safe_error(error),
+                "supervisor": {"state": "failed", "reason": "hook_error"},
+                "error": {"code": "supervisor_unavailable", "message": safe_error(error)}}
+
+
+def cmd_supervisor_hook(args):
+    from .attention import read_hook_payload
+    payload = read_hook_payload()
+    result = _supervisor_hook_result(args, payload, args.adapter)
+    if args.json:
+        print(json.dumps(result))
+    elif args.adapter == "cursor":
+        event = str(payload.get("hook_event_name") or "")
+        context = result.get("context", "")
+        if event == "stop" and result.get("supervisor", {}).get("state") != "delivered":
+            context = ""  # Diagnostics must never auto-submit follow-up turns.
+        print(_hook_context_output(context, adapter="cursor", event=event) if context else
+              json.dumps({"continue": True} if event == "beforeSubmitPrompt" else {}))
+    elif result.get("context"):
+        print(_hook_context_output(result["context"], adapter=args.adapter,
+                                   event=str(payload.get("hook_event_name") or payload.get("hookEventName") or
+                                             ("PreInvocation" if args.adapter == "antigravity" else "UserPromptSubmit"))))
+
+
 def cmd_prompt_check(args):
     """UserPromptSubmit hook: inject due reminders into conversation context.
 
@@ -5094,39 +5207,11 @@ def cmd_prompt_check(args):
     except Exception:
         pass
 
-    # Sim supervisory check-in (opt-in): enqueue a window snapshot for async
-    # review and surface any pending injection a prior drain already graded.
-    # Both halves are cheap (SQLite-only); the Sim/LLM spend happens in the daemon.
-    try:
-        from .sim import sim_effective_enabled
-        if conversation_id and sim_effective_enabled(store, cfg):
-            from .attention import _load_state as _att_state
-            from .sim import (
-                enqueue_sim_review,
-                format_sim_injection,
-                pop_pending_sim_injection,
-            )
-
-            tick = int(_att_state(store, conversation_id).get("ticks", 0))
-            window = ""
-            tpath = hook_payload.get("transcript_path") or hook_payload.get("transcriptPath")
-            if tpath:
-                from .reinforce import _bounded_trace
-                window = _bounded_trace(str(tpath), cfg.sim.window_chars)
-            if not window:
-                window = conversation_text
-            queued = enqueue_sim_review(store, cfg, conversation_id, window, tick=tick)
-            sim_injection = pop_pending_sim_injection(
-                store, cfg, conversation_id, window, tick=tick
-            )
-            sim_lines.extend(format_sim_injection(sim_injection, display=cfg.sim.display))
-            # No daemon? Drain off-path in the background so the review lands for
-            # a later tick. Only bother when we actually queued something new.
-            if queued and cfg.sim.drain_on_tick:
-                from .sim import spawn_background_drain
-                spawn_background_drain(cfg)
-    except Exception:
-        pass
+    # All adapters use the same scoped cadence, queue, worker and delivery path.
+    from .sim import sim_effective_enabled
+    if sim_effective_enabled(store, cfg):
+        supervisor_result = _supervisor_hook_result(args, hook_payload, adapter)
+        sim_lines.extend(supervisor_result.get("context", "").splitlines())
 
     # Collab updates: new targeted/broadcast messages since the agent's read
     # cursor + standing inject messages, with a per-conversation cooldown.
@@ -5280,13 +5365,22 @@ def cmd_attention_hook(args):
         or "PreToolUse"
     )
     adapter = normalize_adapter(getattr(args, "adapter", "claude"))
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
     gate = permission_gate_output(adapter=adapter, event=event, payload=payload)
     if gate:
         print(gate)
         return
 
+    supervisor_context = ""
+    if event in ("UserPromptSubmit", "PostToolUse"):
+        supervisor_context = _supervisor_hook_result(args, payload, adapter).get("context", "")
+
     def allow_if_needed() -> None:
-        if adapter == "antigravity" and event == "PreToolUse":
+        if supervisor_context:
+            print(_hook_context_output(supervisor_context, adapter=adapter, event=event))
+        elif adapter == "antigravity" and event == "PreToolUse":
             print(antigravity_allow())
 
     text = extract_conversation_text(getattr(args, "text", None), payload)
@@ -5377,6 +5471,8 @@ def cmd_attention_hook(args):
             for item in deduped
         ]}
         lines = format_attention_injections(result, display=cfg.attention.display)
+        if supervisor_context:
+            lines.append(supervisor_context)
         if not lines:
             allow_if_needed()
             return
@@ -6218,6 +6314,14 @@ def cmd_setup_cursor_mcp(args):
         print(f"  {a}")
 
 
+def cmd_setup_cursor_hooks(args):
+    """Install/uninstall Cursor's native advisory hooks."""
+    from .setup import install_cursor_hooks, uninstall_cursor_hooks
+    operation = uninstall_cursor_hooks if getattr(args, "uninstall", False) else install_cursor_hooks
+    for action in operation(_config(args), dry_run=getattr(args, "dry_run", False)):
+        print(f"  {action}")
+
+
 def cmd_setup_cursor_rules(args):
     """Output recommended Cursor rule for kindex integration.
 
@@ -6721,6 +6825,15 @@ def build_parser() -> argparse.ArgumentParser:
                                 description="Knowledge graph that learns from your conversations")
     p.add_argument("--version", action="store_true")
     sub = p.add_subparsers(dest="command")
+
+    k = sub.add_parser("kinbase", help="Read signed Kinbase evidence")
+    ks = k.add_subparsers(dest="kinbase_action", required=True)
+    s = ks.add_parser("sync", help="Refresh evidence from a Kinbase repository")
+    s.add_argument("--repo", required=True)
+    s.add_argument("--mode", choices=("auto", "raw", "reduced"), default="auto")
+    s.add_argument("--binary", default="kinbase")
+    _common(s)
+    s.set_defaults(func=cmd_kinbase_sync)
 
     # search
     s = sub.add_parser("search", help="Hybrid search (FTS + graph)")
@@ -7337,6 +7450,12 @@ def build_parser() -> argparse.ArgumentParser:
     _common(s)
     s.set_defaults(func=cmd_setup_cursor_mcp)
 
+    s = sub.add_parser("setup-cursor-hooks", help="Install Kindex native supervisor hooks into Cursor")
+    s.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    s.add_argument("--uninstall", action="store_true", help="Remove Kindex supervisor hooks")
+    _common(s)
+    s.set_defaults(func=cmd_setup_cursor_hooks)
+
     # setup-cursor-rules
     s = sub.add_parser("setup-cursor-rules",
                        help="Output recommended Cursor rule (.mdc) for kindex")
@@ -7691,6 +7810,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent-instance", help="Agent instance/conversation override key")
     _common(s)
     s.set_defaults(func=cmd_prompt_check)
+
+    s = sub.add_parser("supervisor-hook", help="Shared scoped advisory direction and diligence lookback")
+    s.add_argument("--adapter", required=True, choices=["claude", "codex", "opencode", "antigravity", "cursor"])
+    _common(s)
+    s.set_defaults(func=cmd_supervisor_hook)
 
     # attention-hook (advisory tool/action hook)
     s = sub.add_parser("attention-hook", help="Advisory attention hook for tool/action events")

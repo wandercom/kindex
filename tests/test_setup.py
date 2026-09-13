@@ -483,7 +483,7 @@ class TestSetupAntigravity:
         assert "PreToolUse" in block
         assert "Stop" in block
         assert "agent-prime-hook" in str(block["PreInvocation"])
-        assert "prompt-check" in str(block["PreInvocation"])
+        assert "supervisor-hook" in str(block["PreInvocation"])
         assert "attention-hook" in str(block["PreToolUse"])
         assert "agent-stop-hook" in str(block["Stop"])
         assert "source ~/.profile" in str(block)

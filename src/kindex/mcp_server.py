@@ -153,8 +153,14 @@ def _tool(*dargs, **dkwargs):
     def decorate(fn):
         @functools.wraps(fn)
         def guarded(*a, **kw):
+            health_outcome = "failed"
             try:
-                return fn(*a, **kw)
+                result = fn(*a, **kw)
+                health_outcome = "failed" if (
+                    isinstance(result, str) and result.startswith("Error:")
+                    or isinstance(result, dict) and result.get("ok") is False
+                ) else "success"
+                return result
             except MemoryUnavailableError as e:
                 return f"Error: memory unavailable ({e.error_class})"
             except sqlite3.Error as e:
@@ -168,6 +174,14 @@ def _tool(*dargs, **dkwargs):
                 except Exception:
                     pass
                 return f"Error: memory unavailable ({type(e).__name__})"
+            finally:
+                # Record only tool name/outcome, never arguments or result text.
+                # Health failure must not replace the requested tool result.
+                try:
+                    from .supervisor_health import record_mcp
+                    record_mcp(fn.__name__, health_outcome)
+                except Exception as health_error:
+                    print(f"Kindex health recording unavailable ({type(health_error).__name__})", file=sys.stderr)
         return mcp.tool(*dargs, **dkwargs)(_safe_output(guarded))
     return decorate
 
@@ -352,6 +366,18 @@ def _node_detail(store, node: dict) -> str:
 
 
 @_tool()
+def kinbase_sync(repo: str, mode: str = "auto", binary: str = "kinbase") -> str:
+    """Refresh signed Kinbase evidence; raw verifies bytes, reduced retains governance snapshots.
+
+    The source events are never modified. Reduced covers local event keys and
+    invokes exact-key explain, never project (which may submit questions).
+    """
+    from .kinbase import sync_kinbase
+    store, _ = _get_store()
+    return json.dumps(sync_kinbase(store, repo, mode=mode, binary=binary), indent=2)
+
+
+@_tool()
 def search(query: str, top_k: int = 10, tags: str = "",
            include_archived: bool = False,
            trusted_only: bool = False) -> str:
@@ -437,6 +463,9 @@ def search(query: str, top_k: int = 10, tags: str = "",
         content = (r.get("content") or "")[:150]
         if content:
             lines.append(f"   {content}")
+        from .kinbase import evidence_note
+        if note := evidence_note(r):
+            lines.append(f"   {note}")
     if fence_note:
         lines.append(fence_note)
     if trust_note:
@@ -2065,7 +2094,7 @@ def task_list(status: str = "open", scope: str = "",
         project_path: Optional explicit project filter.
         limit: Maximum number of matching tasks to return.
     """
-    store, _ = _get_store()
+    store, config = _get_store()
     from .tasks import list_tasks, format_task_list
     max_pri = None
     if priority:
@@ -2073,9 +2102,18 @@ def task_list(status: str = "open", scope: str = "",
             max_pri = int(priority)
         except ValueError:
             pass
+    from .project_store import is_project_store
+    local_project = str(config._project_path) if config._project_path else ""
+    default_project = (not project_path and scope != "global" and not config.active_profile
+                       and bool(local_project) and is_project_store(store, local_project))
     tasks = list_tasks(store, status=status, scope=scope or None,
-                       project_path=project_path or None, max_priority=max_pri,
-                       limit=max(1, min(limit, 500)))
+                       project_path=project_path or (local_project if default_project else None),
+                       max_priority=max_pri, limit=None if default_project else max(1, min(limit, 500)))
+    if default_project:
+        from pathlib import Path
+        tasks = [task for task in tasks if not (task.get("extra") or {}).get("project_path")
+                 or Path(task["extra"]["project_path"]).resolve() == Path(local_project).resolve()]
+        tasks = tasks[:max(1, min(limit, 500))]
     if not tasks:
         return "No tasks found."
     return format_task_list(tasks)

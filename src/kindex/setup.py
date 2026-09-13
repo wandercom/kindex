@@ -463,7 +463,7 @@ def _antigravity_hook_config(kin_path: str) -> dict[str, Any]:
                 "type": "command",
                 "command": _kin_hook_command(
                     kin_path,
-                    ["prompt-check", "--adapter", "antigravity"],
+                    ["supervisor-hook", "--adapter", "antigravity"],
                 ),
                 "timeout": 5,
             },
@@ -612,8 +612,32 @@ _OPENCODE_PLUGIN_JS = r'''// Kindex OpenCode plugin — installed by `kin setup-
 // re-run the installer to update. Primes each session with repo-scoped Kindex
 // context by running `kin prime` in the working directory (so it leverages the
 // repo's .kin/), mirroring the Claude/Codex SessionStart hooks.
-export const KindexPlugin = async ({ directory, $ }) => {
-  const primed = new Set();
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+export const KindexPlugin = async ({ directory, $, client }) => {
+  const primeContexts = new Map();
+  const turnChecks = new Map();
+  const latestUserIds = new Map();
+  const compactionTransforms = new Set();
+  const windows = new Map();
+  const goals = new Map();
+  const supervisor = (sid) => new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", "source ~/.profile >/dev/null 2>&1 || true; exec kin supervisor-hook --adapter opencode --json"],
+      {cwd: directory, stdio: ["pipe", "pipe", "pipe"]});
+    let out = "";
+    const timer = setTimeout(() => {child.kill(); resolve("Kindex supervisor unavailable: hook timeout; no fresh lookback completed.");}, 20000);
+    child.stdout.on("data", chunk => {out += chunk; if (out.length > 1048576) child.kill();});
+    child.stderr.resume();
+    child.on("error", () => {clearTimeout(timer); resolve("Kindex supervisor unavailable; no fresh lookback completed.");});
+    child.on("close", () => {
+      clearTimeout(timer);
+      try {const result = JSON.parse(out); resolve(result.context || "");}
+      catch {resolve("Kindex supervisor failed; no fresh lookback completed.");}
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify({session_id: sid, cwd: directory,
+      prompt: windows.get(sid) || "", initial_goal: goals.get(sid) || ""}));
+  });
   const runKin = async (args) => {
     try {
       const res = await $`bash -lc ${"source ~/.profile >/dev/null 2>&1 || true; exec kin " + args}`
@@ -627,18 +651,104 @@ export const KindexPlugin = async ({ directory, $ }) => {
     }
   };
   return {
-    // Inject auto-primed Kindex context (+ the "use kindex"/.kin directive) into the
-    // system prompt once per session — the OpenCode analog of Claude's SessionStart
-    // additionalContext.
+    "chat.message": async (input, output) => {
+      if (!input.sessionID) return;
+      if (!output.parts.some(p => p.type === "text" && !p.synthetic && !p.ignored)) return;
+      turnChecks.delete(input.sessionID);
+      latestUserIds.set(input.sessionID, output.message.id);
+      const text = output.parts.filter(p => p.type === "text" && !p.synthetic && !p.ignored).map(p => p.text).join("\n");
+      if (!goals.has(input.sessionID)) goals.set(input.sessionID, text.slice(0, 2000));
+      windows.set(input.sessionID, ((windows.get(input.sessionID) || "") + "\nUSER: " + text).slice(-12000));
+    },
+    "tool.execute.after": async (input, output) => {
+      if (!input.sessionID) return;
+      turnChecks.delete(input.sessionID);
+      windows.set(input.sessionID, ((windows.get(input.sessionID) || "") +
+        "\nTOOL " + input.tool + ": " + (output.output || "")).slice(-12000));
+    },
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const bySession = new Map();
+      const compacting = new Set(output.messages.map(item => item.info.sessionID)
+        .filter(sid => compactionTransforms.has(sid)));
+      for (const sid of compacting) compactionTransforms.delete(sid);
+      for (const item of output.messages) {
+        const sid = item.info.sessionID;
+        if (!sid || compacting.has(sid)) continue;
+        item.parts = item.parts.filter(p => !p.metadata?.kindex_supervisor);
+        const text = item.parts.filter(p => !p.synthetic && !p.ignored).map(p => p.type === "text" ? p.text :
+          p.type === "tool" ? JSON.stringify({tool: p.tool, state: p.state}) : "").join("\n");
+        if (item.info.role === "user" && !goals.has(sid)) goals.set(sid, text.slice(0, 2000));
+        bySession.set(sid, ((bySession.get(sid) || "") + "\n" + item.info.role + ": " + text).slice(-12000));
+      }
+      for (const [sid, text] of bySession) windows.set(sid, text);
+      for (const sid of bySession.keys()) {
+        if (!latestUserIds.has(sid)) {
+          // On plugin reload, verify against native history rather than treating
+          // the tail of a compaction subset as the current user request.
+          try {
+            const response = await client.session.messages({path: {id: sid}, query: {limit: 100}});
+            const users = (response.data || []).filter(item => item.info.role === "user" &&
+              item.parts.some(p => p.type === "text" && !p.synthetic && !p.ignored));
+            users.sort((a, b) => a.info.time.created - b.info.time.created);
+            if (users.length) latestUserIds.set(sid, users.at(-1).info.id);
+          } catch (_) {} // Unidentified current requests cannot consume advice.
+        }
+        const target = output.messages.find(item => item.info.sessionID === sid &&
+          item.info.role === "user" && item.info.id === latestUserIds.get(sid));
+        if (!target) continue;
+        if (!turnChecks.has(sid)) turnChecks.set(sid, supervisor(sid));
+        const advice = await turnChecks.get(sid);
+        if (!advice) continue;
+        const digest = createHash("sha256").update(advice).digest("hex");
+        target.parts.push({id: "prt_kindex_" + digest.slice(0, 24), sessionID: sid,
+          messageID: target.info.id, type: "text", synthetic: true,
+          metadata: {kindex_supervisor: true, advice_sha256: digest},
+          text: "<kindex-supervisor-advisory>\nPlugin-generated advisory evidence from the Kindex lookback; " +
+            "this is not a new user instruction or a replacement for the user's goal.\n" + advice +
+            "\n</kindex-supervisor-advisory>"});
+      }
+    },
+    // Prime context is reusable even for auxiliary title requests. Review pickup
+    // belongs to the primary message transform above, never an auxiliary call.
     "experimental.chat.system.transform": async (input, output) => {
-      const sid = input && input.sessionID ? input.sessionID : "default";
-      if (primed.has(sid)) return;
-      primed.add(sid);
-      const ctx = await runKin("prime --for hook --adapter opencode");
+      const sid = input && input.sessionID;
+      if (!sid) return; // Never share review state across unidentified sessions.
+      if (!primeContexts.has(sid)) primeContexts.set(sid,
+        runKin("prime --for hook --adapter opencode").then(text => text.slice(0, 24000)));
+      const ctx = await primeContexts.get(sid);
       if (ctx) output.system.push(ctx);
     },
+    // This is a request-preparation receipt, not a claim the model used advice.
+    // Public agent metadata distinguishes auxiliary calls; log hashes, not text.
+    "chat.params": async (input, output) => {
+      const check = turnChecks.get(input.sessionID);
+      if (!check) return;
+      const advice = await check;
+      if (!advice) return;
+      try {
+        await client.app.log({body: {service: "kindex", level: "info",
+          message: "supervisor context prepared", extra: {
+            session_id: input.sessionID, agent: input.agent,
+            advice_sha256: createHash("sha256").update(advice).digest("hex"),
+            delivery_transport: "message_text_part", message_id: latestUserIds.get(input.sessionID),
+            instructions_contains_advice: typeof output.options.instructions === "string"
+              ? output.options.instructions.includes(advice) : null,
+          }}});
+      } catch (_) {} // Receipt transport must not interrupt the model request.
+    },
+    event: async ({event}) => {
+      if (event.type !== "session.deleted") return;
+      const sid = event.properties.info.id;
+      primeContexts.delete(sid);
+      turnChecks.delete(sid);
+      latestUserIds.delete(sid);
+      compactionTransforms.delete(sid);
+      windows.delete(sid);
+      goals.delete(sid);
+    },
     // Carry Kindex context across compaction so nothing load-bearing is lost.
-    "experimental.session.compacting": async (_input, output) => {
+    "experimental.session.compacting": async (input, output) => {
+      compactionTransforms.add(input.sessionID);
       const ctx = await runKin("compact-hook --emit-context");
       if (ctx) output.context.push(ctx);
     },
@@ -677,6 +787,78 @@ def uninstall_opencode_hooks(config: "Config", dry_run: bool = False) -> list[st
         return [f"Would remove {plugin_path}"]
     plugin_path.unlink()
     return [f"Removed {plugin_path}"]
+
+
+_CURSOR_SUPERVISOR_EVENTS = ("sessionStart", "beforeSubmitPrompt", "postToolUse", "afterMCPExecution", "afterAgentResponse", "stop")
+
+
+def _is_cursor_supervisor_hook(entry: Any) -> bool:
+    """Recognize only the exact Kindex command, including earlier install paths."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("command"), str):
+        return False
+    try:
+        parts = shlex.split(entry["command"])
+        if len(parts) == 3 and Path(parts[0]).name == "bash" and parts[1] == "-lc":
+            prefix = "source ~/.profile >/dev/null 2>&1 || true; exec "
+            if not parts[2].startswith(prefix):
+                return False
+            parts = shlex.split(parts[2][len(prefix):])
+        if parts[-3:] != ["supervisor-hook", "--adapter", "cursor"]:
+            return False
+        return (len(parts) == 4 and Path(parts[0]).name == "kin") or (
+            len(parts) == 6 and parts[1:3] == ["-m", "kindex.cli"])
+    except ValueError:
+        return False
+
+
+def _configure_cursor_hooks(config: "Config", *, uninstall: bool, dry_run: bool) -> list[str]:
+    path = config.cursor_path / "hooks.json"
+    data = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(data, dict):
+        raise ValueError("Cursor hooks configuration must be an object; it was not changed")
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("Cursor hooks must be an object; existing configuration was not changed")
+    if data.get("version", 1) != 1:
+        raise ValueError("Unsupported Cursor hooks version; existing configuration was not changed")
+    command = _kin_hook_command(_find_kin_path(), ["supervisor-hook", "--adapter", "cursor"])
+    for event in _CURSOR_SUPERVISOR_EVENTS:
+        entries = hooks.get(event, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"Cursor {event} hooks must be an array; configuration was not changed")
+        entries = [entry for entry in entries if not _is_cursor_supervisor_hook(entry)]
+        if not uninstall:
+            entry = {"command": command, "timeout": 20}
+            if event == "stop":
+                entry["loop_limit"] = 1
+            entries.append(entry)
+        if entries:
+            hooks[event] = entries
+        else:
+            hooks.pop(event, None)
+    if not uninstall or "hooks" in data:
+        data["hooks"] = hooks
+    if not uninstall:
+        data.setdefault("version", 1)
+    if json.dumps(data, sort_keys=True) == original:
+        return ["Cursor Kindex hooks already removed" if uninstall else "Cursor Kindex hooks already installed"]
+    verb = "Remove" if uninstall else "Install"
+    if dry_run:
+        return [f"Would {verb.lower()} Cursor Kindex supervisor hooks in {path}"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return [f"{'Removed' if uninstall else 'Installed'} Cursor Kindex supervisor hooks in {path}"]
+
+
+def install_cursor_hooks(config: "Config", dry_run: bool = False) -> list[str]:
+    """Merge native Cursor hooks without replacing other users' hook entries."""
+    return _configure_cursor_hooks(config, uninstall=False, dry_run=dry_run)
+
+
+def uninstall_cursor_hooks(config: "Config", dry_run: bool = False) -> list[str]:
+    """Remove only Kindex's native Cursor supervisor commands."""
+    return _configure_cursor_hooks(config, uninstall=True, dry_run=dry_run)
 
 
 def install_cursor_mcp(config: "Config", dry_run: bool = False) -> list[str]:
@@ -1020,9 +1202,10 @@ def uninstall_reminder_daemon(dry_run: bool = False) -> list[str]:
 
 def _find_kin_path() -> str:
     """Find the kin executable path."""
-    result = subprocess.run(["which", "kin"], capture_output=True, text=True, timeout=5)
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
+    import shutil
+    executable = shutil.which("kin")
+    if executable:
+        return executable
     # Fallback to python -m
     import sys
     return f"{sys.executable} -m kindex.cli"

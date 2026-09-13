@@ -1,95 +1,4 @@
-"""SQLite schema for the Kindex knowledge graph."""
 
-from __future__ import annotations
-
-SCHEMA_VERSION = 13
-
-STANDINGS = ("unruled", "present", "prevalent", "exemplary", "enforced", "ratified", "authoritative")
-
-# Audience scopes for tenancy model
-AUDIENCES = ("private", "team", "org", "public")
-
-# Knowledge node types
-NODE_TYPES = (
-    "concept", "document", "session", "person", "project",
-    "decision", "question", "artifact", "skill", "task",
-)
-
-# Operational node types — what must hold, what to verify, what to watch
-OPERATIONAL_TYPES = (
-    "constraint",   # invariants that must hold (hard rules)
-    "directive",    # behavioral rules, style guides (soft rules with context)
-    "checkpoint",   # things to verify before an event (pre-flight lists)
-    "watch",        # open questions, known instabilities (decaying attention flags)
-)
-
-ALL_NODE_TYPES = NODE_TYPES + OPERATIONAL_TYPES
-
-# Session nodes record agent-run lifecycle. They remain queryable history, but
-# they are not knowledge-topology vertices and do not need semantic edges.
-SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES = ("session",)
-SEMANTIC_METRICS_SCHEMA_VERSION = 2
-
-# v0.35 and earlier materialized shared node domains as pairwise edges. Those
-# edges are derived from attributes already stored on each endpoint and must not
-# participate in semantic traversal or graph-health metrics.
-LEGACY_DREAM_DOMAIN_EDGE_PROVENANCE = "dream-cycle domain co-membership"
-
-SESSION_PAUSE_REASON_USER = "user"
-SESSION_PAUSE_REASON_DUPLICATE_MIGRATION = (
-    "duplicate-active-session-migration-v12"
-)
-
-# These producers persist immutable node IDs in suggestions.concept_a/b.
-# All other producers persist display titles for legacy/API compatibility.
-NODE_ID_SUGGESTION_SOURCES = frozenset({
-    "dream-cycle",
-    "dream-cycle-domain",
-})
-SUGGESTION_IDENTITY_KINDS = ("title", "node_id")
-
-# Edge types — bidirectional by convention
-EDGE_TYPES = (
-    "relates_to", "answers", "contradicts", "implements", "depends_on",
-    "spawned_from", "supersedes", "exemplifies", "context_of", "blocks",
-)
-
-# Edit policy — how mutable each node type is via Store.edit_node:
-#   editable: free-form edits (title, content, tags, intent, aka, ...)
-#   additive: history matters — only append (addendum) and expires allowed;
-#             replacement goes through Store.supersede_node
-#   managed:  lifecycle owned by dedicated tooling (tasks/sessions/coordination);
-#             edit_node always refuses
-EDIT_POLICY: dict[str, tuple[str, ...]] = {
-    "editable": ("concept", "document", "artifact", "skill", "person",
-                 "project", "question"),
-    "additive": ("decision", "constraint", "directive", "checkpoint", "watch"),
-    "managed": ("task", "session", "coordination"),
-}
-
-
-def edit_class_for(node_type: str, overrides: dict[str, str] | None = None) -> str:
-    """Resolve the edit class for a node type.
-
-    Returns 'editable' | 'additive' | 'managed'. Unknown types default to
-    'editable'. `overrides` maps node_type -> class (from Config.edit_policy)
-    and wins over the built-in policy; an override naming an unknown class
-    raises ValueError so config typos surface instead of silently relaxing.
-    """
-    if overrides and node_type in overrides:
-        cls = overrides[node_type]
-        if cls not in EDIT_POLICY:
-            raise ValueError(
-                f"Unknown edit class '{cls}' for node type '{node_type}' "
-                f"(valid: {', '.join(EDIT_POLICY)})"
-            )
-        return cls
-    for cls, types in EDIT_POLICY.items():
-        if node_type in types:
-            return cls
-    return "editable"
-
-CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS nodes (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL DEFAULT 'concept',
@@ -117,7 +26,6 @@ CREATE TABLE IF NOT EXISTS nodes (
     asserted_at TEXT,
     true_of TEXT,
     -- scoring
-    standing TEXT NOT NULL DEFAULT 'unruled',
     weight REAL NOT NULL DEFAULT 0.5,
     domains TEXT NOT NULL DEFAULT '',       -- JSON array
     status TEXT NOT NULL DEFAULT 'active',  -- active / archived / deprecated / open-question
@@ -337,4 +245,3 @@ CREATE INDEX IF NOT EXISTS idx_coactivation_a ON node_coactivation(node_a);
 CREATE INDEX IF NOT EXISTS idx_coactivation_b ON node_coactivation(node_b);
 CREATE INDEX IF NOT EXISTS idx_coactivation_strength
     ON node_coactivation(strength DESC);
-"""

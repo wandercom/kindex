@@ -1155,3 +1155,9 @@ make clean        # remove build artifacts
 MIT. Copyright (c) 2026 Wander. Kindex is a Wander project.
 
 <!-- mcp-name: io.github.jmcentire/kindex -->
+
+### Kinbase compatibility
+
+Read signed Kinbase facts and unresolved questions with `kin kinbase sync --repo PATH`.
+Kindex preserves provenance-clamped standing, distinguishes raw evidence from reduced
+snapshots, and never writes Kinbase events. See [the reader guide](docs/kinbase.md).

@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from kindex.config import Config
+from kindex.schema import SCHEMA_VERSION
 from kindex.store import Store
 
 
@@ -618,7 +619,7 @@ def test_session_uniqueness_migration_pauses_older_duplicates(tmp_path):
     assert extras[first]["paused_reason"] == (
         "duplicate-active-session-migration-v12"
     )
-    assert migrated.get_meta("schema_version") == "12"
+    assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
     assert migrated.conn.execute(
         """SELECT 1 FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_suggestions_pair'"""

@@ -429,7 +429,8 @@ class AdvocateConfig(BaseModel):
     #            cat "$f"; rm -f "$f"'
     # The parser reads the nested persona_reports[].findings[] of that JSON.
     command: str = ""
-    max_cost: float = 2.0          # hard ceiling for one escalation's verify spend
+    max_cost: float = 2.0          # admission reservation per external escalation;
+                                  # not a measurement/cap of its provider invoice
     cooldown_ticks: int = 30       # minimum ticks between escalations per conversation
     max_findings: int = 5          # cap on surfaced (verified) survivor findings
     timeout: int = 300             # subprocess timeout for the Advocate run
@@ -463,8 +464,9 @@ class SimConfig(BaseModel):
     grounding_chars: int = 1500     # budget for injected kindex knowledge (concepts +
                                     # constraints/watches) so Sim reviews grounded, not
                                     # blind; 0 disables grounding
-    max_review_cost: float = 0.05   # cap per Sim review call
-    max_conversation_cost: float = 0.50  # cumulative Sim spend cap per conversation
+    max_review_cost: float = 0.05   # metered LLM admission cap; external commands
+                                    # reserve this allowance without invoice metering
+    max_conversation_cost: float = 0.50  # conversation ledger cap (including reservations)
     max_output_tokens: int = 400
     max_queue: int = 20             # pending reviews retained (dedup by conversation)
     max_stale_ticks: int = 4        # drop a pending injection older than this many ticks
@@ -873,6 +875,10 @@ def load_config(
             kin_profile = data.pop("profile", None)
             cfg = _resolve_profile(Config(**data), profile, kin_profile)
             cfg = _contain_data_dir(cfg)
+            local = project_root / ".kin" / "local"
+            if not cfg.active_profile and cfg.data_path in (local, local / "kindex"):
+                from .project_store import project_data_path
+                cfg.data_dir = str(project_data_path(project_root))
             return _attach_project_path(cfg, project_root)
         return _attach_project_path(
             _contain_data_dir(_resolve_profile(Config(), profile, None)),
@@ -912,7 +918,33 @@ def load_config(
     cfg = Config(**merged) if merged else Config()
     cfg = _resolve_profile(cfg, profile, kin_profile)
     cfg = _contain_data_dir(cfg)
+    # Explicit project callers and existing repo-local configurations share the
+    # integration store. Unscoped legacy/global and named profiles stay separate.
+    if not cfg.active_profile:
+        from .project_store import project_data_path
+        local = project_root / ".kin" / "local"
+        selected = cfg.data_path
+        repo_selected = selected in (local, local / "kindex")
+        explicit_project = bool(project_path or os.environ.get("KIN_PROJECT")) and _bound_root is None and _git_root(project_root) is not None
+        existing_repo = any((d / n).exists() for d in (local, local / "kindex")
+                            for n in ("kindex.db", "conv.db"))
+        if repo_selected or ((explicit_project or existing_repo) and cfg.data_dir == "~/.kindex"):
+            cfg.data_dir = str(project_data_path(project_root))
     return _attach_project_path(cfg, project_root)
+
+
+def trusted_supervisor_config(project_path: str | Path, data_dir: str) -> Config:
+    """Execution/spend settings come from user config, never clone-controlled YAML."""
+    data = {}
+    for path in _effective_global_paths():
+        path = _contained_resolve(path)
+        if path is not None and path.is_file():
+            raw = yaml.safe_load(path.read_text()) or {}
+            data = {key: raw[key] for key in ("sim", "llm", "budget", "agents") if key in raw}
+            break
+    cfg = Config(**data, data_dir=data_dir)
+    cfg._project_path = Path(project_path).resolve()
+    return cfg
 
 
 def _resolve_profile(cfg: Config, explicit: str | None,

@@ -25,6 +25,7 @@ class TopicNode(BaseModel, extra="allow"):
 
     topic: str = ""
     title: str = ""
+    standing: str = "unruled"
     weight: float = 0.0
     domains: list[str] = Field(default_factory=list)
     status: str = ""

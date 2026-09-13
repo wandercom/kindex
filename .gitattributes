@@ -1,3 +1,5 @@
 # Kindex generated artifacts: structured union merge
 .kin/index.json merge=kindex
 .kin/code-map.json merge=kindex
+.kin/events/** -text -diff -merge
+.kin/manifests/** -text -diff -merge

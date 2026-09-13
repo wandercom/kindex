@@ -46,6 +46,7 @@ from .schema import (
     NODE_ID_SUGGESTION_SOURCES,
     EDGE_TYPES,
     SCHEMA_VERSION,
+    STANDINGS,
     SEMANTIC_GRAPH_EXCLUDED_NODE_TYPES,
     SEMANTIC_METRICS_SCHEMA_VERSION,
     SESSION_PAUSE_REASON_DUPLICATE_MIGRATION,
@@ -288,6 +289,17 @@ def node_expired(node: dict, today: str | None = None) -> bool:
     Generic — usable by hooks/attention/daemon for any node type.
     """
     extra = node.get("extra") or {}
+    kinbase = extra.get("kinbase") if isinstance(extra, dict) else None
+    if isinstance(kinbase, dict):
+        from .kinbase import _timestamp
+        now = datetime.now(timezone.utc)
+        try:
+            if kinbase.get("effective_from") and now < _timestamp(kinbase["effective_from"]):
+                return True
+            if kinbase.get("effective_until") and now >= _timestamp(kinbase["effective_until"]):
+                return True
+        except ValueError:
+            return True
     expires = extra.get("expires") if isinstance(extra, dict) else None
     if not expires or not isinstance(expires, str):
         return False
@@ -787,6 +799,9 @@ class Store:
         if current_version < 12:
             self._migrate_v12()
 
+        if current_version < 13:
+            self._migrate_v13()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -1216,6 +1231,24 @@ class Store:
             c.rollback()
             raise
 
+    def _migrate_v13(self) -> None:
+        """Add explicit standing without changing legacy node precedence."""
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row["name"] for row in c.execute("PRAGMA table_info(nodes)")}
+            if "standing" not in columns:
+                c.execute("ALTER TABLE nodes ADD COLUMN standing TEXT NOT NULL DEFAULT 'unruled'")
+            column = next(row for row in c.execute("PRAGMA table_info(nodes)")
+                          if row["name"] == "standing")
+            if column["type"] != "TEXT" or not column["notnull"]:
+                raise RuntimeError("v13 migration verification failed: standing column")
+            c.execute("UPDATE meta SET value = '13' WHERE key = 'schema_version'")
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
     # Columns each table must carry for the code that queries it to work.
     # Checked by `kin doctor`, which is the only place that catches the failure
     # class v10 repairs: a table that exists with the right name and the wrong
@@ -1228,7 +1261,7 @@ class Store:
         },
         "nodes": {
             "id", "title", "content", "type", "weight", "status",
-            "audience", "referent", "asserted_at", "true_of",
+            "audience", "referent", "asserted_at", "true_of", "standing",
         },
         "edges": {"from_id", "to_id", "type", "weight"},
         "capture_candidates": {"payload_digest", "status"},
@@ -1533,6 +1566,7 @@ class Store:
         status: str = "active",
         audience: str = "private",
         weight: float = 0.5,
+        standing: str = "unruled",
         prov_who: list[str] | None = None,
         prov_when: str | None = None,
         prov_activity: str = "",
@@ -1551,6 +1585,8 @@ class Store:
         when a binding is supplied, and ``true_of`` defaults to ``asserted_at``.
         The store performs no file IO — digests are computed by callers.
         """
+        if standing not in STANDINGS:
+            raise ValueError(f"Unknown standing: {standing!r}")
         # Merge user-supplied tags into domains (supplement, never replace)
         if tags:
             domains = list(set((domains or []) + tags))
@@ -1573,10 +1609,11 @@ class Store:
                 prov_who, prov_when, prov_activity, prov_why, prov_source,
                 weight, domains, status, audience,
                 created_at, updated_at, last_accessed, extra,
-                referent, asserted_at, true_of)
+                referent, asserted_at, true_of, standing)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?)
+                       ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
+                   standing = excluded.standing,
                    type = excluded.type,
                    title = excluded.title,
                    content = excluded.content,
@@ -1603,7 +1640,7 @@ class Store:
              _jdumps(prov_who or []), when, prov_activity, prov_why, prov_source,
              weight, _jdumps(domains or []), status, audience,
              now, now, now, _jdumps(extra or {}),
-             referent_json, asserted_norm, true_of_norm),
+             referent_json, asserted_norm, true_of_norm, standing),
         )
         self.conn.commit()
         actor = (prov_who or [""])[0] if prov_who else ""
@@ -1697,7 +1734,9 @@ class Store:
         """
         allowed = {"title", "content", "aka", "intent", "weight", "domains",
                    "tags", "status", "audience", "prov_who", "prov_activity",
-                   "prov_why", "prov_source", "extra"}
+                   "prov_why", "prov_source", "extra", "standing"}
+        if "standing" in fields and fields["standing"] not in STANDINGS:
+            raise ValueError("Unknown standing")
         # Handle tags -> domains alias (tags supplement, never replace)
         if "tags" in fields:
             tag_vals = fields.pop("tags")
@@ -3313,14 +3352,16 @@ class Store:
     # ── FTS5 search ────────────────────────────────────────────────────
 
     def fts_search(self, query: str, limit: int = 20,
-                   include_archived: bool = False) -> list[dict]:
+                   include_archived: bool = False,
+                   candidate_filter: Callable[[dict], bool] | None = None) -> list[dict]:
         """Full-text search using FTS5 BM25 ranking.
 
         Archived and superseded nodes are fenced from default results;
         include_archived=True restores both archived and superseded
         candidates (the pre-fence behavior) for callers that legitimately
         need retired content (R3.1: the fence note names both, the flag
-        delivers both).
+        delivers both). When candidate_filter is provided, refill bounded
+        pages until limit eligible candidates or the matching corpus ends.
         """
         import re
         # Strip punctuation and FTS5 special chars, keep only words
@@ -3338,31 +3379,50 @@ class Store:
         safe_phrase = phrase.replace('"', '""')
         token_expr = " OR ".join(tokens)
         fts_query = f'"{safe_phrase}" OR {token_expr}'
-        try:
-            rows = self.conn.execute(
-                f"""SELECT n.*, rank FROM nodes_fts
-                   JOIN nodes n ON n.id = nodes_fts.id
-                   WHERE nodes_fts MATCH ? AND {fts_fence}
-                   ORDER BY rank LIMIT ?""",
-                (fts_query, limit),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # Fallback: simple LIKE search if FTS query syntax fails.
-            # This is a degraded path — log it so a malformed fence or
-            # broken FTS index announces itself rather than silently
-            # returning plausible wrong results (R5.1/I4).
-            import sys
-            print(f"Warning: FTS search degraded to LIKE fallback for "
-                  f"query {fts_query!r} (fence: {fts_fence})",
-                  file=sys.stderr)
-            rows = self.conn.execute(
-                f"""SELECT *, 0 as rank FROM nodes
-                   WHERE (title LIKE ? OR content LIKE ?)
-                     AND {like_fence}
-                   ORDER BY weight DESC LIMIT ?""",
-                (f"%{phrase}%", f"%{phrase}%", limit),
-            ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+        admitted = []
+        offset = 0
+        while len(admitted) < limit:
+            try:
+                rows = self.conn.execute(
+                    f"""SELECT n.*, rank FROM nodes_fts
+                       JOIN nodes n ON n.id = nodes_fts.id
+                       WHERE nodes_fts MATCH ? AND {fts_fence}
+                       ORDER BY CASE n.standing WHEN 'authoritative' THEN 6
+                           WHEN 'ratified' THEN 5 WHEN 'enforced' THEN 4
+                           WHEN 'exemplary' THEN 3 WHEN 'prevalent' THEN 2
+                           WHEN 'present' THEN 1 ELSE 0 END DESC, rank LIMIT ? OFFSET ?""",
+                    (fts_query, limit, offset),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Fallback: simple LIKE search if FTS query syntax fails.
+                # This is a degraded path — log it so a malformed fence or
+                # broken FTS index announces itself rather than silently
+                # returning plausible wrong results (R5.1/I4).
+                import sys
+                print(f"Warning: FTS search degraded to LIKE fallback for "
+                      f"query {fts_query!r} (fence: {fts_fence})",
+                      file=sys.stderr)
+                rows = self.conn.execute(
+                    f"""SELECT *, 0 as rank FROM nodes
+                       WHERE (title LIKE ? OR content LIKE ?)
+                         AND {like_fence}
+                       ORDER BY CASE standing WHEN 'authoritative' THEN 6
+                           WHEN 'ratified' THEN 5 WHEN 'enforced' THEN 4
+                           WHEN 'exemplary' THEN 3 WHEN 'prevalent' THEN 2
+                           WHEN 'present' THEN 1 ELSE 0 END DESC, weight DESC LIMIT ? OFFSET ?""",
+                    (f"%{phrase}%", f"%{phrase}%", limit, offset),
+                ).fetchall()
+            for row in rows:
+                node = self._row_to_dict(row)
+                if candidate_filter is not None and not candidate_filter(node):
+                    continue
+                admitted.append(node)
+                if len(admitted) >= limit:
+                    break
+            if len(rows) < limit or candidate_filter is None:
+                break
+            offset += len(rows)
+        return admitted
 
     # ── Weight decay ───────────────────────────────────────────────────
 

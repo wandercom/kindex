@@ -996,6 +996,7 @@ def _kin_index_node(node: dict) -> dict:
         "type": node["type"],
         "updated_at": _node_time(node),
         "weight": round(node["weight"], 2),
+        "standing": node.get("standing", "unruled"),
     }
     # R0 referent binding + two clocks travel with the projection (schema v2
     # unknown-field passthrough keeps them safe through older merge drivers,

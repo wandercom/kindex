@@ -119,6 +119,15 @@ def _base_trust_decision(node: dict, *, at: datetime) -> TrustDecision:
     if (node.get("status") or "active") != "active":
         return TrustDecision(False, "inactive")
 
+    external_extra = node.get("extra")
+    imported = external_extra.get("kinbase") if isinstance(external_extra, dict) else None
+    if isinstance(imported, dict):
+        # A source signature authenticates bytes, not the signer authority.
+        # Reduced snapshots also need a freshness/admission policy before
+        # they can enter Kindex trusted recall; manual verification cannot
+        # silently promote this external evidence cache.
+        return TrustDecision(False, "unverified")
+
     verified_at = node.get("verified_at")
     verified_by = node.get("verified_by")
     method = node.get("prov_method")
