@@ -168,7 +168,8 @@ def _ag_projects():
         for sid, project in rows:
             remember(sid, project)
     # Conflicting identities remain unverified; never choose a nearby session.
-    return {sid: next(iter(projects)) for sid, projects in mappings.items() if len(projects) == 1}
+    return {sid: next(iter(projects)) if len(projects) == 1 else None
+            for sid, projects in mappings.items()}
 
 
 def _tool_name(raw):
@@ -182,22 +183,24 @@ def _tool_name(raw):
 
 
 def _jsonl(agent, path, now, projects):
-    from .supervisor_health import _time, record
+    from .supervisor_health import _time, is_reviewer_session, record
     head, tail = list(_rows(path, head=True)), list(_rows(path))
     project = sid = None
-    if agent == "antigravity":
-        sid = path.parents[2].name
-        project = projects.get(sid)
     for row in head:
         payload = row.get("payload", {}) if row.get("type") == "session_meta" else row
         if not isinstance(payload, dict):
             continue
         project = project or payload.get("cwd") or payload.get("project_path")
-        sid = sid or payload.get("sessionId") or payload.get("session_id")
+        sid = sid or payload.get("sessionId") or payload.get("sessionID") or payload.get("session_id")
         if row.get("type") == "session_meta":
             sid = sid or payload.get("id")
         if project and sid:
             break
+    if agent == "antigravity":
+        sid = sid or path.parents[2].name
+        project = project or projects.get(sid)
+    if is_reviewer_session(agent, sid, project, allow_unknown_project=sid not in projects):
+        return None
     scoped = isinstance(project, str) and Path(project).is_absolute() and bool(sid)
     scope = {"project_path": project, "agent": agent, "session_id": sid}
     observed = False
@@ -242,7 +245,7 @@ def _jsonl(agent, path, now, projects):
 
 
 def _opencode(now):
-    from .supervisor_health import record
+    from .supervisor_health import is_reviewer_session, record
     path = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "opencode/opencode.db"
     if not path.is_file():
         return {"state": "not_observed", "sessions": 0}
@@ -255,7 +258,11 @@ def _opencode(now):
                             (int((now - RECENT) * 1000), MAX_FILES + 1)).fetchall()
         if len(rows) > MAX_FILES:
             raise ObservationIncomplete("Native OpenCode session limit reached")
+        count = 0
         for sid, project, at in rows:
+            if is_reviewer_session("opencode", sid, project):
+                continue
+            count += 1
             scope = {"project_path": project, "agent": "opencode", "session_id": sid}
             record(scope, "activity", {"at": at / 1000, "source": "native", "event_id": "native:" + str(at)})
             # JSON projection retains names/status only; tool arguments never leave DB.
@@ -267,7 +274,7 @@ def _opencode(now):
                     record(scope, "use", {"at": timestamp / 1000, "tool": name, "source": "native", "initiator": "agent",
                                           "outcome": "success" if state == "completed" else "failed" if state == "error" else "observed",
                                           "event_id": "native:" + ident + ":" + str(state)})
-        return {"state": "observed" if rows else "not_observed", "sessions": len(rows)}
+        return {"state": "observed" if count else "not_observed", "sessions": count}
     finally:
         conn.close()
 
@@ -280,7 +287,7 @@ def _cursor(now):
     The CLI's exported transcript JSONL lacks timestamps, so it cannot independently
     establish activity or time individual Kindex calls. IDE coverage is unverified.
     """
-    from .supervisor_health import record
+    from .supervisor_health import is_reviewer_session, record
     config = os.environ.get("CURSOR_CONFIG_DIR")
     xdg = os.environ.get("XDG_CONFIG_HOME")
     root = Path(config) if config and config.strip() else Path(xdg) / "cursor" if xdg and xdg.strip() else Path.home() / ".cursor"
@@ -327,6 +334,8 @@ def _cursor(now):
             if not (now - RECENT <= at <= now + 60) or metadata.get("hasConversation") is not True or metadata.get("isSubagent") is True:
                 continue
             cwd = metadata.get("cwd")
+            if is_reviewer_session("cursor", path.parent.name, cwd):
+                continue
             if metadata.get("schemaVersion") != 1 or not isinstance(cwd, str) or not Path(cwd).is_absolute():
                 result["unidentified"] += 1
                 continue

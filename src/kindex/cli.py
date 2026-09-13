@@ -2032,6 +2032,8 @@ def cmd_compact_hook(args):
     Reads from stdin or --text, extracts knowledge, and stages review candidates.
     Designed to be called by Claude Code's PreCompact hook.
     """
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     store = _store(args)
     ledger, cfg = _ledger(args)
 
@@ -2184,6 +2186,8 @@ def cmd_prime(args):
 
     kin prime [--topic TOPIC] [--tokens N] [--for hook|stdout] [--codebook]
     """
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     store = _store(args)
     cfg = _config(args)
 
@@ -2289,6 +2293,8 @@ def cmd_prime(args):
 
 def cmd_agent_prime_hook(args):
     """Prime-once hook for clients that do not have a SessionStart event."""
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     from .agent_adapters import normalize_adapter, scope_adapter
     from .agent_settings import (
         agent_setting_value,
@@ -2356,6 +2362,8 @@ def cmd_agent_prime_hook(args):
 
 def cmd_agent_stop_hook(args):
     """Portable session-end hook: enqueue reinforcement and satisfy client schema."""
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     from .agent_adapters import normalize_adapter
     from .attention import read_hook_payload, resolve_conversation_id
 
@@ -4871,6 +4879,8 @@ def _supervisor_hook_result(args, payload, adapter):
 
 
 def cmd_supervisor_hook(args):
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     from .attention import read_hook_payload
     payload = read_hook_payload()
     result = _supervisor_hook_result(args, payload, args.adapter)
@@ -5126,6 +5136,8 @@ def cmd_prompt_check(args):
 
 def cmd_attention_hook(args):
     """Advisory attention hook for tool/action boundaries."""
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     import time
 
     from .agent_adapters import (
@@ -5774,6 +5786,8 @@ def cmd_setup_hooks(args):
 
 def cmd_hook_rpc(args):
     """Versioned structured adapter RPC; never emit prose on stdout."""
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return
     from .integrations import dispatch
     try:
         raw = sys.stdin.read(1024 * 1024 + 1)
@@ -6540,6 +6554,12 @@ def _config_write(key: str, value: str, config_path: str | None = None,
                         KIN_PROJECT, git root, then cwd
     """
     import yaml
+
+    parts = key.split(".")
+    if len(parts) >= 2 and parts[-2] == "sim":
+        from .config import SimConfig
+        # Reject invalid values before creating or modifying configuration files.
+        SimConfig(**{parts[-1]: _coerce_value(value)})
 
     if config_path:
         from .config import _resolve_path

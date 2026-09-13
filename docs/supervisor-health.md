@@ -117,6 +117,13 @@ selected scope.
 
 ## Independently monitor operation
 
+Native subscription reviewers deliberately disable supervision hooks. Kindex registers
+their exact native host, session ID, and scratch workspace in the private health
+registry, so they do not produce missing-hook or missing-use alerts. Registration
+does not manufacture activity or hook receipts, and ordinary sessions remain
+monitored. Existing false alerts resolve through normal inbox reconciliation.
+
+
 Health monitoring is opt-in and stores private metadata under `~/.kindex/health`,
 separate from the knowledge graph. It records scoped hook invocations, agent use,
 review outcomes, delivery, and explicit feedback. Native transcript/index metadata
@@ -223,3 +230,84 @@ disabled transport. Root mail requires a working local mail service; a successfu
 
 Inspect `~/.kindex/health/stderr.log` and launchd status if the checker itself stops;
 `status` reports a stale last check rather than claiming the monitor is healthy.
+
+## Subscription reviewer backends
+
+`sim.backend` selects `api` (the package default), `antigravity`, `codex`, or
+`claude`. Subscription backends use the native account login through a named tmux
+scratch session. Install tmux and the selected CLI, and log in using the native
+subscription account first. Missing executables, API authentication, provider
+quota failures, malformed responses, and interrupted attempts are visible
+failures. There is no automatic backend, model, or API fallback.
+
+```yaml
+sim:
+  enabled: true
+  backend: antigravity
+  agent_model: gemini-3.8-flash-medium
+  agent_effort: medium
+  max_conversation_reviews: 100
+  max_daily_reviews: 500
+  agent_timeout: 90
+  budget_warning_fraction: 0.8
+```
+
+`sim.model` applies only to the API path; `sim.agent_model` and
+`sim.agent_effort` select the native reviewer. Codex's empty model uses its native
+default; Claude's empty model selects Haiku. Antigravity's empty model selects
+Gemini 3.8 Flash with the configured effort suffix. An explicit Antigravity model
+already includes its effort choice. Unsupported native settings fail visibly.
+
+Change a running conversation through the existing trusted overrides:
+
+```sh
+kin agent-config set sim.backend codex --client claude --scope instance --instance SESSION_ID --global
+kin agent-config set sim.agent_effort high --client claude --scope instance --instance SESSION_ID --global
+kin agent-config set sim.max_conversation_reviews 200 --client claude --scope instance --instance SESSION_ID --global
+kin agent-config set sim.max_daily_reviews 800 --client claude --global
+```
+
+The `--client` identifies the host being supervised; `sim.backend` independently
+selects its reviewer. Limits are local attempted-review counts. Conversation
+counts persist across days and backend changes, and the UTC daily count covers
+all conversations and subscription backends in the project store. An attempt is
+reserved atomically before transport; failed and unknown attempts remain counted.
+Changes take effect on the next admission without resetting accounting. Existing
+sim queue claims remain the only dispatch authority, and already admitted work
+retains its configuration snapshot.
+
+Native usage is retained as reported and may be cumulative for a resumed session;
+it is not summed or converted to an invoice. Provider quotas are independent and
+reported as unknown by Kindex's allowance diagnostics. API dollar limits,
+including a configured $5 daily project allowance, remain on the API path only.
+Subscription reviews do not debit that ledger or invoke paid Advocate escalation.
+Both paths emit a low-allowance notice at the configured warning fraction, even
+when an advisory is delivered at the same event. Notices rearm after the allowance
+changes or usage falls below the threshold.
+
+Native resume IDs are stored separately for each resolved project data directory,
+conversation, and backend, and reused explicitly across tmux process restarts.
+Review scratch files are private; each native process has a closed environment
+without ambient API keys and a bounded runtime and output. Native tool controls,
+restricted customizations, and a dedicated Antigravity agent reduce the available
+review actions. They do not isolate every readable file in the user's OS account.
+`KINDEX_REVIEW_WORKER=1` prevents recursive Kindex hooks. Native reviewer session
+IDs are registered with the health monitor so intentionally disabled reviewer
+hooks are not mistaken for missing hooks in a human work session.
+
+The tmux process exists only during an active review; Kindex does not keep an idle
+reviewer running. Its private `subscription-review/<conversation-hash>-<backend>/active.json`
+under the project data directory contains the exact tmux socket, session name,
+and attach argument list while running. Native conversation state persists after
+that process exits, and the next review resumes its stored native ID.
+
+Native session identity is checkpointed when the CLI emits its initial session
+ID, before the review finishes. A timeout or interrupted first turn retains that
+known ID for the next freshly admitted review. The interrupted sim job is never
+replayed. Checkpoints bind the exact scratch workspace, backend, conversation,
+and any previously known ID; a conflicting checkpoint fails closed.
+
+Subscription reviewer grounding uses only local full-text search, graph expansion,
+and local ranking signals. It skips both query embeddings and register translation,
+so parent-process API credentials cannot cause paid grounding requests. API reviews
+retain their configured hybrid retrieval behavior.

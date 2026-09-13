@@ -106,6 +106,10 @@ def _db():
                 consecutive INTEGER NOT NULL, active INTEGER NOT NULL,
                 last_notified REAL, transport_error TEXT);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS reviewer_sessions (
+                agent TEXT NOT NULL, session_id TEXT NOT NULL, project_path TEXT NOT NULL,
+                registered_at REAL NOT NULL,
+                PRIMARY KEY (agent,session_id,project_path));
         ''')
         from .supervisor_notifications import ensure_schema
         ensure_schema(conn)
@@ -128,6 +132,52 @@ def _scope(scope):
     if not isinstance(sid, str) or not sid or len(sid) > 256 or any(ord(c) < 32 for c in sid):
         raise ValueError("Health requires a bounded explicit session_id")
     return {"project_path": str(Path(project).resolve()), "agent": agent, "session_id": sid}
+
+
+def register_reviewer_session(agent, session_id, project_path):
+    """Persist a trusted native reviewer's identity, without recording activity.
+
+    Called by the launcher with the identity returned by the native host. A
+    repository marker or directory naming convention cannot register a session.
+    """
+    scope = _scope({"agent": agent, "session_id": session_id, "project_path": project_path})
+    if scope["agent"] == "unknown":
+        raise ValueError("Reviewer registration requires a known native agent")
+    with _db() as conn:
+        _reviewer_registry(conn)
+        conn.execute("INSERT INTO reviewer_sessions VALUES (?,?,?,?) ON CONFLICT(agent,session_id,project_path) DO NOTHING",
+                     (scope["agent"], scope["session_id"], scope["project_path"], _time()))
+    return {**scope, "registered": True}
+
+
+def _reviewer_registry(conn):
+    """Validate durable identities before allowing them to suppress evidence."""
+    registered = set()
+    for row in conn.execute("SELECT * FROM reviewer_sessions"):
+        raw = {key: row[key] for key in ("agent", "session_id", "project_path")}
+        scope = _scope(raw)
+        if scope != raw or scope["agent"] == "unknown":
+            raise ValueError("Invalid reviewer registration identity")
+        registered.add((scope["agent"], scope["session_id"], scope["project_path"]))
+    return registered
+
+
+def is_reviewer_session(agent, session_id, project_path=None, *, allow_unknown_project=True):
+    """Match an exact identity; only unambiguous AGY IDs may lack a project."""
+    with _db() as conn:
+        registered = _reviewer_registry(conn)
+        if isinstance(project_path, str) and Path(project_path).is_absolute():
+            return (agent, session_id, str(Path(project_path).resolve())) in registered
+        if agent != "antigravity" or not allow_unknown_project or project_path is not None:
+            return False
+        projects = {project for host, sid, project in registered if host == agent and sid == session_id}
+        if len(projects) != 1:
+            return False
+        # A previously observed conflicting project also makes an unknown
+        # transcript ambiguous, even if only one project registered a reviewer.
+        projects.update(row[0] for row in conn.execute(
+            "SELECT DISTINCT project_path FROM scopes WHERE agent=? AND session_id=?", (agent, session_id)))
+        return len(projects) == 1
 
 
 def _details(kind, raw):
@@ -200,7 +250,7 @@ def record_mcp(tool, outcome="success"):
            "use", {"tool": tool, "outcome": outcome, "source": "mcp", "initiator": "agent"})
 
 
-def _summarize(scope, rows, now, cfg):
+def _summarize(scope, rows, now, cfg, *, reviewer=False):
     events = [{**dict(row), "details": json.loads(row["details"])} for row in rows]
     by_kind = {kind: [e for e in events if e["kind"] == kind] for kind in KINDS}
     last = {kind: (group[-1]["at"] if group else None) for kind, group in by_kind.items()}
@@ -214,7 +264,7 @@ def _summarize(scope, rows, now, cfg):
     if feedback:
         value = {"useful": "explicitly_useful", "acted_on": "explicitly_acted_on", "dismissed": "explicitly_dismissed"}.get(feedback[-1]["details"].get("verdict"), "unverified")
     summary = {"scope_id": scope["id"], "project_path": scope["project_path"], "agent": scope["agent"],
-               "session_id": scope["session_id"], "active": active,
+               "session_id": scope["session_id"], "active": active, "reviewer_registered": reviewer,
                "activity_evidence": "native_observed" if any(e["details"].get("source") == "native" for e in activity) else "reported" if all_activity else "not_observed",
                "last": {k: _iso(v) for k, v in last.items()},
                "counts": {k: len(v) for k, v in by_kind.items()}, "value": value,
@@ -227,7 +277,7 @@ def _summarize(scope, rows, now, cfg):
                       "diagnostic": _diagnostic()})
     # Reported activity can accompany real review/queue/feedback failures.
     # Only independently observed activity supports missed-hook/use claims.
-    if native_active:
+    if native_active and not reviewer:
         first_active = activity[-1]["at"]
         for before, after in zip(reversed(activity[:-1]), reversed(activity[1:])):
             if after["at"] - before["at"] > cfg["active_seconds"] or not before["details"].get("active", True):
@@ -313,9 +363,11 @@ def check_health(now=None, notify=False):
                           "scope": {"project_path": None, "agent": agent, "session_id": None},
                           "evidence": evidence, "diagnostic": _diagnostic()})
     with _db() as conn:
+        reviewers = _reviewer_registry(conn)
         for scope in conn.execute("SELECT * FROM scopes ORDER BY last_seen DESC LIMIT 1000").fetchall():
             rows = conn.execute("SELECT * FROM (SELECT * FROM events WHERE scope_id=? AND at<=? ORDER BY at DESC,id DESC LIMIT 5000) ORDER BY at,id", (scope["id"], now)).fetchall()
-            summary, issues = _summarize(scope, rows, now, cfg)
+            reviewer = (scope["agent"], scope["session_id"], scope["project_path"]) in reviewers
+            summary, issues = _summarize(scope, rows, now, cfg, reviewer=reviewer)
             summaries.append(summary)
             found.extend(issues)
         current = {issue["id"] for issue in found}
@@ -355,17 +407,26 @@ def status():
     now, cfg = _time(), settings()
     summaries = []
     with _db() as conn:
+        reviewers = _reviewer_registry(conn)
         for scope in conn.execute("SELECT * FROM scopes ORDER BY last_seen DESC LIMIT 1000").fetchall():
             rows = conn.execute("SELECT * FROM (SELECT * FROM events WHERE scope_id=? AND at<=? ORDER BY at DESC,id DESC LIMIT 5000) ORDER BY at,id", (scope["id"], now)).fetchall()
-            summary, _ = _summarize(scope, rows, now, cfg)
+            reviewer = (scope["agent"], scope["session_id"], scope["project_path"]) in reviewers
+            summary, _ = _summarize(scope, rows, now, cfg, reviewer=reviewer)
             summaries.append(summary)
         row = conn.execute("SELECT value FROM meta WHERE key='last_check'").fetchone()
         from .supervisor_notifications import inbox_snapshot, transport_snapshot
         notification = {"unread_count": inbox_snapshot(conn)["unread_count"],
                         "transports": transport_snapshot(conn, cfg)}
     previous = json.loads(row[0]) if row else {}
+    issues = []
+    for issue in previous.get("issues", []):
+        scope = issue.get("scope", {})
+        if issue.get("code") in {"missing_hooks", "missing_use"} and (
+                scope.get("agent"), scope.get("session_id"), scope.get("project_path")) in reviewers:
+            continue
+        issues.append(issue)
     return {"enabled": cfg["enabled"], "mail_enabled": cfg["mail_enabled"], "desktop_enabled": cfg["desktop_enabled"],
-            **notification, "sessions": summaries, "issues": previous.get("issues", []),
+            **notification, "sessions": summaries, "issues": issues,
             "coverage": previous.get("coverage", {}), "checked_at": previous.get("checked_at"),
             "monitor": ("stale" if now - _time(previous["checked_at"]) > 180 else "checked") if row else "not_observed"}
 

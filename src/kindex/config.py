@@ -5,10 +5,10 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 
 # ── Config-resolution test seam (V1, AMENDMENT 1 contract) ──────────────
@@ -236,6 +236,14 @@ class AgentOverrideConfig(BaseModel):
     hooks: dict[str, Any] = Field(default_factory=dict)
 
 
+    @field_validator("sim")
+    @classmethod
+    def validate_sim_override(cls, value):
+        # Validate partial overlays using the same schema as root settings.
+        validated = SimConfig(**value)
+        return {key: getattr(validated, key, item) for key, item in value.items()}
+
+
 class AgentInstanceConfig(AgentOverrideConfig):
     """Instance-scoped overrides, optionally tied to a specific client."""
     client: str = ""
@@ -457,6 +465,13 @@ class SimConfig(BaseModel):
     decision) self-assess `stakes` and may recommend — or, if `advocate.enabled`,
     run — a deeper Advocate/Helland review.
     """
+    backend: Literal["api", "antigravity", "codex", "claude"] = "api"
+    agent_model: str = ""
+    agent_effort: Literal["low", "medium", "high"] = "low"
+    max_conversation_reviews: int = Field(default=100, ge=1, strict=True)
+    max_daily_reviews: int = Field(default=500, ge=1, strict=True)
+    agent_timeout: int = Field(default=90, ge=1, le=3600, strict=True)
+    budget_warning_fraction: float = Field(default=0.8, gt=0, lt=1, allow_inf_nan=False)
     enabled: bool = False
     tick_interval: int = 6          # enqueue a review roughly every ~6 ticks
     threshold: float = 0.7          # self-rating at/above this injects (0.0-1.0)
