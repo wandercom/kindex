@@ -22,13 +22,15 @@ conversation allowance for important work:
 ```sh
 kin agent-config set sim.tick_interval 3 --client codex --scope instance --instance SESSION_ID --global
 kin agent-config set sim.max_conversation_cost 3 --client codex --scope instance --instance SESSION_ID --global
-kin agent-config show --client codex --instance SESSION_ID --global --json
+kin agent-config show --client codex --instance SESSION_ID --config ~/.config/kindex/kin.yaml --json
 ```
 
 For casual conversation, the same commands can set the interval to `30` and the
 conversation allowance to `0.10`. These are examples, not built-in modes. Change
 either setting independently at any time; the next hook reads the updated user
 configuration. Already admitted reviews retain their configuration snapshot.
+The explicit config path in `show` avoids project layering; `--global` selects
+the write destination for `set` but does not restrict configuration reads.
 Changing the allowance does not reset recorded spending, so lowering it below
 what the conversation already spent stops further reviews.
 
