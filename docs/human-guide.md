@@ -459,7 +459,7 @@ Before calling a release done, verify each public surface:
 python3 -m pytest
 mcp-publisher validate server.json
 git describe --tags --exact-match HEAD
-gh release view vX.Y.Z --repo jmcentire/kindex
+gh release view vX.Y.Z --repo wandercom/kindex
 python3 -m pip index versions kindex
 curl -fsSL https://kindex.tools/ | grep 'vX.Y.Z'
 curl -fsSL https://kindex.tools/.well-known/mcp/server-card.json | grep 'X.Y.Z'

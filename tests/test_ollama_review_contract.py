@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date
+import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
@@ -35,6 +36,54 @@ NOTE = "Preserve the durable attempt before changing the queue schema."
 GOOD = json.dumps({"rating": 0.91, "note": NOTE, "basis": "local evidence"})
 MODEL = "local-review"
 LATEST = MODEL + ":latest"
+
+
+LOCK_CONTENTION_PROBE = r'''
+import json
+import sys
+import time
+from unittest.mock import patch
+
+from kindex.config import Config
+from kindex import ollama_review, supervisor
+from kindex.store import Store
+
+request = json.load(sys.stdin)
+cfg = Config(**request["config"])
+conversation = request["conversation"]
+work = request["work"]
+scope = {
+    "session_id": conversation,
+    "agent": "codex",
+    "project_path": request["project_path"],
+}
+
+started = time.monotonic()
+preflight = ollama_review.preflight(cfg, conversation)
+after_preflight = time.monotonic()
+review = ollama_review.run_review(cfg, conversation, work)
+after_review = time.monotonic()
+store = Store(cfg)
+try:
+    with patch("kindex.sim.spawn_background_drain", return_value=False), \
+         patch("kindex.supervisor.record_health", return_value=None):
+        hook = supervisor.supervisor_tick(
+            store, cfg, scope, text=work, event_id="lock-contention-hook", goal=work)
+finally:
+    store.close()
+finished = time.monotonic()
+print("OLLAMA_LOCK_PROBE=" + json.dumps({
+    "preflight": preflight,
+    "review": review,
+    "hook": hook,
+    "durations": {
+        "preflight": after_preflight - started,
+        "review": after_review - after_preflight,
+        "hook": finished - after_review,
+        "total": finished - started,
+    },
+}))
+'''
 
 
 def _local_model(name=LATEST, **changes):
@@ -522,6 +571,91 @@ def test_o3_legacy_shared_allowance_counts_block_ollama_before_http(tmp_path, lo
     assert _allowance(cfg, conversation)["conversation"]["used"] == 1
 
 
+def test_o3_allowance_lock_contention_is_bounded_without_http_or_false_reservation(
+        tmp_path, loopback_servers):
+    server = loopback_servers()
+    cfg = _config(tmp_path / "data", server.base_url, agent_timeout=1,
+                  max_conversation_reviews=5, max_daily_reviews=10)
+    conversation = "allowance-lock-contention"
+    project = tmp_path / "project"
+    project.mkdir()
+    lock_path = cfg.data_path / "subscription-review" / "allowances.lock"
+    lock_path.parent.mkdir(parents=True, mode=0o700)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fd_box = [fd]
+    released = threading.Event()
+    release_guard = threading.Lock()
+
+    def release_lock():
+        with release_guard:
+            if fd_box[0] is None:
+                return
+            try:
+                fcntl.flock(fd_box[0], fcntl.LOCK_UN)
+            finally:
+                os.close(fd_box[0])
+                fd_box[0] = None
+                released.set()
+
+    # A defective blocking implementation still releases before it can hang the
+    # suite indefinitely.  The assertions below require completion before this.
+    rescue = threading.Timer(4.5, release_lock)
+    rescue.daemon = True
+    rescue.start()
+    home = tmp_path / "probe-home"
+    env = {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "KIN_HEALTH_DIR": str(tmp_path / "probe-health"),
+        "PYTHONPATH": os.environ.get("PYTHONPATH", os.pathsep.join((
+            str(Path(__file__).resolve().parents[1] / "src"),
+            str(Path(__file__).resolve().parents[1])))),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-c", LOCK_CONTENTION_PROBE], cwd=project, env=env,
+        text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    request = json.dumps({
+        "config": cfg.model_dump(mode="json"),
+        "conversation": conversation,
+        "work": WORK,
+        "project_path": str(project),
+    })
+    try:
+        output, errors = process.communicate(request, timeout=7)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        output, errors = process.communicate(timeout=2)
+        pytest.fail("Allowance contention hung beyond rescue deadline: " + output + errors)
+    finally:
+        rescue.cancel()
+        release_lock()
+    assert process.returncode == 0, output + errors
+    reports = [json.loads(line[len("OLLAMA_LOCK_PROBE="):])
+               for line in output.splitlines() if line.startswith("OLLAMA_LOCK_PROBE=")]
+    assert len(reports) == 1, output + errors
+    report = reports[0]
+    assert released.is_set()
+    assert report["durations"]["total"] < 4.5, report
+    assert report["durations"]["preflight"] < 1.75, report
+    assert report["durations"]["review"] < 1.75, report
+    assert report["durations"]["hook"] < 1.75, report
+    assert report["preflight"] is not None
+    _assert_failed(report["review"])
+    assert isinstance(report["hook"], dict), report
+    assert server.requests == [], "Lock contention must fail before model metadata or prompt I/O"
+    observed = _allowance(cfg, conversation)
+    assert observed["conversation"]["used"] == 0
+    assert observed["day"]["used"] == 0
+
+
 @pytest.mark.parametrize("api_state", ["exhausted", "corrupt"])
 def test_o3_api_dollar_ledger_state_is_ignored_and_unchanged(tmp_path, loopback_servers, api_state):
     server = loopback_servers()
@@ -682,6 +816,27 @@ def test_o5_per_conversation_override_and_admitted_queue_snapshot_are_pinned(
         assert drained["reviewed"] == 1, drained
         assert len(_requests(old, "POST")) == 1
         assert new.requests == []
+    finally:
+        store.close()
+
+
+def test_o3_o4_queue_receipt_persists_raw_ollama_usage_with_zero_cost(
+        tmp_path, loopback_servers):
+    server = loopback_servers()
+    cfg = _config(tmp_path / "data", server.base_url)
+    conversation = "persisted-ollama-usage"
+    store = Store(cfg)
+    try:
+        assert sim.enqueue_sim_review(store, cfg, conversation, WORK, tick=1, intent=WORK)
+        drained = sim.drain_sim_queue(store, cfg)
+        assert drained["reviewed"] == 1, drained
+        raw = store.get_meta("sim.receipt." + conversation)
+        assert raw, "Completed queue review must publish its durable receipt"
+        receipt = json.loads(raw)
+        saved = receipt["result"]
+        assert saved["tokens_in"] == 17
+        assert saved["tokens_out"] == 9
+        assert saved["cost"] == 0
     finally:
         store.close()
 

@@ -249,3 +249,19 @@ Install host adapters with `kin setup-hooks --mode modern` (qualified Claude ver
 `python3 -m kindex.supervisor_health install` enables the independent macOS checker. Sustained issues enter a private durable inbox; native desktop alerts are enabled by default while root mail remains off. No Postfix setup is required. Read `python3 -m kindex.supervisor_health inbox --json`; acknowledge an occurrence with `python3 -m kindex.supervisor_health ack --id ALERT_ID --json`. Acknowledgment does not resolve the underlying issue. Delivery acceptance is not human reading or usefulness; explicit `feedback --project PATH --agent HOST --session ID --verdict useful|acted_on|dismissed` records that distinction. See https://kindex.tools/supervisor-health.md for configuration and qualification boundaries.
 
 Project hooks and MCP use one durable store resolver and preserve conflicting populated stores. Explicit personal/company scopes remain separate. Kinbase imports preserve signed source bytes and distinguish raw evidence from reduced snapshots; schema 13 adds provenance-limited standing. Atomic JSON/JSONL graph transfer retains lifecycle and source identity without importing local verification authority. Shared exports scrub private paths and nested contact data. Doctor verifies actual FTS postings and repairs transactionally.
+
+
+## v0.38.0 Installed-client and Offline Reviews
+
+Trusted `sim.backend` selects `api`, `antigravity`, `codex`, `claude`, or `ollama`.
+Disable periodic reviews with `sim.enabled: false`. Native clients use their
+subscription login and explicitly resume per-conversation native session IDs.
+Offline Ollama reviews require an explicit installed local model in
+`sim.ollama_model` and a loopback `sim.ollama_url`; cloud-backed entries are refused.
+No backend silently falls back to a cloud API. Native-client and Ollama reviews
+share durable `sim.max_conversation_reviews` and `sim.max_daily_reviews` attempt
+limits and low-allowance notices. API reviews retain separate dollar budgets.
+Settings and cadence can be adjusted for a running conversation using trusted
+`kin agent-config` overrides; admitted work keeps its configuration snapshot.
+The canonical MCP Registry listing is `io.github.wandercom/kindex`.
+See https://kindex.tools/supervisor-health.md for setup, controls, and boundaries.

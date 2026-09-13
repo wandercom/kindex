@@ -303,6 +303,8 @@ def preflight(config, conversation_id: str) -> tuple[str, str] | None:
     from .subscription_review import allowance_status
     try:
         status = allowance_status(config, conversation_id)
+    except TimeoutError:
+        return "unavailable", "ollama_timeout"
     except (OSError, ValueError, TypeError):
         return "unavailable", "review_accounting_unavailable"
     if any(status[name]["remaining"] <= 0 for name in ("conversation", "day")):
@@ -325,8 +327,10 @@ def run_review(config, conversation_id: str, prompt: str) -> dict[str, Any]:
     deadline = time.monotonic() + config.sim.agent_timeout
     try:
         from .subscription_review import reserve_attempt
-        reservation = reserve_attempt(config, conversation_id)
+        reservation = reserve_attempt(config, conversation_id, deadline=deadline)
         if reservation.get("status") != "ok":
+            if reservation.get("status") == "review_lock_timeout":
+                return {"status": "ollama_timeout"}
             return reservation
         verified_model = _verified_model(endpoint, model, deadline)
         response = _request(endpoint, "POST", "/api/chat", {

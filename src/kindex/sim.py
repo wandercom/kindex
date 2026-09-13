@@ -512,6 +512,12 @@ def call_sim(
             return None, accounting
         parsed = _parse_sim(accounting.get("response", ""))
         result = _result_from_parsed(parsed) if isinstance(parsed.get("note"), str) else None
+        usage = accounting.get("usage")
+        if result is not None and isinstance(usage, dict):
+            for field, key in (("tokens_in", "prompt_eval_count"), ("tokens_out", "eval_count")):
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    setattr(result, field, value)
         accounting = {**accounting, "status": "ok" if result is not None else "invalid_output"}
         return result, accounting
 
