@@ -6,6 +6,7 @@ import argparse
 import datetime
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -1406,18 +1407,19 @@ def cmd_doctor(args):
 
     # ── FTS5 sync check ──
     try:
-        fts_count = store.conn.execute(
-            "SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
-        node_count = stats["nodes"]
-        if fts_count != node_count:
-            issues.append(f"FTS5 index out of sync: {fts_count} indexed vs {node_count} nodes")
-            if do_fix:
-                store.conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
-                store.conn.commit()
+        store.check_fts_integrity()
+    except sqlite3.DatabaseError as exc:
+        issues.append(f"FTS5 index integrity check failed: {exc}")
+        if do_fix:
+            try:
+                with store.conn:
+                    store.conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+                    store.check_fts_integrity()
+            except sqlite3.DatabaseError as repair_exc:
+                issues[-1] += f" (FIX FAILED: {repair_exc})"
+            else:
                 fixes_applied += 1
                 issues[-1] += " (FIXED: rebuilt FTS5)"
-    except Exception:
-        warnings.append("Could not check FTS5 index health")
 
     # ── Dangling edges ──
     dangling = store.conn.execute(
@@ -1488,38 +1490,8 @@ def cmd_doctor(args):
                 if cross_pct < 0.10:
                     warnings.append(
                         f"Low cross-domain bridging: {cross_domain}/{total_edges_g} edges "
-                        f"({cross_pct:.0%}) cross domain boundaries (< 10%)")
-                    if do_fix:
-                        # Suggest edges between nodes in different domains
-                        import random
-                        domain_nodes: dict[str, list[str]] = {}
-                        for nid, doms in domain_sets.items():
-                            for d in doms:
-                                domain_nodes.setdefault(d, []).append(nid)
-                        dom_list = list(domain_nodes.keys())
-                        suggested = 0
-                        for i in range(len(dom_list)):
-                            for j in range(i + 1, len(dom_list)):
-                                pool_a = domain_nodes[dom_list[i]]
-                                pool_b = domain_nodes[dom_list[j]]
-                                if pool_a and pool_b:
-                                    a = random.choice(pool_a)
-                                    b = random.choice(pool_b)
-                                    a_title = G.nodes[a].get("title", a)
-                                    b_title = G.nodes[b].get("title", b)
-                                    store.add_suggestion(
-                                        a_title, b_title,
-                                        reason=f"Cross-domain bridge: {dom_list[i]} <-> {dom_list[j]}",
-                                        source="doctor --fix",
-                                    )
-                                    suggested += 1
-                                    if suggested >= 5:
-                                        break
-                            if suggested >= 5:
-                                break
-                        if suggested:
-                            warnings[-1] += f" (suggested {suggested} bridge edges — see `kin suggest`)"
-                            fixes_applied += 1
+                        f"({cross_pct:.0%}) cross domain boundaries (< 10%) — "
+                        "run `kin dream` to discover connections")
 
     # ── Trailhead coverage ──
     if stats["nodes"] > 10 and stats["edges"] >= 4:
