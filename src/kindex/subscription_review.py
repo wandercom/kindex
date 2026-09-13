@@ -187,6 +187,29 @@ def allowance_status(config, conversation_id):
         return _status(config, _counts(root), conversation_id)
 
 
+def reserve_attempt(config, conversation_id):
+    """Atomically reserve one durable local-review attempt.
+
+    Native subscription clients and Ollama share this existing allowance ledger.
+    Reservations are retained when a provider fails, preventing retry loops from
+    bypassing the conversation and UTC-day limits.
+    """
+    try:
+        root = _root(config)
+        key = _key(conversation_id)
+        with _lock(root / "allowances.lock"):
+            counts = _counts(root)
+            status = _status(config, counts, conversation_id)
+            if any(status[name]["remaining"] <= 0 for name in ("conversation", "day")):
+                return {"status": "review_budget_exhausted", "allowance": status}
+            counts.conversations[key] = status["conversation"]["used"] + 1
+            counts.days[status["day_id"]] = status["day"]["used"] + 1
+            _write(root / "allowances.json", counts)
+            return {"status": "ok", "allowance": _status(config, counts, conversation_id)}
+    except (OSError, ValueError, TypeError):
+        return {"status": "review_accounting_unavailable"}
+
+
 def preflight(config, conversation_id):
     try:
         status = allowance_status(config, conversation_id)
@@ -220,14 +243,9 @@ def run_review(config, conversation_id, prompt):
             # Adopt its durable checkpoint only for a freshly dispatched sim job.
             receipt = _adopt_native(workspace, receipt)
             session_id = receipt.session_id
-            with _lock(root / "allowances.lock"):
-                counts = _counts(root)
-                status = _status(config, counts, conversation_id)
-                if any(status[name]["remaining"] <= 0 for name in ("conversation", "day")):
-                    return {"status": "review_budget_exhausted", "allowance": status}
-                counts.conversations[key] = status["conversation"]["used"] + 1
-                counts.days[status["day_id"]] = status["day"]["used"] + 1
-                _write(root / "allowances.json", counts)
+            reservation = reserve_attempt(config, conversation_id)
+            if reservation.get("status") != "ok":
+                return reservation
             receipt = SessionReceipt(backend=backend, conversation=key, session_id=session_id,
                                      status="completion_unknown")
             _write(workspace / "session.json", receipt)

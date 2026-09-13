@@ -465,9 +465,11 @@ class SimConfig(BaseModel):
     decision) self-assess `stakes` and may recommend — or, if `advocate.enabled`,
     run — a deeper Advocate/Helland review.
     """
-    backend: Literal["api", "antigravity", "codex", "claude"] = "api"
+    backend: Literal["api", "antigravity", "codex", "claude", "ollama"] = "api"
     agent_model: str = ""
     agent_effort: Literal["low", "medium", "high"] = "low"
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = ""
     max_conversation_reviews: int = Field(default=100, ge=1, strict=True)
     max_daily_reviews: int = Field(default=500, ge=1, strict=True)
     agent_timeout: int = Field(default=90, ge=1, le=3600, strict=True)

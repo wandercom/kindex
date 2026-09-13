@@ -5364,9 +5364,11 @@ def cmd_sim(args):
             print("Error: sim check needs --text or a window on stdin", file=sys.stderr)
             store.close()
             sys.exit(1)
-        from .budget import BudgetLedger
         from .sim import _capture_intent, build_sim_grounding, get_sim_guidance
-        ledger = BudgetLedger(cfg.ledger_path, cfg.budget)
+        ledger = None
+        if cfg.sim.backend == "api":
+            from .budget import BudgetLedger
+            ledger = BudgetLedger(cfg.ledger_path, cfg.budget)
         grounding = build_sim_grounding(store, text, cfg)
         result, acct = call_sim(
             cfg, ledger, text, "sim-check", client=None,

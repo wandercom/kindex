@@ -137,6 +137,9 @@ def _transcript(path: str, limit: int) -> tuple[str, str]:
 
 def preflight(config, conversation: str) -> tuple[str, str] | None:
     """Cheap known-unavailable checks; the worker repeats all spend gates."""
+    if config.sim.backend == "ollama":
+        from .ollama_review import preflight as ollama_preflight
+        return ollama_preflight(config, conversation)
     if config.sim.backend != "api":
         from .subscription_review import preflight as subscription_preflight
         return subscription_preflight(config, conversation)

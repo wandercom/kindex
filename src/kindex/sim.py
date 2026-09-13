@@ -251,7 +251,8 @@ def sim_status(store: "Store", config: Config) -> dict:
         "threshold": config.sim.threshold,
         "tick_interval": config.sim.tick_interval,
         "backend": config.sim.backend,
-        "model": (config.sim.model or config.llm.model) if config.sim.backend == "api" else config.sim.agent_model,
+        "model": ((config.sim.model or config.llm.model) if config.sim.backend == "api" else
+                  config.sim.ollama_model if config.sim.backend == "ollama" else config.sim.agent_model),
         "command": config.sim.command or "(LLM supervisor)",
         "guidance": get_sim_guidance(store) or "(none)",
         "triage_banter": bool(config.sim.triage_banter),
@@ -482,7 +483,7 @@ def _parse_sim(text: str) -> dict[str, Any]:
 
 def call_sim(
     config: Config,
-    ledger: BudgetLedger,
+    ledger: BudgetLedger | None,
     window: str,
     conversation_id: str,
     *,
@@ -504,6 +505,16 @@ def call_sim(
         window, sc.window_chars, guidance=guidance, grounding=grounding, intent=intent
     )
 
+    if sc.backend == "ollama":
+        from .ollama_review import run_review
+        accounting = run_review(config, conversation_id, redact_text(prompt))
+        if accounting.get("status") != "ok":
+            return None, accounting
+        parsed = _parse_sim(accounting.get("response", ""))
+        result = _result_from_parsed(parsed) if isinstance(parsed.get("note"), str) else None
+        accounting = {**accounting, "status": "ok" if result is not None else "invalid_output"}
+        return result, accounting
+
     if sc.backend != "api":
         from .subscription_review import run_review
         accounting = run_review(config, conversation_id, redact_text(prompt))
@@ -514,6 +525,8 @@ def call_sim(
         accounting = {**accounting, "status": "ok" if result is not None else "invalid_output"}
         return result, accounting
 
+    if ledger is None:
+        ledger = BudgetLedger(config.ledger_path, config.budget)
     if not ledger.can_spend():
         return None, {"status": "over_global_budget"}
 
