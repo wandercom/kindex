@@ -287,6 +287,13 @@ changes or usage falls below the threshold.
 
 Native resume IDs are stored separately for each resolved project data directory,
 conversation, and backend, and reused explicitly across tmux process restarts.
+Review prompts travel through stdin, including Antigravity's streaming input.
+Claude emits streaming initialization so its native ID can be checkpointed before
+a turn completes. A native client can emit an ID before saving its conversation;
+if interrupted in that window, an exact resume can still fail. Kindex retains the
+ID and reports the failure without silently creating a replacement session.
+Persisted records are schema-validated, and optional health
+registration failures do not discard a valid review or its native checkpoint.
 Review scratch files are private; each native process has a closed environment
 without ambient API keys and a bounded runtime and output. Native tool controls,
 restricted customizations, and a dedicated Antigravity agent reduce the available
