@@ -35,7 +35,7 @@ standards:
     - SQLite migrations are forward-only, atomic, and verify COLUMNS not just tables
     - MCP tools match CLI capabilities
   documentation:
-    - Canonical site at kindex.tools with mirror at jmcentire.github.io/kindex/
+    - Canonical site at kindex.tools with mirror at wandercom.github.io/kindex/
 
 connects_to:
   - pact
