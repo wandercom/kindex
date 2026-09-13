@@ -245,7 +245,7 @@ def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial
 def hook_request(payload: dict, adapter: str, *, config=None, project_path=None) -> dict:
     from .attention import extract_conversation_text, resolve_conversation_id
     from .integrations import open_project_store, project_scope
-    from .agent_settings import apply_agent_overrides
+    from .agent_settings import apply_agent_overrides, resolve_agent_instance_key
     from .store import Store
     # Explicitly disabled callers do not need a Git worktree or a session.
     # Read an existing override only; the disabled check must not create a DB.
@@ -307,7 +307,8 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
                                                     payload.get("project_path") or os.getcwd()).resolve())})
     store = Store(config) if config is not None else open_project_store(scope)
     try:
-        cfg = apply_agent_overrides(config or store.config, client=adapter, instance_key=sid)
+        instance_key = resolve_agent_instance_key(adapter, explicit=sid)
+        cfg = apply_agent_overrides(config or store.config, client=adapter, instance_key=instance_key)
         text = extract_conversation_text(None, payload)
         event_id = payload.get("event_id")
         if adapter == "cursor":

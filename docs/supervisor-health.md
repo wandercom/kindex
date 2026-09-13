@@ -12,6 +12,36 @@ configuration cannot select supervisor executables or override its spending poli
 The default cadence is six eligible events, not six wall-clock minutes. Review work
 runs in a detached worker; a subsequent host event picks up a fresh result.
 
+### Adjust one conversation while it is running
+
+Use the host's raw session ID with `--scope instance`. Supervisor overrides must
+be written to trusted user configuration with `--global`; project YAML cannot
+authorize review spending. For example, increase review frequency and the total
+conversation allowance for important work:
+
+```sh
+kin agent-config set sim.tick_interval 3 --client codex --scope instance --instance SESSION_ID --global
+kin agent-config set sim.max_conversation_cost 3 --client codex --scope instance --instance SESSION_ID --global
+kin agent-config show --client codex --instance SESSION_ID --global --json
+```
+
+For casual conversation, the same commands can set the interval to `30` and the
+conversation allowance to `0.10`. These are examples, not built-in modes. Change
+either setting independently at any time; the next hook reads the updated user
+configuration. Already admitted reviews retain their configuration snapshot.
+Changing the allowance does not reset recorded spending, so lowering it below
+what the conversation already spent stops further reviews.
+
+The interval counts eligible host events, including tool events where the host
+emits them; it is not a number of messages or a timer. Trivial windows may be
+skipped, and quiet reviews do not produce an interruption.
+
+`budget.daily`, `budget.weekly`, and `budget.monthly` also constrain reviews. They
+apply to each store's ledger, not a machine-wide total across project stores.
+The conversation allowance is cumulative across days. Native LLM reviews record
+token-based costs; external commands reserve their configured allowance per
+attempt, including failed attempts.
+
 The diligence check asks for a small representative pilot with an explicit expected
 outcome before increasing concurrency or committing a long run. Progress must be
 measured against that outcome: for example, the unclassified count decreases and
