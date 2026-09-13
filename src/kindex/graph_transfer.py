@@ -31,8 +31,8 @@ LIFECYCLE_KEYS = (
 def scrub_shared_text(value: str) -> str:
     """Remove contact and machine-path prose while retaining evidence URLs."""
     value = re.sub(r'\S+@\S+\.\S+', '[email]', value)
-    return re.sub(r'''https?://[^\s"'<>]+|(?<![\w:/\\])(?:[A-Za-z]:|\\\\|//|/(?!/)|~/)[^\s"'<>]+''',
-                  lambda match: match[0] if match[0].startswith(("https://", "http://")) else "[path]", value)
+    return re.sub(r'''https?://[^\s"'<>]+|(?<![\w+.-])file:[^\s"'<>]+|(?<![\w:/\\])(?:[A-Za-z]:|\\\\|//|/(?!/)|~/)[^\s"'<>]+''',
+                  lambda match: match[0] if match[0].lower().startswith(("https://", "http://")) else "[path]", value, flags=re.IGNORECASE)
 
 
 def scrub_kinbase_metadata(metadata: dict) -> dict:
@@ -43,6 +43,10 @@ def scrub_kinbase_metadata(metadata: dict) -> dict:
     def collect(value):
         if isinstance(value, dict):
             candidates = [value.get(key) for key in ("logical_key", "source_identity", "repo")]
+            # Association keys can themselves be local evidence identities.
+            # Hash them with their exact references rather than collapsing
+            # distinct keys to the same generic [path] replacement.
+            candidates.extend(value.keys())
             if isinstance(value.get("evidence_refs"), list):
                 candidates.extend(value["evidence_refs"])
             for key in candidates:
@@ -136,10 +140,16 @@ def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, publi
                 binding = {k: v for k, v in binding.items() if k in
                            ("path", "url", "content_digest", "digest_scope", "path_redacted", "url_redacted")}
                 container[key] = binding
-            if isinstance(binding, dict) and PureWindowsPath(binding.get("path", "")).anchor:
+            if isinstance(binding, dict) and (PureWindowsPath(binding.get("path", "")).anchor
+                                               or urlsplit(binding.get("path", "")).scheme.lower() == "file"):
                 binding = dict(binding)
                 binding.pop("path")
                 binding["path_redacted"] = True
+                container[key] = binding
+            if isinstance(binding, dict) and urlsplit(binding.get("url", "")).scheme.lower() == "file":
+                binding = dict(binding)
+                binding.pop("url")
+                binding["url_redacted"] = True
                 container[key] = binding
     return redact(record)
 

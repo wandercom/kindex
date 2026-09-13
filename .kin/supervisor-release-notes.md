@@ -5,6 +5,9 @@ Antigravity, and Cursor. Review state distinguishes disabled, unavailable,
 budget-suppressed, queued, failed, quiet-completed and delivered outcomes.
 Project hooks and MCP use one durable project-store resolver; conflicting stores
 are diagnosed and preserved. Explicit personal and company scopes stay separate.
+An implicit default reports ambiguity when a new project store would hide a
+populated home graph. Explicit project, profile, and data-directory choices keep
+their intended scope. Modern Claude review windows are isolated per session.
 
 Reviews compare the goal with recent actions and validation evidence, including
 small representative pilots and durable progress across restart or rebuild.

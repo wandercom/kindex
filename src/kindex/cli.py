@@ -63,25 +63,13 @@ def _config(args):
             getattr(args, "config", None),
             project_path=getattr(args, "project_path", None),
             profile=getattr(args, "profile", None),
+            data_dir=getattr(args, "data_dir", None),
         )
     except ValueError as e:
         # Unknown profile (or otherwise invalid config) — fail clearly
         # instead of dumping a traceback or falling through to legacy.
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
-    if getattr(args, "data_dir", None):
-        if cfg.active_profile:
-            # Explicit --data-dir overriding a profile-resolved data_dir:
-            # never stamp an unstamped database with the active profile
-            # (an existing mismatched stamp still hard-refuses in Store).
-            try:
-                same = (Path(args.data_dir).expanduser().resolve()
-                        == Path(cfg.data_dir).expanduser().resolve())
-            except (OSError, ValueError):
-                same = False
-            if not same:
-                cfg._stamp_on_open = False
-        cfg.data_dir = args.data_dir
     return cfg
 
 

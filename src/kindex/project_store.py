@@ -17,6 +17,33 @@ _DURABLE_TABLES = (
 )
 
 
+def database_has_durable_work(path: Path) -> bool:
+    """Inspect existing work without constructing a Store or creating a DB."""
+    if not path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if any(table in tables and conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                   for table in _DURABLE_TABLES):
+                return True
+            return "meta" in tables and bool(conn.execute(
+                "SELECT 1 FROM meta WHERE key LIKE 'task.%' OR key LIKE 'sim.%' "
+                "OR key LIKE 'supervisor.%' OR key LIKE 'attention.%' OR key LIKE 'reinforce.%' "
+                "OR key = 'embed.queue' LIMIT 1").fetchone())
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise ValueError(f"Cannot inspect Kindex database {path}; repair it before selecting a store") from exc
+
+
+def durable_store_paths(directory: Path) -> list[Path]:
+    """Return populated physical databases in an existing store directory."""
+    return [path for name in ("kindex.db", "conv.db")
+            if database_has_durable_work(path := directory / name)]
+
+
 def project_data_path(root: Path) -> Path:
     root = root.resolve()
     local = root / ".kin" / "local"
@@ -33,23 +60,7 @@ def project_data_path(root: Path) -> Path:
                 leaf = Path(str(path) + suffix)
                 if leaf.is_symlink() or (leaf.exists() and leaf.stat().st_nlink > 1):
                     raise ValueError("Refusing linked repo-local Kindex database")
-            if not path.exists():
-                continue
-            try:
-                conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.25)
-                try:
-                    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    for table in _DURABLE_TABLES:
-                        if table in tables and conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
-                            has_data = True
-                            break
-                    # Receipts and queued work can also live outside node tables.
-                    if "meta" in tables:
-                        has_data |= bool(conn.execute("SELECT 1 FROM meta WHERE key LIKE 'task.%' OR key LIKE 'sim.%' OR key LIKE 'supervisor.%' OR key LIKE 'attention.%' OR key LIKE 'reinforce.%' OR key = 'embed.queue' LIMIT 1").fetchone())
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                raise ValueError(f"Cannot inspect repo-local database {path}; repair it before selecting a store") from exc
+            has_data |= database_has_durable_work(path)
         if has_data:
             populated.append(directory)
     if len(populated) > 1:

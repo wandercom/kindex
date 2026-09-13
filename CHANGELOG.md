@@ -24,6 +24,10 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Project hooks and MCP resolve the same durable project store; conflicting
   populated stores are diagnosed and preserved instead of silently selecting an
   empty graph. Explicit personal and company scopes remain separate.
+- Implicit home/project ambiguity requires an explicit scope selection. Modern
+  Claude sessions reset their review windows and fence stale asynchronous work.
+- Shared graph exports redact local `file:` URLs, including nested metadata and
+  identity keys, while preserving HTTPS evidence and stable associations.
 - JSON/JSONL graph transfers are atomic, preserve lifecycle and provenance, and
   keep imported verification as evidence rather than granting local authority.
   Replays are idempotent; conflicting claims fail without partial writes.

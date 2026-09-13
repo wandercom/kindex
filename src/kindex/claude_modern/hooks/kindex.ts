@@ -33,17 +33,36 @@ type RpcReply = Record<string, unknown> & {
   native_result?: unknown;
 };
 
+type SessionState = {
+  current: boolean;
+  scope?: {project_path: string; session_id: string; agent: "claude"};
+  taskTool: string;
+  memoryTool: string;
+  expectedOwner?: string;
+  qualified: boolean;
+  busy: boolean;
+  recentWork: string;
+  originalGoal: string;
+};
+
+function newSession(): SessionState {
+  return {current: true, taskTool: "", memoryTool: "", qualified: false,
+    busy: false, recentWork: "", originalGoal: ""};
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // The host's capability checker requires helpers receiving $ at module scope.
-async function rpc($: EngineInterface, payload: Record<string, unknown>, expectedOwner?: string): Promise<RpcReply> {
-  const scope = {project_path: await $.session.cwd(), session_id: await $.session.id(), agent: "claude"};
+async function rpc($: EngineInterface, state: SessionState, payload: Record<string, unknown>, expectedOwner?: string): Promise<RpcReply> {
+  if (!state.current || !state.scope) throw new Error("Kindex session unavailable");
+  const scope = state.scope;
   const r = await $.process.run([...runtime.argv, "hook-rpc"], {
     cwd: scope.project_path, stdin: JSON.stringify({protocol_version: 1, scope, expected_owner: expectedOwner, ...payload}), timeoutMs: 20000,
     env: runtime.signetExecutable ? {KIN_SIGNET_EXECUTABLE: runtime.signetExecutable} : {},
   });
+  if (!state.current) throw new Error("Kindex session changed during RPC");
   if (r.exitCode !== 0 || r.stdout.length > 1024 * 1024) throw new Error("Kindex RPC unavailable");
   const value: unknown = JSON.parse(r.stdout);
   if (!isObject(value) || typeof value.ok !== "boolean") {
@@ -62,66 +81,78 @@ function degraded($: EngineInterface) {
 }
 
 export const register: Register = (on) => {
-  let taskTool = "";
-  let memoryTool = "";
-  let expectedOwner: string | undefined;
-  let qualified = false;
-  let busy = false;
-  let recentWork = "";
-  let originalGoal = "";
+  let activeState = newSession();
 
   on("session.start", async ($, e, next) => {
-    qualified = false;
-    // Registering is idempotent on reload. Host assigns the actual full names.
-    taskTool = (await $.tool.register({name: "task", description: "Kindex durable repo task service. Explicit versioned operations; no ephemeral Claude task store.",
-      inputSchema: {type: "object", properties: {operation: {type: "string", enum: ["create", "get", "list", "update", "complete", "cancel", "claim", "release", "reconcile"]}, args: taskArguments}, required: ["operation", "args"], additionalProperties: false}})).tool;
-    memoryTool = (await $.tool.register({name: "memory", description: "Search repo-local Kindex knowledge or capture unreviewed evidence. Capture never creates directives or permissions.",
-      inputSchema: {type: "object", properties: {action: {type: "string", enum: ["search", "capture"]}, text: {type: "string", maxLength: 16000}}, required: ["action", "text"], additionalProperties: false}})).tool;
+    // The registration can outlive a host session. Retire its window and fence
+    // callbacks still awaiting an inner hook or an RPC from that session.
+    activeState.current = false;
+    const state = newSession();
+    activeState = state;
     try {
-      const state = await rpc($, {action: "describe"});
-      if (!state.ok || !["kindex", "signet-eval"].includes(state.policy_owner ?? "")) throw new Error("Unavailable");
-      expectedOwner = state.policy_owner;
-      qualified = true;
-      $.ui.status(`Kindex .kin/ · policy: ${expectedOwner} · host redaction not guaranteed`);
-    } catch { degraded($); }
+      const [project_path, session_id] = await Promise.all([$.session.cwd(), $.session.id()]);
+      if (!state.current) return next(e);
+      state.scope = {project_path, session_id, agent: "claude"};
+      // Registering is idempotent on reload. Host assigns the actual full names.
+      const task = await $.tool.register({name: "task", description: "Kindex durable repo task service. Explicit versioned operations; no ephemeral Claude task store.",
+        inputSchema: {type: "object", properties: {operation: {type: "string", enum: ["create", "get", "list", "update", "complete", "cancel", "claim", "release", "reconcile"]}, args: taskArguments}, required: ["operation", "args"], additionalProperties: false}});
+      if (!state.current) return next(e);
+      state.taskTool = task.tool;
+      const memory = await $.tool.register({name: "memory", description: "Search repo-local Kindex knowledge or capture unreviewed evidence. Capture never creates directives or permissions.",
+        inputSchema: {type: "object", properties: {action: {type: "string", enum: ["search", "capture"]}, text: {type: "string", maxLength: 16000}}, required: ["action", "text"], additionalProperties: false}});
+      if (!state.current) return next(e);
+      state.memoryTool = memory.tool;
+      const description = await rpc($, state, {action: "describe"});
+      if (!description.ok || !["kindex", "signet-eval"].includes(description.policy_owner ?? "")) throw new Error("Unavailable");
+      state.expectedOwner = description.policy_owner;
+      state.qualified = true;
+      $.ui.status(`Kindex .kin/ · policy: ${state.expectedOwner} · host redaction not guaranteed`);
+    } catch { if (state.current) degraded($); }
     return next(e);
   });
 
   on("prompt.context", async ($, e, next) => {
+    const state = activeState;
     const r = await next(e);
+    if (!state.current) return r;
     let advice = "";
-    if (recentWork) {
-      try {advice = (await rpc($, {action: "supervisor", text: recentWork, initial_goal: originalGoal})).context || "";}
+    if (state.recentWork) {
+      try {advice = (await rpc($, state, {action: "supervisor", text: state.recentWork, initial_goal: state.originalGoal})).context || "";}
       catch {advice = "Kindex supervisor unavailable; no fresh lookback completed.";}
     }
+    if (!state.current) return r;
     return {blocks: [...r.blocks.filter(b => !["kindex", "kindex-supervisor"].includes(b.name)),
       {name: "kindex", text: instructions}, ...(advice ? [{name: "kindex-supervisor", text: advice}] : [])]};
   });
 
   on("prompt.submit", async ($, e, next) => {
+    const state = activeState;
     // Ask inner redaction middleware first. Never persist raw prompt text here.
     const r = await next(e);
-    if (r.drop) return r;
-    originalGoal ||= r.text.slice(0, 2000);
-    recentWork = (recentWork + "\nUSER: " + r.text).slice(-12000);
+    if (!state.current || r.drop) return r;
+    state.originalGoal ||= r.text.slice(0, 2000);
+    state.recentWork = (state.recentWork + "\nUSER: " + r.text).slice(-12000);
     let supervision: RpcReply;
     try {
-      supervision = await rpc($, {action: "supervisor", text: recentWork, initial_goal: originalGoal});
+      supervision = await rpc($, state, {action: "supervisor", text: state.recentWork, initial_goal: state.originalGoal});
     } catch {
       supervision = {ok: false, context: "Kindex supervisor unavailable; no fresh lookback completed."};
     }
+    if (!state.current) return r;
     const advisory = supervision.context ? [supervision.context] : [];
     try {
-      const context = await rpc($, {action: "context", query: r.text});
+      const context = await rpc($, state, {action: "context", query: r.text});
+      if (!state.current) return r;
       if (!context.ok || !context.context) throw new Error("Unavailable");
-      if (context.policy_owner !== expectedOwner) {
-        qualified = false;
+      if (context.policy_owner !== state.expectedOwner) {
+        state.qualified = false;
         $.ui.status("Kindex policy owner changed — reload plugins to explicitly renegotiate");
       } else {
-        $.ui.status(`Kindex .kin/ · ${context.open_tasks}${context.tasks_truncated ? "+" : ""} open · ${context.retrieved} relevant · supervisor: ${isObject(supervision.supervisor) ? supervision.supervisor.state : "failed"} · policy: ${expectedOwner}`);
+        $.ui.status(`Kindex .kin/ · ${context.open_tasks}${context.tasks_truncated ? "+" : ""} open · ${context.retrieved} relevant · supervisor: ${isObject(supervision.supervisor) ? supervision.supervisor.state : "failed"} · policy: ${state.expectedOwner}`);
       }
       return {...r, context: [...(r.context ?? []), context.context, ...advisory]};
     } catch {
+      if (!state.current) return r;
       degraded($);
       return {...r, context: [...(r.context ?? []), ...advisory, "Kindex context retrieval failed this turn. Previously confirmed task writes remain durable; do not claim fresh retrieval succeeded."]};
     }
@@ -133,27 +164,29 @@ export const register: Register = (on) => {
   });
 
   on("tool.call", async ($, e, next) => {
-    if (!nativeTasks.has(e.tool) && e.tool !== taskTool && e.tool !== memoryTool) {
+    const state = activeState;
+    if (!nativeTasks.has(e.tool) && e.tool !== state.taskTool && e.tool !== state.memoryTool) {
       const result = await next(e);
-      recentWork = (recentWork + "\nTOOL " + e.tool + ": " + JSON.stringify(result).slice(-4000)).slice(-12000);
-      try {await rpc($, {action: "supervisor", text: recentWork, initial_goal: originalGoal, deliver: false});}
-      catch {$.ui.status("Kindex supervisor unavailable; no fresh lookback completed");}
+      if (!state.current) return result;
+      state.recentWork = (state.recentWork + "\nTOOL " + e.tool + ": " + JSON.stringify(result).slice(-4000)).slice(-12000);
+      try {await rpc($, state, {action: "supervisor", text: state.recentWork, initial_goal: state.originalGoal, deliver: false});}
+      catch {if (state.current) $.ui.status("Kindex supervisor unavailable; no fresh lookback completed");}
       return result;
     }
-    if (e.tool !== memoryTool && !qualified) return {deny: "Kindex task ownership is unqualified or changed. Reload plugins after running kin integration-doctor; no ephemeral fallback."};
+    if (e.tool !== state.memoryTool && !state.qualified) return {deny: "Kindex task ownership is unqualified or changed. Reload plugins after running kin integration-doctor; no ephemeral fallback."};
     try {
       const {tool, tool_use_id, ...input} = e;
       const fields: Record<string, unknown> = input;
       let result;
       if (nativeTasks.has(tool)) {
-        result = await rpc($, {action: "native-task", source_tool: tool, operation_id: tool_use_id, input: fields}, expectedOwner);
-      } else if (tool === taskTool) {
+        result = await rpc($, state, {action: "native-task", source_tool: tool, operation_id: tool_use_id, input: fields}, state.expectedOwner);
+      } else if (tool === state.taskTool) {
         if (!isObject(fields.args) || typeof fields.operation !== "string") return {deny: "Kindex task requires operation and args"};
-        result = await rpc($, {action: "task", source_tool: tool, operation: fields.operation,
-          args: {...fields.args, operation_id: fields.args.operation_id ?? tool_use_id}}, expectedOwner);
+        result = await rpc($, state, {action: "task", source_tool: tool, operation: fields.operation,
+          args: {...fields.args, operation_id: fields.args.operation_id ?? tool_use_id}}, state.expectedOwner);
       } else {
         if (typeof fields.text !== "string" || !["search", "capture"].includes(String(fields.action))) return {deny: "Kindex memory requires search/capture and text"};
-        result = await rpc($, fields.action === "capture" ? {action: "capture", text: fields.text, source_tool: tool, initiator: "agent"} : {action: "context", query: fields.text, source_tool: tool, initiator: "agent"});
+        result = await rpc($, state, fields.action === "capture" ? {action: "capture", text: fields.text, source_tool: tool, initiator: "agent"} : {action: "context", query: fields.text, source_tool: tool, initiator: "agent"});
       }
       if (!result.ok) return {deny: result.error?.message ?? "Kindex refused the operation; no native task fallback was executed"};
       $.ui.invalidate("prompt.context");
@@ -161,6 +194,7 @@ export const register: Register = (on) => {
       // contract, whereas native task tools require their own object schemas.
       return {result: nativeTasks.has(tool) ? result.native_result : JSON.stringify(result)};
     } catch {
+      if (!state.current) return {deny: "Kindex session changed while this operation was in flight. Confirm its state in the previous session before retrying; no native fallback was executed."};
       degraded($);
       // Throwing would make the host skip this hook and execute the native tool.
       return {deny: "Kindex unavailable. Durable operation was not confirmed; retry the same operation ID through Kindex. No ephemeral fallback."};
@@ -168,15 +202,17 @@ export const register: Register = (on) => {
   });
 
   on("turn.complete", async ($, e, next) => {
-    if (!busy && e.answer?.trim()) {
-      recentWork = (recentWork + "\nASSISTANT: " + e.answer).slice(-12000);
-      busy = true;
+    const state = activeState;
+    if (!state.busy && e.answer?.trim()) {
+      state.recentWork = (state.recentWork + "\nASSISTANT: " + e.answer).slice(-12000);
+      state.busy = true;
       try {
-        await rpc($, {action: "supervisor", text: recentWork, initial_goal: originalGoal, deliver: false});
-        const r = await rpc($, {action: "capture", text: e.answer});
-        if (!r.ok) degraded($);
-      } catch { degraded($); }
-      finally { busy = false; }
+        await rpc($, state, {action: "supervisor", text: state.recentWork, initial_goal: state.originalGoal, deliver: false});
+        if (!state.current) return next(e);
+        const r = await rpc($, state, {action: "capture", text: e.answer});
+        if (!r.ok && state.current) degraded($);
+      } catch { if (state.current) degraded($); }
+      finally { state.busy = false; }
     }
     return next(e);
   });

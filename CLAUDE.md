@@ -4,6 +4,9 @@ Kindex is a persistent knowledge graph that indexes conversations, projects, and
 
 ## Running Tests
 
+Install Python test dependencies (`pip install -e ".[dev,mcp]"`) and Node.js 24 or newer.
+Node executes the modern Claude adapter contract tests; it is not a Kindex package dependency.
+
 ```bash
 # All tests
 pytest tests/ -v
@@ -17,7 +20,7 @@ pytest tests/test_store.py -v
 pytest tests/ --cov=kindex --cov-report=term-missing
 ```
 
-The `CI` workflow runs full `pytest` with Python 3.12 and `.[dev,mcp]` on pull
+The `CI` workflow runs full `pytest` with Python 3.12, Node.js 24, and `.[dev,mcp]` on pull
 requests and pushes to `main`. It also supports manual dispatch and reusable
 workflow calls. `Publish to PyPI` runs only on `v*` tag pushes and invokes `CI`
 before building and publishing. The `test` check must be required in branch

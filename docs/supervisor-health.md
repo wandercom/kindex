@@ -70,6 +70,12 @@ other durable work count as populated data. If both stores contain durable work,
 Kindex reports a conflict and preserves both. Explicit personal/company profiles
 remain separate; this is not a global merge of memory scopes.
 
+An implicit default cannot silently hide a populated home graph when a project
+store appears. Kindex reports the ambiguous scope and preserves both stores.
+Use `--project-path /path/to/repo` for project work or `--data-dir ~/.kindex`
+for the home graph. Explicit configuration and named profiles retain their
+selected scope.
+
 ## Independently monitor operation
 
 Health monitoring is opt-in and stores private metadata under `~/.kindex/health`,

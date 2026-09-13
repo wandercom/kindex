@@ -851,6 +851,7 @@ def load_config(
     config_path: str | Path | None = None,
     project_path: str | Path | None = None,
     profile: str | None = None,
+    data_dir: str | Path | None = None,
 ) -> Config:
     """Load config with layered merging: code defaults → global → local.
 
@@ -876,12 +877,12 @@ def load_config(
             cfg = _resolve_profile(Config(**data), profile, kin_profile)
             cfg = _contain_data_dir(cfg)
             local = project_root / ".kin" / "local"
-            if not cfg.active_profile and cfg.data_path in (local, local / "kindex"):
+            if not data_dir and not cfg.active_profile and cfg.data_path in (local, local / "kindex"):
                 from .project_store import project_data_path
                 cfg.data_dir = str(project_data_path(project_root))
-            return _attach_project_path(cfg, project_root)
+            return _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
         return _attach_project_path(
-            _contain_data_dir(_resolve_profile(Config(), profile, None)),
+            _override_data_dir(_contain_data_dir(_resolve_profile(Config(), profile, None)), data_dir),
             project_root)
 
     # Layer 1: global config (user-level)
@@ -920,17 +921,42 @@ def load_config(
     cfg = _contain_data_dir(cfg)
     # Explicit project callers and existing repo-local configurations share the
     # integration store. Unscoped legacy/global and named profiles stay separate.
-    if not cfg.active_profile:
-        from .project_store import project_data_path
+    if not cfg.active_profile and not data_dir:
+        from .project_store import project_data_path, durable_store_paths
         local = project_root / ".kin" / "local"
         selected = cfg.data_path
         repo_selected = selected in (local, local / "kindex")
         explicit_project = bool(project_path or os.environ.get("KIN_PROJECT")) and _bound_root is None and _git_root(project_root) is not None
         existing_repo = any((d / n).exists() for d in (local, local / "kindex")
                             for n in ("kindex.db", "conv.db"))
-        if repo_selected or ((explicit_project or existing_repo) and cfg.data_dir == "~/.kindex"):
-            cfg.data_dir = str(project_data_path(project_root))
-    return _attach_project_path(cfg, project_root)
+        implicit_repo = existing_repo and "data_dir" not in merged
+        if repo_selected or ((explicit_project or implicit_repo) and cfg.data_dir == "~/.kindex"):
+            project_store = project_data_path(project_root)
+            if implicit_repo and not explicit_project and not repo_selected:
+                home_stores = durable_store_paths(selected)
+                if home_stores:
+                    raise ValueError(
+                        f"Ambiguous Kindex scope: default home store {', '.join(str(p) for p in home_stores)} "
+                        f"contains durable work and a project store exists at {project_store}. "
+                        f"Both are preserved. Select --project-path {project_root} for project work "
+                        f"or --data-dir {selected} for the home store; no data was merged or moved.")
+            cfg.data_dir = str(project_store)
+    return _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
+
+
+def _override_data_dir(config: Config, data_dir: str | Path | None) -> Config:
+    """Explicit CLI/API selection wins without stamping another profile's DB."""
+    if not data_dir:
+        return config
+    if config.active_profile:
+        try:
+            same = Path(data_dir).expanduser().resolve() == Path(config.data_dir).expanduser().resolve()
+        except (OSError, ValueError):
+            same = False
+        if not same:
+            config._stamp_on_open = False
+    config.data_dir = str(data_dir)
+    return config
 
 
 def trusted_supervisor_config(project_path: str | Path, data_dir: str) -> Config:
