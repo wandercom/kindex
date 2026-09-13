@@ -165,13 +165,13 @@ def test_r2_native_session_id_emitted_before_timeout_is_used_for_next_fresh_revi
         first = native.run_review(cfg, "first-turn-timeout", "First review which deliberately times out")
         assert first.get("status") != "ok", first
         assert len(rows(receipts / "calls.jsonl")) == 1
-        # The first review never produced a successful parent receipt: this
-        # registration can only come from the worker's streamed native init.
+        # The configured registry must retain the known native identity after
+        # interruption, before the next admission produces a successful result.
         registry = isolated_health_registry / "health.sqlite3"
-        assert registry.is_file(), "Interrupted workers must use the explicitly isolated health registry"
+        assert registry.is_file(), "Interrupted reviews must retain identity in the configured health registry"
         with sqlite3.connect(registry.as_uri() + "?mode=ro", uri=True) as conn:
             assert any(expected_id in statement for statement in conn.iterdump()), \
-                "The worker must persist its known native identity before parent completion"
+                "The configured registry must contain the known native identity after interruption"
         # Construct a fresh Config so receipt persistence, not caller-local state,
         # owns the native identity after unsuccessful first-turn completion.
         second = native.run_review(Config(**cfg.model_dump()), "first-turn-timeout", "New review after timeout")
