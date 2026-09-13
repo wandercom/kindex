@@ -351,8 +351,32 @@ def hybrid_search(
     # Mode 1: FTS5 search (raw query — register is intentional signal for
     # keywords). Per-row scoring guard: one malformed node (NULL weight,
     # garbage rank) is skipped, never allowed to zero the result set.
+    from .store import node_expired
+    from .trust import _operation_time, node_trust_decision
+
+    admission_time = _operation_time(evaluation_time) if trusted_only else None
+    admission_today = admission_time.date().isoformat() if admission_time else None
+
+    def standing_candidate_eligible(node):
+        extra = node.get("extra")
+        imported = isinstance(extra, dict) and isinstance(extra.get("kinbase"), dict)
+        # Preserve the legacy unruled candidate-window contract. New explicit
+        # precedence must not let ineligible evidence consume that window.
+        if not imported and node.get("standing", "unruled") == "unruled":
+            return True
+        if (trusted_only or not include_expired) and node_expired(node, today=admission_today):
+            return False
+        if trusted_only and not node_trust_decision(store, node, at=admission_time).eligible:
+            return False
+        return True
+
+    has_standing = store.conn.execute(
+        "SELECT 1 FROM nodes WHERE standing != 'unruled' "
+        "OR CASE WHEN json_valid(extra) THEN json_type(extra, '$.kinbase') END='object' LIMIT 1"
+    ).fetchone()
+    fts_options = {"candidate_filter": standing_candidate_eligible} if has_standing else {}
     fts_results = store.fts_search(query, limit=top_k * 3,
-                                   include_archived=include_archived)
+                                   include_archived=include_archived, **fts_options)
     fts_ranked: list[tuple[str, float]] = []
     for r in fts_results:
         try:
@@ -491,6 +515,13 @@ def hybrid_search(
             ranked_lists.append(vec_ranked)
         merged = _rrf_merge(*ranked_lists, k=cfg_rrf_k) if len(ranked_lists) > 1 else fts_ranked
 
+    # Standing is an explicit precedence rule, ahead of recency/count/RRF.
+    # Legacy nodes all default to unruled, preserving their relative ordering.
+    from .schema import STANDINGS
+    standings = {row["id"]: STANDINGS.index(row["standing"]) if row["standing"] in STANDINGS else 0
+                 for row in store.conn.execute("SELECT id, standing FROM nodes WHERE standing != 'unruled'")}
+    merged.sort(key=lambda item: -standings.get(item[0], 0))
+
     # Fetch full nodes, drawing from the merged candidate list until top_k
     # results or exhaustion — drop-filtering used to happen after slicing
     # top_k, silently returning short result sets. Superseded nodes never
@@ -506,13 +537,8 @@ def hybrid_search(
     seen: set[str] = set()
     fenced_nodes: dict[str, dict] = {}
     trust_omissions: Counter[str] = Counter()
-    trusted_at = None
-    trusted_today = None
-    if trusted_only:
-        from .trust import _operation_time
-
-        trusted_at = _operation_time(evaluation_time)
-        trusted_today = trusted_at.date().isoformat()
+    trusted_at = admission_time
+    trusted_today = admission_today
     for nid, score in merged:
         if len(results) >= top_k:
             break
@@ -568,6 +594,8 @@ def hybrid_search(
             node["edges_out"] = store.edges_from(
                 node["id"], semantic_only=True
             )[:5]
+            from .kinbase import attach_unknowns
+            attach_unknowns(store, node)
             results.append(node)
         except Exception:
             continue  # one malformed candidate never zeroes retrieval
@@ -767,14 +795,24 @@ def format_context_block(
             note = ""
     prefix = f"{note}\n\n" if note else ""
 
+    from .kinbase import evidence_note
+
+    def annotated(count):
+        selected = results[:count]
+        annotations = "\n\n".join(note for node in selected if (note := evidence_note(node)))
+        body = formatter(store, selected, query)
+        # Caveats precede the body so budget truncation cannot erase an unknown
+        # while retaining the apparently uncontested fact it qualifies.
+        return annotations + "\n\n" + body if annotations else body
+
     # Try with all results, then progressively trim until within budget
     for n in range(len(results), 0, -1):
-        output = formatter(store, results[:n], query)
+        output = annotated(n)
         if _estimate_tokens(prefix + output) <= budget:
             return prefix + output
 
     # Even one result exceeds budget — return truncated
-    output = formatter(store, results[:1], query)
+    output = annotated(1)
     max_chars = budget * 4 - len(prefix)
     if len(output) > max_chars:
         output = output[:max_chars] + "\n\n*[truncated to fit token budget]*"
@@ -797,6 +835,10 @@ def _trusted_context_nodes(
     evaluation_time: str | datetime | None,
 ) -> list[dict]:
     """Apply trusted admission to formatter-owned auxiliary pulls."""
+    # Source evidence is displayed with its governance/owner annotation in
+    # selected results, not recycled as an unqualified recent decision.
+    nodes = [node for node in nodes if not
+             (isinstance(node.get("extra"), dict) and node["extra"].get("kinbase"))]
     if not trusted_only:
         return nodes
     from .store import node_expired

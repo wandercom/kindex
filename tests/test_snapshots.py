@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from kindex.config import Config
+from kindex.schema import SCHEMA_VERSION
 from kindex.snapshots import DEFAULT_KEEP, snapshot_db, snapshot_dir_for
 from kindex.store import (
     SCHEMA_RECOVERY_PATH_META,
@@ -141,7 +142,7 @@ def test_schema_migration_takes_and_records_pre_state_snapshot(
     store.close()
 
     migrated = Store(Config(data_dir=str(db_path.parent)))
-    assert migrated.get_meta("schema_version") == "12"
+    assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
 
     rows = migrated.conn.execute(
         "SELECT id, extra FROM nodes WHERE type = 'session' ORDER BY id"
@@ -174,7 +175,7 @@ def test_schema_migration_takes_and_records_pre_state_snapshot(
 
     snapshots = list(
         (snapshot_dir_for(db_path) / "migrations").glob(
-            "*schema-v11-to-v12.sqlite3"
+            f"*schema-v11-to-v{SCHEMA_VERSION}.sqlite3"
         )
     )
     assert len(snapshots) == 1
@@ -197,7 +198,7 @@ def test_schema_migration_takes_and_records_pre_state_snapshot(
     ]
     assert str(snapshots[0]) in str(entries[0]["details"])
     assert migrated.get_meta(SCHEMA_RECOVERY_PATH_META) == str(snapshots[0])
-    assert migrated.get_meta(SCHEMA_RECOVERY_REASON_META) == "schema-v11-to-v12"
+    assert migrated.get_meta(SCHEMA_RECOVERY_REASON_META) == f"schema-v11-to-v{SCHEMA_VERSION}"
     assert migrated.pending_suggestions()[0]["identity_kind"] == "node_id"
     lock_path = db_path.with_name(
         f".{db_path.name}.schema-migration-lock.sqlite3"
@@ -327,7 +328,8 @@ def test_failed_v12_migration_rolls_back_and_reports_snapshot(store):
 
 def test_newer_schema_is_refused_and_connection_is_closed(store):
     """An older Kindex build must not silently operate on a future schema."""
-    store.conn.execute("UPDATE meta SET value = '13' WHERE key = 'schema_version'")
+    store.conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                       (str(SCHEMA_VERSION + 1),))
     store.conn.commit()
     db_path = store.db_path
     store.close()
@@ -386,6 +388,7 @@ import sys
 import time
 from kindex import snapshots
 from kindex.config import Config
+from kindex.schema import SCHEMA_VERSION
 from kindex.store import Store
 
 original = snapshots.snapshot_schema_migration
@@ -397,7 +400,7 @@ def slow_snapshot(*args, **kwargs):
 
 snapshots.snapshot_schema_migration = slow_snapshot
 opened = Store(Config(data_dir=sys.argv[1]), sqlite_timeout=5.0)
-assert opened.get_meta('schema_version') == '12'
+assert opened.get_meta('schema_version') == str(SCHEMA_VERSION)
 opened.close()
 """
     first = subprocess.Popen([sys.executable, "-c", script, str(db_path.parent)])
@@ -432,19 +435,21 @@ def test_concurrent_preversion_openers_lock_before_creating_meta(
 import sys
 import time
 from kindex.config import Config
+from kindex.schema import SCHEMA_VERSION
 from kindex.store import Store
 
 def slow_migration(self, _current):
     self._conn.execute('BEGIN IMMEDIATE')
     time.sleep(0.6)
     self._conn.execute(
-        "UPDATE meta SET value = '12' WHERE key = 'schema_version'"
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+        (str(SCHEMA_VERSION),)
     )
     self._conn.commit()
 
 Store._migrate_schema = slow_migration
 opened = Store(Config(data_dir=sys.argv[1]), sqlite_timeout=5.0)
-assert opened.get_meta('schema_version') == '12'
+assert opened.get_meta('schema_version') == str(SCHEMA_VERSION)
 opened.close()
 """
     first = subprocess.Popen([sys.executable, "-c", script, str(data_dir)])
@@ -464,7 +469,7 @@ opened.close()
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone() == ("12",)
+        ).fetchone() == (str(SCHEMA_VERSION),)
 
 
 def test_changelog_failure_does_not_misreport_completed_migration(store):
@@ -483,7 +488,7 @@ def test_changelog_failure_does_not_misreport_completed_migration(store):
     store.close()
 
     migrated = Store(Config(data_dir=str(db_path.parent)))
-    assert migrated.get_meta("schema_version") == "12"
+    assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
     assert Path(migrated.get_meta(SCHEMA_RECOVERY_PATH_META)).is_file()
     migrated.close()
 

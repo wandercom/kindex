@@ -6,6 +6,7 @@ import argparse
 import datetime
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -62,25 +63,13 @@ def _config(args):
             getattr(args, "config", None),
             project_path=getattr(args, "project_path", None),
             profile=getattr(args, "profile", None),
+            data_dir=getattr(args, "data_dir", None),
         )
     except ValueError as e:
         # Unknown profile (or otherwise invalid config) — fail clearly
         # instead of dumping a traceback or falling through to legacy.
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
-    if getattr(args, "data_dir", None):
-        if cfg.active_profile:
-            # Explicit --data-dir overriding a profile-resolved data_dir:
-            # never stamp an unstamped database with the active profile
-            # (an existing mismatched stamp still hard-refuses in Store).
-            try:
-                same = (Path(args.data_dir).expanduser().resolve()
-                        == Path(cfg.data_dir).expanduser().resolve())
-            except (OSError, ValueError):
-                same = False
-            if not same:
-                cfg._stamp_on_open = False
-        cfg.data_dir = args.data_dir
     return cfg
 
 
@@ -102,6 +91,27 @@ def _ledger(args):
 
 
 # ── search ─────────────────────────────────────────────────────────────
+
+def cmd_kinbase_sync(args):
+    """Read signed Kinbase evidence into this Kindex graph."""
+    from .kinbase import sync_kinbase
+    store = _store(args)
+    try:
+        result = sync_kinbase(store, args.repo, mode=args.mode, binary=args.binary)
+        if args.json:
+            print(_dumps(result, indent=2))
+        else:
+            print(f"Kinbase {result['mode']}: {result['imported']} imported, "
+                  f"{result['unchanged']} unchanged, {result['quarantined']} quarantined, "
+                  f"{result['deactivated']} deactivated (local event keys).")
+            for item in result['quarantine']:
+                print(f"  Quarantined {item['path']}: {item['reason']}")
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    finally:
+        store.close()
+
 
 def cmd_search(args):
     """Hybrid search: FTS5 + graph traversal, merged via RRF."""
@@ -171,6 +181,9 @@ def cmd_search(args):
         out = [{
             "id": r["id"], "type": r["type"], "title": r["title"],
             "weight": r["weight"], "rrf_score": r.get("rrf_score", 0),
+            "standing": r.get("standing", "unruled"),
+            "kinbase": (r.get("extra") or {}).get("kinbase"),
+            "kinbase_unknowns": r.get("kinbase_unknowns", []),
             "content_preview": (r.get("content") or "")[:300],
             "edges": [{"to": e["to_id"], "type": e["type"], "weight": e["weight"]}
                       for e in r.get("edges_out", [])],
@@ -190,6 +203,9 @@ def cmd_search(args):
             print(f"## [{ntype}] {title} (w={weight:.2f})")
             if content:
                 print(f"  {content}")
+            from .kinbase import evidence_note
+            if note := evidence_note(r):
+                print(f"  {note}")
             if edges:
                 connected = ", ".join(e.get("to_title", e["to_id"]) for e in edges[:5])
                 print(f"  → {connected}")
@@ -1146,6 +1162,7 @@ def cmd_migrate(args):
             content=topic.body,
             node_type="concept",
             weight=topic.weight or 0.5,
+            standing=topic.standing,
             domains=topic.domains,
             status=str(topic.status) if topic.status else "active",
             extra=topic.__pydantic_extra__ or {},
@@ -1378,18 +1395,19 @@ def cmd_doctor(args):
 
     # ── FTS5 sync check ──
     try:
-        fts_count = store.conn.execute(
-            "SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
-        node_count = stats["nodes"]
-        if fts_count != node_count:
-            issues.append(f"FTS5 index out of sync: {fts_count} indexed vs {node_count} nodes")
-            if do_fix:
-                store.conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
-                store.conn.commit()
+        store.check_fts_integrity()
+    except sqlite3.DatabaseError as exc:
+        issues.append(f"FTS5 index integrity check failed: {exc}")
+        if do_fix:
+            try:
+                with store.conn:
+                    store.conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+                    store.check_fts_integrity()
+            except sqlite3.DatabaseError as repair_exc:
+                issues[-1] += f" (FIX FAILED: {repair_exc})"
+            else:
                 fixes_applied += 1
                 issues[-1] += " (FIXED: rebuilt FTS5)"
-    except Exception:
-        warnings.append("Could not check FTS5 index health")
 
     # ── Dangling edges ──
     dangling = store.conn.execute(
@@ -1460,38 +1478,8 @@ def cmd_doctor(args):
                 if cross_pct < 0.10:
                     warnings.append(
                         f"Low cross-domain bridging: {cross_domain}/{total_edges_g} edges "
-                        f"({cross_pct:.0%}) cross domain boundaries (< 10%)")
-                    if do_fix:
-                        # Suggest edges between nodes in different domains
-                        import random
-                        domain_nodes: dict[str, list[str]] = {}
-                        for nid, doms in domain_sets.items():
-                            for d in doms:
-                                domain_nodes.setdefault(d, []).append(nid)
-                        dom_list = list(domain_nodes.keys())
-                        suggested = 0
-                        for i in range(len(dom_list)):
-                            for j in range(i + 1, len(dom_list)):
-                                pool_a = domain_nodes[dom_list[i]]
-                                pool_b = domain_nodes[dom_list[j]]
-                                if pool_a and pool_b:
-                                    a = random.choice(pool_a)
-                                    b = random.choice(pool_b)
-                                    a_title = G.nodes[a].get("title", a)
-                                    b_title = G.nodes[b].get("title", b)
-                                    store.add_suggestion(
-                                        a_title, b_title,
-                                        reason=f"Cross-domain bridge: {dom_list[i]} <-> {dom_list[j]}",
-                                        source="doctor --fix",
-                                    )
-                                    suggested += 1
-                                    if suggested >= 5:
-                                        break
-                            if suggested >= 5:
-                                break
-                        if suggested:
-                            warnings[-1] += f" (suggested {suggested} bridge edges — see `kin suggest`)"
-                            fixes_applied += 1
+                        f"({cross_pct:.0%}) cross domain boundaries (< 10%) — "
+                        "run `kin dream` to discover connections")
 
     # ── Trailhead coverage ──
     if stats["nodes"] > 10 and stats["edges"] >= 4:
@@ -1700,12 +1688,20 @@ def _strip_pii(node: dict) -> dict:
     from .privacy import redact
     node = redact(node)
     node["prov_who"] = ["anonymous"]
-    node["prov_source"] = Path(node.get("prov_source", "")).name if node.get("prov_source") else ""
+    from pathlib import PureWindowsPath
+    from urllib.parse import urlsplit
+    source = node.get("prov_source", "")
+    if urlsplit(source).scheme not in ("http", "https"):
+        node["prov_source"] = PureWindowsPath(source).name
     # Strip emails from content
     content = node.get("content", "")
     content = re.sub(r'\S+@\S+\.\S+', '[email]', content)
     # Credentials use the common policy; ordinary evidence hashes remain intact.
     node["content"] = content
+    metadata = (node.get("extra") or {}).get("kinbase")
+    if isinstance(metadata, dict):
+        from .graph_transfer import scrub_kinbase_metadata
+        node["extra"] = {**node["extra"], "kinbase": scrub_kinbase_metadata(metadata)}
     # Strip actor from activity log entries stored in extra
     extra = node.get("extra")
     if isinstance(extra, dict):
@@ -1768,29 +1764,10 @@ def cmd_export(args):
               file=sys.stderr)
         sys.exit(1)
 
-    if target_audience == "private":
-        nodes = store.all_nodes(limit=10000)
-    elif target_audience == "team":
-        team = store.all_nodes(audience="team", limit=10000)
-        org = store.all_nodes(audience="org", limit=10000)
-        public = store.all_nodes(audience="public", limit=10000)
-        seen = set()
-        nodes = []
-        for n in team + org + public:
-            if n["id"] not in seen:
-                seen.add(n["id"])
-                nodes.append(n)
-    elif target_audience == "org":
-        org = store.all_nodes(audience="org", limit=10000)
-        public = store.all_nodes(audience="public", limit=10000)
-        seen = set()
-        nodes = []
-        for n in org + public:
-            if n["id"] not in seen:
-                seen.add(n["id"])
-                nodes.append(n)
-    else:  # public
-        nodes = store.all_nodes(audience="public", limit=10000)
+    audiences = {"private": (None,), "team": ("team", "org", "public"),
+                 "org": ("org", "public"), "public": ("public",)}[target_audience]
+    # A snapshot must not silently truncate at the query helper's display limit.
+    nodes = [n for audience in audiences for n in store.all_nodes(audience=audience, limit=-1)]
 
     # Apply PII stripping for public/org exports
     strip_pii = target_audience in ("public", "org")
@@ -1798,29 +1775,11 @@ def cmd_export(args):
     # Strip edges that cross audience boundaries
     output = []
     node_ids = {n["id"] for n in nodes}
+    from .graph_transfer import export_record
     for n in nodes:
         if strip_pii:
             n = _strip_pii(n)
-        edges = store.edges_from(n["id"])
-        # Only keep edges where target is in our exported set
-        filtered_edges = [e for e in edges if e["to_id"] in node_ids]
-
-        record = {
-            "id": n["id"], "type": n["type"], "title": n["title"],
-            "content": n.get("content", ""),
-            "weight": n["weight"], "domains": n.get("domains", []),
-            "audience": n.get("audience", "private"),
-            "edges": [{"to": e["to_id"], "type": e["type"], "weight": e["weight"]}
-                      for e in filtered_edges],
-        }
-        # R0 referent binding + clocks round-trip through export/import.
-        if isinstance(n.get("referent"), dict):
-            record["referent"] = n["referent"]
-        for clock in ("asserted_at", "true_of"):
-            if n.get(clock):
-                record[clock] = n[clock]
-        from .privacy import redact
-        output.append(redact(record))
+        output.append(export_record(n, store.edges_from(n["id"]), node_ids, public=strip_pii))
 
     if args.format == "jsonl":
         for item in output:
@@ -2342,6 +2301,9 @@ def cmd_agent_prime_hook(args):
     adapter = normalize_adapter(getattr(args, "adapter", "plain"))
     client = normalize_adapter(getattr(args, "client", None) or adapter)
     payload = read_hook_payload()
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
     conversation_id = resolve_conversation_id(
         getattr(args, "conversation_id", None),
         payload,
@@ -2399,6 +2361,9 @@ def cmd_agent_stop_hook(args):
 
     adapter = normalize_adapter(getattr(args, "adapter", "plain"))
     payload = read_hook_payload()
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
     store = _store(args)
     conversation_id = resolve_conversation_id(
         getattr(args, "conversation_id", None),
@@ -3727,122 +3692,28 @@ def cmd_skills(args):
 
 def cmd_import_graph(args):
     """Import nodes and edges from a JSON or JSONL file."""
+    from .graph_transfer import import_records
+
     store = _store(args)
-    filepath = Path(args.filepath)
-
-    if not filepath.exists():
-        print(f"Error: '{filepath}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    text = filepath.read_text()
-    if filepath.suffix == ".jsonl" or args.format == "jsonl":
-        items = [json.loads(line) for line in text.strip().split("\n") if line.strip()]
-    else:
-        data = json.loads(text)
-        items = data if isinstance(data, list) else [data]
-
     dry_run = getattr(args, "dry_run", False)
-    merge = getattr(args, "mode", "merge") == "merge"
-    created = updated = edges_created = skipped = 0
-
-    for item in items:
-        title = item.get("title", "")
-        node_id = item.get("id", "")
-
-        if not title and not node_id:
-            skipped += 1
-            continue
-
-        existing = None
-        if node_id:
-            existing = store.get_node(node_id)
-        if not existing and title:
-            existing = store.get_node_by_title(title)
-
-        if existing:
-            if merge:
-                # Merge: update content if new content is provided
-                new_content = item.get("content", "")
-                old_content = existing.get("content", "")
-                if new_content and new_content != old_content:
-                    if not dry_run:
-                        combined = old_content + "\n\n" + new_content if old_content else new_content
-                        store.update_node(existing["id"], content=combined)
-                    updated += 1
-                    if dry_run:
-                        print(f"  Would update: {title}")
-                else:
-                    skipped += 1
-            else:
-                # Replace
-                if not dry_run:
-                    store.update_node(existing["id"],
-                                      title=title,
-                                      content=item.get("content", ""),
-                                      weight=item.get("weight", existing["weight"]))
-                updated += 1
-                if dry_run:
-                    print(f"  Would replace: {title}")
+    try:
+        filepath = Path(args.filepath)
+        text = filepath.read_text()
+        if filepath.suffix == ".jsonl" or args.format == "jsonl":
+            items = [json.loads(line) for line in text.splitlines() if line.strip()]
         else:
-            if not dry_run:
-                # R0 binding travels with the import; a malformed binding is
-                # reported visibly and the node is created unbound rather
-                # than silently dropped or silently bound wrong.
-                binding: dict = {}
-                if any(item.get(k) for k in ("referent", "asserted_at", "true_of")):
-                    try:
-                        from .store import _normalize_binding
-                        _normalize_binding(
-                            item.get("referent"),
-                            item.get("asserted_at"),
-                            item.get("true_of"),
-                        )
-                        binding = {
-                            "referent": item.get("referent"),
-                            "asserted_at": item.get("asserted_at"),
-                            "true_of": item.get("true_of"),
-                        }
-                    except (ValueError, TypeError) as exc:
-                        print(f"  Warning: invalid referent binding on "
-                              f"'{title}' ({exc}); imported unbound",
-                              file=sys.stderr)
-                store.add_node(
-                    title=title,
-                    content=item.get("content", ""),
-                    node_id=node_id or None,
-                    node_type=item.get("type", "concept"),
-                    domains=item.get("domains", []),
-                    weight=item.get("weight", 0.5),
-                    audience=item.get("audience", "private"),
-                    prov_activity="import",
-                    prov_source=str(filepath),
-                    **binding,
-                )
-            created += 1
-            if dry_run:
-                print(f"  Would create: {title}")
-
-        # Process edges
-        for edge in item.get("edges", []):
-            to_id = edge.get("to", "")
-            if not to_id:
-                continue
-            from_id = node_id or (existing["id"] if existing else "")
-            if not from_id:
-                continue
-            # Check if target exists
-            target = store.get_node(to_id) or store.get_node_by_title(to_id)
-            if target and not dry_run:
-                store.add_edge(from_id, target["id"],
-                               edge_type=edge.get("type", "relates_to"),
-                               weight=edge.get("weight", 0.5),
-                               provenance="import")
-                edges_created += 1
-
+            data = json.loads(text)
+            items = data if isinstance(data, list) else [data]
+        counts = import_records(store, items, replace=getattr(args, "mode", "merge") == "replace",
+                                dry_run=dry_run)
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    finally:
+        store.close()
     prefix = "[DRY RUN] " if dry_run else ""
-    print(f"{prefix}Import complete: {created} created, {updated} updated, "
-          f"{edges_created} edges, {skipped} skipped")
-    store.close()
+    print(f"{prefix}Import complete: {counts['created']} created, {counts['updated']} updated, "
+          f"{counts['edges']} edges, {counts['skipped']} skipped")
 
 
 # ── cron ──────────────────────────────────────────────────────────────
@@ -4985,6 +4856,39 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
     return lines
 
 
+def _supervisor_hook_result(args, payload, adapter):
+    from .supervisor import hook_request
+    from .privacy import safe_error
+    try:
+        explicit = any(getattr(args, name, None) for name in ("config", "data_dir", "profile"))
+        cfg = _config(args) if explicit else None
+        return hook_request(payload, "claude" if adapter == "plain" else adapter,
+                            config=cfg, project_path=getattr(args, "project_path", None))
+    except (Exception, SystemExit) as error:
+        return {"ok": False, "context": "Kindex supervisor unavailable; no fresh lookback completed. " + safe_error(error),
+                "supervisor": {"state": "failed", "reason": "hook_error"},
+                "error": {"code": "supervisor_unavailable", "message": safe_error(error)}}
+
+
+def cmd_supervisor_hook(args):
+    from .attention import read_hook_payload
+    payload = read_hook_payload()
+    result = _supervisor_hook_result(args, payload, args.adapter)
+    if args.json:
+        print(json.dumps(result))
+    elif args.adapter == "cursor":
+        event = str(payload.get("hook_event_name") or "")
+        context = result.get("context", "")
+        if event == "stop" and result.get("supervisor", {}).get("state") != "delivered":
+            context = ""  # Diagnostics must never auto-submit follow-up turns.
+        print(_hook_context_output(context, adapter="cursor", event=event) if context else
+              json.dumps({"continue": True} if event == "beforeSubmitPrompt" else {}))
+    elif result.get("context"):
+        print(_hook_context_output(result["context"], adapter=args.adapter,
+                                   event=str(payload.get("hook_event_name") or payload.get("hookEventName") or
+                                             ("PreInvocation" if args.adapter == "antigravity" else "UserPromptSubmit"))))
+
+
 def cmd_prompt_check(args):
     """UserPromptSubmit hook: inject due reminders into conversation context.
 
@@ -5094,39 +4998,11 @@ def cmd_prompt_check(args):
     except Exception:
         pass
 
-    # Sim supervisory check-in (opt-in): enqueue a window snapshot for async
-    # review and surface any pending injection a prior drain already graded.
-    # Both halves are cheap (SQLite-only); the Sim/LLM spend happens in the daemon.
-    try:
-        from .sim import sim_effective_enabled
-        if conversation_id and sim_effective_enabled(store, cfg):
-            from .attention import _load_state as _att_state
-            from .sim import (
-                enqueue_sim_review,
-                format_sim_injection,
-                pop_pending_sim_injection,
-            )
-
-            tick = int(_att_state(store, conversation_id).get("ticks", 0))
-            window = ""
-            tpath = hook_payload.get("transcript_path") or hook_payload.get("transcriptPath")
-            if tpath:
-                from .reinforce import _bounded_trace
-                window = _bounded_trace(str(tpath), cfg.sim.window_chars)
-            if not window:
-                window = conversation_text
-            queued = enqueue_sim_review(store, cfg, conversation_id, window, tick=tick)
-            sim_injection = pop_pending_sim_injection(
-                store, cfg, conversation_id, window, tick=tick
-            )
-            sim_lines.extend(format_sim_injection(sim_injection, display=cfg.sim.display))
-            # No daemon? Drain off-path in the background so the review lands for
-            # a later tick. Only bother when we actually queued something new.
-            if queued and cfg.sim.drain_on_tick:
-                from .sim import spawn_background_drain
-                spawn_background_drain(cfg)
-    except Exception:
-        pass
+    # All adapters use the same scoped cadence, queue, worker and delivery path.
+    from .sim import sim_effective_enabled
+    if sim_effective_enabled(store, cfg):
+        supervisor_result = _supervisor_hook_result(args, hook_payload, adapter)
+        sim_lines.extend(supervisor_result.get("context", "").splitlines())
 
     # Collab updates: new targeted/broadcast messages since the agent's read
     # cursor + standing inject messages, with a per-conversation cooldown.
@@ -5280,13 +5156,22 @@ def cmd_attention_hook(args):
         or "PreToolUse"
     )
     adapter = normalize_adapter(getattr(args, "adapter", "claude"))
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
     gate = permission_gate_output(adapter=adapter, event=event, payload=payload)
     if gate:
         print(gate)
         return
 
+    supervisor_context = ""
+    if event in ("UserPromptSubmit", "PostToolUse"):
+        supervisor_context = _supervisor_hook_result(args, payload, adapter).get("context", "")
+
     def allow_if_needed() -> None:
-        if adapter == "antigravity" and event == "PreToolUse":
+        if supervisor_context:
+            print(_hook_context_output(supervisor_context, adapter=adapter, event=event))
+        elif adapter == "antigravity" and event == "PreToolUse":
             print(antigravity_allow())
 
     text = extract_conversation_text(getattr(args, "text", None), payload)
@@ -5377,6 +5262,8 @@ def cmd_attention_hook(args):
             for item in deduped
         ]}
         lines = format_attention_injections(result, display=cfg.attention.display)
+        if supervisor_context:
+            lines.append(supervisor_context)
         if not lines:
             allow_if_needed()
             return
@@ -6218,6 +6105,14 @@ def cmd_setup_cursor_mcp(args):
         print(f"  {a}")
 
 
+def cmd_setup_cursor_hooks(args):
+    """Install/uninstall Cursor's native advisory hooks."""
+    from .setup import install_cursor_hooks, uninstall_cursor_hooks
+    operation = uninstall_cursor_hooks if getattr(args, "uninstall", False) else install_cursor_hooks
+    for action in operation(_config(args), dry_run=getattr(args, "dry_run", False)):
+        print(f"  {action}")
+
+
 def cmd_setup_cursor_rules(args):
     """Output recommended Cursor rule for kindex integration.
 
@@ -6721,6 +6616,15 @@ def build_parser() -> argparse.ArgumentParser:
                                 description="Knowledge graph that learns from your conversations")
     p.add_argument("--version", action="store_true")
     sub = p.add_subparsers(dest="command")
+
+    k = sub.add_parser("kinbase", help="Read signed Kinbase evidence")
+    ks = k.add_subparsers(dest="kinbase_action", required=True)
+    s = ks.add_parser("sync", help="Refresh evidence from a Kinbase repository")
+    s.add_argument("--repo", required=True)
+    s.add_argument("--mode", choices=("auto", "raw", "reduced"), default="auto")
+    s.add_argument("--binary", default="kinbase")
+    _common(s)
+    s.set_defaults(func=cmd_kinbase_sync)
 
     # search
     s = sub.add_parser("search", help="Hybrid search (FTS + graph)")
@@ -7337,6 +7241,12 @@ def build_parser() -> argparse.ArgumentParser:
     _common(s)
     s.set_defaults(func=cmd_setup_cursor_mcp)
 
+    s = sub.add_parser("setup-cursor-hooks", help="Install Kindex native supervisor hooks into Cursor")
+    s.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    s.add_argument("--uninstall", action="store_true", help="Remove Kindex supervisor hooks")
+    _common(s)
+    s.set_defaults(func=cmd_setup_cursor_hooks)
+
     # setup-cursor-rules
     s = sub.add_parser("setup-cursor-rules",
                        help="Output recommended Cursor rule (.mdc) for kindex")
@@ -7691,6 +7601,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent-instance", help="Agent instance/conversation override key")
     _common(s)
     s.set_defaults(func=cmd_prompt_check)
+
+    s = sub.add_parser("supervisor-hook", help="Shared scoped advisory direction and diligence lookback")
+    s.add_argument("--adapter", required=True, choices=["claude", "codex", "opencode", "antigravity", "cursor"])
+    _common(s)
+    s.set_defaults(func=cmd_supervisor_hook)
 
     # attention-hook (advisory tool/action hook)
     s = sub.add_parser("attention-hook", help="Advisory attention hook for tool/action events")

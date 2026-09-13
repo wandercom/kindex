@@ -1,6 +1,6 @@
 {
   "name": "kindex-modern",
-  "version": "0.36.2",
+  "version": "0.37.0",
   "description": "Repo-local Kindex memory and durable tasks for Claude function hooks (qualified on 2.1.263)",
   "author": {"name": "Jeremy McEntire"},
   "homepage": "https://kindex.tools/",

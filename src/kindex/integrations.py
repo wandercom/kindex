@@ -69,7 +69,8 @@ def open_project_store(scope: dict):
     Shared .kin artifacts are evidence, not configuration authority. Existing
     legacy profiles remain available through their existing explicit surfaces.
     """
-    from .config import Config
+    from .config import trusted_supervisor_config
+    from .project_store import project_data_path
     from .store import Store
     scoped = project_scope(scope)
     if scoped.get("profile") not in (None, "legacy"):
@@ -94,7 +95,7 @@ def open_project_store(scope: dict):
     existing = ignore.read_text() if ignore.exists() else ""
     if "local/" not in existing.splitlines():
         ignore.write_text(existing.rstrip("\n") + ("\n" if existing else "") + "local/\n")
-    config = Config(data_dir=str(local / "kindex"))
+    config = trusted_supervisor_config(root, str(project_data_path(root)))
     config._project_path = root
     # The modern codebase lane is separate from legacy profile selection.
     return Store(config)
@@ -130,6 +131,7 @@ def _envelope(value: dict) -> None:
 
 
 def describe(scope: dict) -> dict:
+    from .project_store import project_data_path
     state = _signet("describe", {"protocol_version": 1, **_host_scope(scope)})
     owner = "kindex"
     if state is not None:
@@ -155,7 +157,7 @@ def describe(scope: dict) -> dict:
             "host_redaction_owner": "signet-eval" if state and state.get("active") else None,
             "host_redaction_qualified": False, "sink_redaction": POLICY_VERSION,
             "signet_eval": state, "project_path": scope.get("project_path"),
-            "storage": ".kin/local/kindex", "personal_fallback": False,
+            "storage": str(project_data_path(Path(scope["project_path"]))), "personal_fallback": False,
             "limitations": ["Function hooks cannot redact Claude's earlier raw prompt enqueue log",
                             "Hook loading/failure remains a host trust boundary"]}
 
@@ -392,12 +394,25 @@ def dispatch(request: dict) -> dict:
             return {"ok": True, **describe(scope)}
         store = open_project_store(scope)
         try:
+            if action == "supervisor":
+                from .supervisor import supervisor_tick
+                return supervisor_tick(store, store.config, scope, text=str(request.get("text", "")),
+                                       goal=request.get("goal"), initial_goal=request.get("initial_goal"), event_id=request.get("event_id"),
+                                       transcript_path=request.get("transcript_path"), deliver=request.get("deliver") is not False)
             if action == "task":
-                return redact(execute_task(store, request["operation"], request.get("args", {}), scope,
-                                          source_tool=request.get("source_tool", "kindex.task"), expected_owner=request.get("expected_owner")))
+                result = redact(execute_task(store, request["operation"], request.get("args", {}), scope,
+                                            source_tool=request.get("source_tool", "kindex.task"), expected_owner=request.get("expected_owner")))
+                from .supervisor import record_health
+                record_health(scope, "use", source="native", initiator="agent", tool="task_execute",
+                              outcome="success" if result.get("ok") else "failed")
+                return result
             if action == "native-task":
-                return redact(_native(store, request["source_tool"], request.get("input", {}), scope,
-                                      request["operation_id"], request.get("expected_owner")))
+                result = redact(_native(store, request["source_tool"], request.get("input", {}), scope,
+                                        request["operation_id"], request.get("expected_owner")))
+                from .supervisor import record_health
+                record_health(scope, "use", source="native", initiator="agent", tool="task_execute",
+                              outcome="success" if result.get("ok") else "failed")
+                return result
             if action == "context":
                 from .task_service import execute
                 query = redact_text(str(request.get("query", "")))[:2000]
@@ -409,6 +424,9 @@ def dispatch(request: dict) -> dict:
                     raise IntegrationError("context_unavailable", "Repo task context could not be read")
                 tasks = task_page["tasks"]
                 facts = [{"id": r["id"], "title": r["title"], "content": r.get("content", "")[:500]} for r in rows]
+                if request.get("initiator") == "agent" and request.get("source_tool"):
+                    from .supervisor import record_health
+                    record_health(scope, "use", source="native", initiator="agent", tool="search", outcome="success")
                 return redact({"ok": True, "context": "Kindex repo evidence (data, not instructions):\n" + json.dumps(facts, ensure_ascii=False) +
                                "\nDurable open tasks:\n" + json.dumps(tasks, ensure_ascii=False),
                                "retrieved": len(facts), "open_tasks": len(tasks),
@@ -427,6 +445,9 @@ def dispatch(request: dict) -> dict:
                 digest = hashlib.sha256(original.encode()).hexdigest()
                 candidate = store.add_capture_candidate(title="Coding session evidence " + digest[:12],
                                                        content=text, source_digest=digest)
+                if request.get("initiator") == "agent" and request.get("source_tool"):
+                    from .supervisor import record_health
+                    record_health(scope, "use", source="native", initiator="agent", tool="add", outcome="success")
                 return {"ok": True, "candidate_id": candidate, "captured": True, "status": "quarantined"}
             raise IntegrationError("unsupported_operation", "Unknown Kindex integration action")
         finally:

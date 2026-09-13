@@ -260,9 +260,14 @@ def sim_status(store: "Store", config: Config) -> dict:
         ),
         "pending": len(_read_meta_list(store, SIM_PENDING_META)),
         "queued": len(_read_meta_list(store, SIM_QUEUE_META)),
+        "claimed": bool(store.get_meta("sim.claim")),
         # Visibility into the silent-suppression paths the expansion added, so a
         # feature that has gone quiet for the WRONG reason is observable.
         "suppressed": sim_counters(store),
+        "sessions": [{"conversation_id": row["key"].removeprefix("supervisor.state."),
+                      **{k: v for k, v in json.loads(row["value"]).items()
+                         if k in {"state", "reason", "tick", "reviewed_at", "updated_at"}}}
+                     for row in store.conn.execute("SELECT key,value FROM meta WHERE key LIKE 'supervisor.state.%' ORDER BY key LIMIT 50")],
     }
 
 
@@ -336,6 +341,30 @@ def build_sim_grounding(store: "Store", window: str, config: Config) -> str:
         return True
 
     try:
+        from .tasks import list_tasks
+        for task in list_tasks(store, status="all", project_path=str(config._project_path) if config._project_path else None, limit=None):
+            if (task.get("extra") or {}).get("task_status", "open") in ("open", "in_progress"):
+                _add(f"- [outstanding task] {task.get('title', '')[:160]}", key=task.get("id", ""))
+                if len(parts) >= 3:
+                    break
+    except Exception:
+        pass
+
+    try:
+        ops = store.operational_summary()
+    except Exception:
+        ops = {}
+    for c in (ops.get("constraints") or [])[:3]:
+        action = (c.get("extra") or {}).get("action", "warn")
+        title = c.get("title", "")[:180]
+        if not _add(f"- [constraint:{action}] {title}", key=title):
+            break
+    for w in (ops.get("watches") or [])[:3]:
+        title = w.get("title", "")[:120]
+        if not _add(f"- [watch] {title}", key=title):
+            break
+
+    try:
         from .retrieve import hybrid_search
         for r in hybrid_search(store, (window or "")[-2000:], top_k=6):
             ntype = r.get("type", "concept")
@@ -347,20 +376,6 @@ def build_sim_grounding(store: "Store", window: str, config: Config) -> str:
                 break
     except Exception:
         pass
-
-    try:
-        ops = store.operational_summary()
-    except Exception:
-        ops = {}
-    for c in (ops.get("constraints") or [])[:3]:
-        action = (c.get("extra") or {}).get("action", "warn")
-        title = c.get("title", "")
-        if not _add(f"- [constraint:{action}] {title}", key=title):
-            break
-    for w in (ops.get("watches") or [])[:3]:
-        title = w.get("title", "")
-        if not _add(f"- [watch] {title}", key=title):
-            break
 
     return "\n".join(parts)
 
@@ -410,6 +425,10 @@ Speak ONLY if something would MATERIALLY CHANGE THE DIRECTION of the work. Weigh
   DIRECTION — the work itself: a claim about to be committed that is wrong, a contradiction the work hasn't noticed, a materially better path not being considered.
   ALIGNMENT — does the work still serve what the USER actually asked? Judge intent and goals, not the letter: a newer instruction can supersede an older one, but tell a real course-change from a passing aside that shouldn't redirect the whole plan. Ask WHY the user wants this, and whether the current actions still serve that why. Hold this lens to a HIGHER bar before firing: a wrong "you've drifted" note is corrosive — it makes a correct read look doubtful — so fire it only when you are fairly sure the agent has actually left the user's goal.
   TRAJECTORY — if this course continues, where does it land? Will it actually reach the goal, or is it divergent or counter-productive? Name the after-effects, side-effects, and implications; if they are undesired, the STRATEGY — not just the next step — should change.
+
+DILIGENCE — has the plan actually been challenged, tested, and validated against the goal and constraints? Distinguish evidence of completed validation from promised checks. Identify forgotten outstanding work or a missing check whose absence changes whether continuing helps or detracts. Do not invent mandatory process or treat missing evidence as proof that a check failed.
+
+For long-running or repeated work, apply the user's standing expectation: start with a bite-sized representative pilot, state its expected outcome, and quickly compare authoritative before/after counters before adding workers or extending the run. Does remaining work decrease? Does completed work stay completed after a restart or rebuild, instead of being redone? Activity, logs, CPU usage, restarts, and elapsed time do not establish progress. If a pilot misses its expected outcome, consider stopping or revising the approach before repeating or scaling it. If evidence is absent, request the smallest missing check rather than asserting failure. Judge the actual system's completion and validity rules; do not invent universal receipt semantics, binary-hash invalidation rules, or mandatory approval gates.
 
 ESCALATE is a TRIP-WIRE you trip, not a verdict you render. When a decision that is EXPENSIVE TO REVERSE is being locked in — an entity/identity/boundary choice, a wire format, a migration, a spend, a large workflow — you usually CANNOT judge it from this window alone, because the constraints that make it right or wrong (scale, latency, lifetime, what is already committed elsewhere) are not in front of you. Do NOT render the architectural verdict yourself. Instead set stakes "high" and escalate true and name what a fully-framed deeper review — the Advocate panel including the Pat Helland architecture seat — should scrutinize. Detecting that an expensive-to-reverse decision is in play is your job; judging it is theirs.
 
@@ -501,6 +520,28 @@ def call_sim(
 
     # ── subprocess Sim ──────────────────────────────────────────────────────
     if sc.command:
+        import os
+        import shlex
+        import shutil
+        first = os.path.expanduser(shlex.split(sc.command)[0])
+        if not shutil.which(first):
+            return None, {"status": "command_unavailable"}
+        if "simulacrum" in first and not any(os.environ.get(name) for name in
+                ("ANTHROPIC_API_KEY", "WANDER_ANTHROPIC_API_KEY", "JMC_ANTHROPIC_API_KEY")):
+            return None, {"status": "credential_unavailable"}
+        # Opaque subprocesses cannot report reliable token usage. Reserve the
+        # configured per-call allowance before launch, including failed calls.
+        allowance = float(sc.max_review_cost)
+        if allowance <= 0:
+            return None, {"status": "estimate_exceeds_review_budget"}
+        if conversation_spend + allowance > sc.max_conversation_cost:
+            return None, {"status": "estimate_exceeds_conversation_budget"}
+        if (ledger.today_spend + allowance > ledger.limits.daily or
+                ledger.week_spend + allowance > ledger.limits.weekly or
+                ledger.month_spend + allowance > ledger.limits.monthly):
+            return None, {"status": "over_global_budget"}
+        ledger.record(allowance, model="sim-command-reservation", purpose=SIM_PURPOSE,
+                      conversation_id=conversation_id, estimate=allowance)
         try:
             import os
 
@@ -517,7 +558,8 @@ def call_sim(
         if proc.returncode != 0:
             return None, {"status": "sim_command_failed", "error": redact_text(proc.stderr)[:200]}
         parsed = _parse_sim(redact_text(proc.stdout))
-        return _result_from_parsed(parsed), {"status": "ok", "via": "command"}
+        result = _result_from_parsed(parsed)
+        return result, {"status": "ok" if result is not None else "invalid_output", "via": "command"}
 
     # ── LLM-as-supervisor ───────────────────────────────────────────────────
     if client is None:
@@ -545,21 +587,26 @@ def call_sim(
         )
         parsed = _parse_sim(response.content[0].text)
     except Exception as exc:
-        return None, {"status": "llm_error", "error": str(exc)}
+        return None, {"status": "llm_error", "error": safe_error(exc)}
 
     result = _result_from_parsed(parsed)
     if result:
         result.cost = cost["amount"]
         result.tokens_in = cost["tokens_in"]
         result.tokens_out = cost["tokens_out"]
-    return result, {"status": "ok", "via": "llm", "cost": cost}
+    return result, {"status": "ok" if result is not None else "invalid_output", "via": "llm", "cost": cost}
 
 
 def _result_from_parsed(parsed: dict[str, Any]) -> _SimResult | None:
+    import math
+    if not isinstance(parsed, dict) or "rating" not in parsed or not isinstance(parsed.get("note"), str):
+        return None
     try:
-        rating = float(parsed.get("rating", 0.0))
+        rating = float(parsed["rating"])
     except (TypeError, ValueError):
-        rating = 0.0
+        return None
+    if isinstance(parsed["rating"], bool) or not math.isfinite(rating) or not 0 <= rating <= 1:
+        return None
     note = str(parsed.get("note") or "").strip()
     basis = str(parsed.get("basis") or "").strip()
     dimension = str(parsed.get("dimension") or "").strip().lower()
@@ -593,6 +640,8 @@ def enqueue_sim_review(
     window: str,
     *,
     tick: int,
+    intent: str | None = None,
+    scope: dict | None = None,
 ) -> bool:
     """Snapshot a window for later supervisory review. Cheap, SQLite-only.
 
@@ -604,28 +653,51 @@ def enqueue_sim_review(
         return False
     interval = max(1, int(config.sim.tick_interval or 1))
     if tick % interval != 0:
+        from .supervisor import read_state, write_state
+        if read_state(store, conversation_id).get("state") not in (
+                "reviewed_quiet", "queued", "reviewing", "failed", "unavailable", "budget_exhausted", "delivered"):
+            write_state(store, conversation_id, "skipped", reason="cadence")
         return False
     # Tier 0: confident banter is skipped before it costs anything (round UP when
     # unsure — only a confidently-trivial window is dropped).
     if config.sim.triage_banter and _looks_trivial(window):
         _bump_counter(store, "triaged_skips")
+        from .supervisor import write_state
+        write_state(store, conversation_id, "skipped", reason="banter")
         return False
 
-    queue = [j for j in _read_meta_list(store, SIM_QUEUE_META)
-             if j.get("conversation_id") != conversation_id]
-    queue.append({
-        "conversation_id": conversation_id,
-        "window": window[-config.sim.window_chars:],
-        "fingerprint": _tail_fingerprint(window),
-        "intent": _capture_intent(store),
-        "tick": tick,
-        "at": _now(),
-    })
-    try:
-        store.set_meta(SIM_QUEUE_META, json.dumps(queue[-config.sim.max_queue:]))
-        return True
-    except Exception:
-        return False
+    from .supervisor import store_lock, config_snapshot, write_state
+    with store_lock(store, "queue"):
+        import hashlib
+        subject = hashlib.sha256(json.dumps([window, intent, config_snapshot(config)], sort_keys=True).encode()).hexdigest()
+        admission_key = "sim.admission." + conversation_id
+        if store.get_meta(admission_key) == subject:
+            return False
+        store.set_meta(admission_key, subject)
+        previous_queue = _read_meta_list(store, SIM_QUEUE_META)
+        queue = [j for j in previous_queue if j.get("conversation_id") != conversation_id]
+        queue.append({
+            "conversation_id": conversation_id,
+            "scope": scope,
+            "review_id": subject,
+            "window": window[-config.sim.window_chars:],
+            "fingerprint": _tail_fingerprint(window),
+            "intent": _capture_intent(store) if intent is None else intent,
+            "guidance": get_sim_guidance(store) if intent is None else "",
+            "config": config_snapshot(config),
+            "tick": tick,
+            "at": _now(),
+        })
+        retained = queue[-config.sim.max_queue:]
+        store.set_meta(SIM_QUEUE_META, json.dumps(retained))
+        retained_ids = {(j.get("conversation_id"), j.get("review_id")) for j in retained}
+        for previous in previous_queue:
+            if (previous.get("conversation_id"), previous.get("review_id")) not in retained_ids:
+                _record_advisory_discard(previous, reason="superseded", source="hook")
+        write_state(store, conversation_id, "queued", reason="cadence", review_tick=tick)
+        from .supervisor import record_health
+        record_health(scope, "review", state="queued", source="hook", event_id=subject + ":queued", review_id=subject)
+    return True
 
 
 def drain_sim_queue(
@@ -635,90 +707,142 @@ def drain_sim_queue(
     client: Any | None = None,
     ledger: BudgetLedger | None = None,
     max_jobs: int = 5,
+    background: bool = False,
 ) -> dict:
-    """Grade queued windows with Sim. Runs in the daemon — this is the spend.
+    """Drain a bounded batch; native admission retains one waiting successor."""
+    from contextlib import ExitStack
+    from .supervisor import store_lock
+    with ExitStack() as held:
+        try:
+            if background:
+                # At most one process waits for the active worker. Other wakeups
+                # coalesce into it; the waiter releases this gate once active.
+                with store_lock(store, "wake", blocking=False):
+                    held.enter_context(store_lock(store, "worker", blocking=True))
+            else:
+                held.enter_context(store_lock(store, "worker", blocking=False))
+        except BlockingIOError:
+            return {"status": "reviewing", "reviewed": 0, "pending": 0}
+        result = _drain_claimed(store, config, client=client, ledger=ledger, max_jobs=max_jobs)
+        if background and result["status"] == "ok":
+            with store_lock(store, "queue"):
+                remaining = bool(_read_meta_list(store, SIM_QUEUE_META))
+            if remaining and not spawn_background_drain(config):
+                result["status"] = "handoff_failed"
+        return result
 
-    A review that clears the threshold becomes a PENDING injection keyed by
-    conversation; pop_pending_sim_injection surfaces it on the next tick.
-    """
+
+def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
+    from dataclasses import asdict
+    from .supervisor import restore_config, write_state
+    from .sim_queue import (CLAIM_META, SavedSim, acknowledge, claim_next,
+                            flush_receipts, save_claim)
+    flush_receipts(store)
     if not sim_effective_enabled(store, config):
         return {"status": "disabled", "reviewed": 0, "pending": 0}
-    queue = _read_meta_list(store, SIM_QUEUE_META)
-    if not queue:
-        return {"status": "empty", "reviewed": 0, "pending": 0}
+    reviewed = flagged = 0
+    for _ in range(max(0, max_jobs)):
+        claim, recovered = claim_next(store)
+        if claim is None:
+            break
+        job = claim.job
+        conv, window = job.get("conversation_id"), job.get("window") or ""
 
-    ledger = ledger or BudgetLedger(config.ledger_path, config.budget)
-    guidance = get_sim_guidance(store)
-    pending = {j["conversation_id"]: j
-               for j in _read_meta_list(store, SIM_PENDING_META)
-               if j.get("conversation_id")}
+        def finish(state, reason, health_state=None, health_reason="review_failed"):
+            acknowledge(store, claim, state=state, reason=reason,
+                        health_state=health_state or state, health_reason=health_reason)
+            flush_receipts(store)
 
-    remaining: list[dict] = []
-    reviewed = 0
-    flagged = 0
-    for job in queue:
-        if reviewed >= max_jobs:
-            remaining.append(job)
+        if recovered and claim.phase in {"sim_started", "advocate_started"}:
+            # A dead worker may already have paid. Keep its saved Sim result in
+            # the receipt, report uncertainty, and never replay either provider.
+            finish("failed", "interrupted_spend_unknown")
             continue
-        conv = job.get("conversation_id")
-        window = job.get("window") or ""
-        if not conv or not window.strip():
-            continue  # nothing to grade — drop, don't wedge the queue
-        grounding = build_sim_grounding(store, window, config)
+        if not conv or not isinstance(window, str) or not window.strip():
+            finish("failed", "invalid_job")
+            continue
+        try:
+            cfg = restore_config(job["config"]) if job.get("config") else config
+        except Exception:
+            finish("failed", "invalid_snapshot")
+            continue
+        if cfg.data_path != store.config.data_path:
+            finish("failed", "store_mismatch")
+            continue
+        if not sim_effective_enabled(store, cfg):
+            finish("disabled", "kill_switch", health_state="discarded", health_reason="superseded")
+            continue
+        write_state(store, conv, "reviewing", reason="claimed", review_tick=job.get("tick", 0))
         intent = job.get("intent") or ""
-        result, acct = call_sim(config, ledger, window, conv, client=client,
-                                guidance=guidance, grounding=grounding, intent=intent)
-        if acct.get("status") in (
-            "over_global_budget", "llm_unavailable",
-            "estimate_exceeds_review_budget", "estimate_exceeds_conversation_budget",
-        ):
-            remaining.append(job)  # transient — retry next cron
-            continue
-        reviewed += 1
-        if result and result.note and result.rating >= config.sim.threshold:
+        try:
+            if claim.phase == "ready":
+                finish("queued", "review_complete_pending_delivery", "completed", "advisory")
+                flagged += 1
+                continue
+            budget = ledger or BudgetLedger(cfg.ledger_path, cfg.budget)
+            grounding = build_sim_grounding(store, window, cfg)
+            if claim.result is None:
+                # Durable dispatch boundary comes before any possible provider
+                # spend. Recovery earlier than this point can safely resume.
+                claim.phase = "sim_started"
+                save_claim(store, claim)
+                result, acct = call_sim(cfg, budget, window, conv, client=client,
+                                       guidance=job.get("guidance", ""), grounding=grounding, intent=intent)
+                status = acct.get("status", "unknown")
+                if status != "ok" or result is None:
+                    state = ("budget_exhausted" if "budget" in status else
+                             "unavailable" if "unavailable" in status else "failed")
+                    finish(state, status, health_reason="budget_exhausted" if state == "budget_exhausted" else
+                           "llm_unavailable" if state == "unavailable" else "review_failed")
+                    continue
+                claim.result = SavedSim(**asdict(result))
+                claim.phase = "sim_saved"
+                save_claim(store, claim)
+            else:
+                result = _SimResult(**claim.result.model_dump())
+            reviewed += 1
+            if not result.note or result.rating < cfg.sim.threshold:
+                _bump_counter(store, "sub_threshold")
+                finish("reviewed_quiet", "below_threshold", health_reason="no_findings")
+                continue
             item = {
-                "conversation_id": conv,
-                "note": result.note,
-                "basis": result.basis,
-                "rating": round(result.rating, 3),
-                "dimension": result.dimension,
-                "stakes": result.stakes,
-                "escalate": result.escalate,
-                "escalate_reason": result.escalate_reason,
-                "intent": intent,  # enqueue-time goal, for the focus-staleness drop at pickup
-                "fingerprint": job.get("fingerprint") or [],
-                "tick": job.get("tick", 0),
-                "at": _now(),
+                "conversation_id": conv, "scope": job.get("scope"), "review_id": job.get("review_id"),
+                "note": result.note, "basis": result.basis,
+                "rating": round(result.rating, 3), "dimension": result.dimension,
+                "stakes": result.stakes, "escalate": result.escalate,
+                "escalate_reason": result.escalate_reason, "intent": intent,
+                "fingerprint": job.get("fingerprint") or [], "tick": job.get("tick", 0), "at": _now(),
             }
-            # Tier 2: a high-stakes escalation may run the deeper Advocate/Helland
-            # review (gated + verified). Off by default → ran=False → the light
-            # recommendation path in pop_pending_sim_injection handles it instead.
-            if result.escalate and _advocate_gate_open(store, config, conv, job.get("tick", 0)):
+            if result.escalate and not _advocate_gate_open(store, cfg, conv, job.get("tick", 0)):
+                state, reason = (("disabled", "recommend_only") if not cfg.sim.advocate.enabled else
+                                 ("unavailable", "command_unavailable") if not cfg.sim.advocate.command else
+                                 ("skipped", "cooldown"))
+                write_state(store, conv, None, advocate_state=state, advocate_reason=reason)
+            if result.escalate and _advocate_gate_open(store, cfg, conv, job.get("tick", 0)):
+                claim.phase = "advocate_started"
+                save_claim(store, claim)
                 ran, survivors = maybe_escalate_to_advocate(
-                    store, config, ledger, window, grounding, intent, result, conv,
-                    client=client,
-                )
-                # Cooldown advances whenever Advocate actually RAN — a run that then
-                # yields no survivors (verify unavailable or nothing held up) must NOT
-                # re-pay for the same expensive call on the next high-stakes tick.
+                    store, cfg, budget, window, grounding, intent, result, conv, client=client)
                 if ran:
                     _mark_advocate_run(store, conv, int(job.get("tick", 0)))
                     if survivors:
                         item["advocate"] = survivors
                     else:
                         _bump_counter(store, "escalation_failures")
-            pending[conv] = item
+            claim.pending = item
+            claim.phase = "ready"
+            save_claim(store, claim)
+            finish("queued", "review_complete_pending_delivery", "completed", "advisory")
             flagged += 1
-        elif result and (not result.note or result.rating < config.sim.threshold):
-            _bump_counter(store, "sub_threshold")
-
-    try:
-        store.set_meta(SIM_QUEUE_META, json.dumps(remaining))
-        store.set_meta(SIM_PENDING_META, json.dumps(list(pending.values())))
-    except Exception:
-        pass
+        except Exception as exc:
+            # A completed transaction may already have removed this exact claim;
+            # never overwrite its successful receipt after a later output error.
+            if not store.get_meta(CLAIM_META):
+                raise
+            write_state(store, conv, "failed", reason="review_error", error=safe_error(exc))
+            finish("failed", "review_error")
     return {"status": "ok", "reviewed": reviewed, "flagged": flagged,
-            "pending": len(pending)}
+            "pending": len(_read_meta_list(store, SIM_PENDING_META))}
 
 
 # ── Tier 2: deep escalation to Advocate (opt-in, gated, verified) ───────────
@@ -997,13 +1121,42 @@ def maybe_escalate_to_advocate(
     (we only learn Advocate's real cost after it returns). The global BudgetLedger
     is the one authority on whether there is money to spend. Never raises.
     """
+    from .supervisor import write_state
     ac = config.sim.advocate
-    if not ac.command:
+    if not ac.command or not ac.enabled:
+        write_state(store, conversation_id, None, advocate_state="disabled", advocate_reason="recommend_only")
         return False, []
-    # Admission gate against the one spend authority: don't start a run we can't
-    # afford at worst case. (Post-hoc accounting reconciles the real figure.)
-    if not ledger.can_spend() or ledger.remaining_today < ac.max_cost:
+    import os
+    import shlex
+    import shutil
+    try:
+        available = bool(shutil.which(os.path.expanduser(shlex.split(ac.command)[0])))
+    except (ValueError, IndexError):
+        available = False
+    if not available:
+        write_state(store, conversation_id, None, advocate_state="unavailable", advocate_reason="command_unavailable")
         return False, []
+    allowance = float(ac.max_cost)
+    if (allowance <= 0 or not ledger.can_spend() or
+            ledger.today_spend + allowance > ledger.limits.daily or
+            ledger.week_spend + allowance > ledger.limits.weekly or
+            ledger.month_spend + allowance > ledger.limits.monthly or
+            ledger.conversation_spend(conversation_id, purpose=SIM_PURPOSE) + allowance > config.sim.max_conversation_cost):
+        write_state(store, conversation_id, None, advocate_state="budget_exhausted", advocate_reason="escalation_allowance")
+        return False, []
+    if client is None:
+        from .llm import get_client
+        # Explicit Advocate opt-in includes its required verification pass, but
+        # must not enable classification/extraction or other global LLM features.
+        verification_config = config.model_copy(deep=True)
+        verification_config.llm.enabled = True
+        client = get_client(verification_config)
+    if client is None:
+        write_state(store, conversation_id, None, advocate_state="unavailable", advocate_reason="verification_provider")
+        return False, []
+    ledger.record(allowance, model="advocate-command-reservation", purpose=SIM_PURPOSE,
+                  conversation_id=conversation_id, estimate=allowance)
+    write_state(store, conversation_id, None, advocate_state="reviewing", advocate_reason="reserved")
     prompt = build_advocate_prompt(window, grounding, intent, result)
     try:
         import os
@@ -1014,17 +1167,24 @@ def maybe_escalate_to_advocate(
             timeout=ac.timeout,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return False, []  # launch/timeout error — treat as no spend, allow retry
+        write_state(store, conversation_id, None, advocate_state="failed", advocate_reason="command_error")
+        return True, []  # A timed-out subprocess may already have spent: consume cooldown.
     # From here Advocate executed and spent on its persona calls: ran=True even if
     # the exit code is non-zero (partial persona failure still writes findings) or
     # verification later drops everything.
+    if proc.returncode:
+        write_state(store, conversation_id, None, advocate_state="failed", advocate_reason="command_failed")
+        return True, []
     findings = _parse_advocate_findings(redact_text(proc.stdout))
     if not findings:
+        write_state(store, conversation_id, None, advocate_state="reviewed_quiet", advocate_reason="no_findings")
         return True, []
     survivors = _verify_findings(
         config, ledger, window, grounding, findings, conversation_id,
         client=client, store=store,
     )
+    write_state(store, conversation_id, None, advocate_state="completed" if survivors else "reviewed_quiet",
+                advocate_reason="verified_findings" if survivors else "no_verified_findings")
     return True, survivors[: ac.max_findings]
 
 
@@ -1057,6 +1217,16 @@ def _compose_sim_message(mine: dict) -> str:
     return note
 
 
+def _record_advisory_discard(item: dict, *, reason: str, source: str) -> None:
+    """A deliberate durable removal settles delivery debt, never delivery/value."""
+    from .supervisor import record_health
+    review_id = item.get("review_id")
+    if not isinstance(review_id, str) or not review_id:
+        return
+    record_health(item.get("scope"), "review", state="discarded", reason=reason,
+                  source=source, review_id=review_id, event_id=review_id + ":discarded:" + reason)
+
+
 def pop_pending_sim_injection(
     store: "Store",
     config: Config,
@@ -1064,6 +1234,7 @@ def pop_pending_sim_injection(
     current_window: str,
     *,
     tick: int,
+    intent: str | None = None,
 ) -> AttentionInjection | None:
     """Surface a pending Sim injection if one is fresh. Cheap, no LLM.
 
@@ -1083,16 +1254,26 @@ def pop_pending_sim_injection(
 
     # Always consume it: either we surface it now or it's stale — never re-queue.
     rest = [p for p in pending_list if p.get("conversation_id") != conversation_id]
-    try:
-        store.set_meta(SIM_PENDING_META, json.dumps(rest))
-    except Exception:
-        pass
+    store.set_meta(SIM_PENDING_META, json.dumps(rest))
+    # Only acknowledge discard/delivery after the pending update succeeds.
+    for previous in pending_list:
+        if (previous is not mine and previous.get("conversation_id") == conversation_id
+                and previous.get("review_id") != mine.get("review_id")):
+            _record_advisory_discard(previous, reason="superseded", source="hook")
 
     age = tick - int(mine.get("tick", tick))
     if age > config.sim.max_stale_ticks:
+        from .supervisor import write_state
+        write_state(store, conversation_id, "skipped", reason="stale_age",
+                    delivery_drop_reason="stale_age", delivery_drop_tick=tick)
+        _record_advisory_discard(mine, reason="stale", source="hook")
         return None
     overlap = _overlap(mine.get("fingerprint") or [], _tail_fingerprint(current_window))
     if overlap < config.sim.min_overlap:
+        from .supervisor import write_state
+        write_state(store, conversation_id, "skipped", reason="stale_window",
+                    delivery_drop_reason="stale_window", delivery_drop_tick=tick)
+        _record_advisory_discard(mine, reason="stale", source="hook")
         return None
 
     # Focus-staleness drop: if the user's stated goal changed between enqueue and
@@ -1101,9 +1282,13 @@ def pop_pending_sim_injection(
     # intent — drop it rather than surface a directive pointing back at the old goal.
     enqueue_intent = _normalize(str(mine.get("intent") or ""))
     if enqueue_intent:
-        current_intent = _normalize(_capture_intent(store))
+        current_intent = _normalize(_capture_intent(store) if intent is None else intent)
         if current_intent and current_intent != enqueue_intent:
             _bump_counter(store, "focus_stale_drops")
+            from .supervisor import write_state
+            write_state(store, conversation_id, "skipped", reason="stale_goal",
+                        delivery_drop_reason="stale_goal", delivery_drop_tick=tick)
+            _record_advisory_discard(mine, reason="superseded", source="hook")
             return None
 
     injection = AttentionInjection(
@@ -1116,6 +1301,9 @@ def pop_pending_sim_injection(
 
     if config.sim.deposit_pheromone:
         _deposit_sim_pheromone(store, config)
+    from .supervisor import record_health
+    record_health(mine.get("scope"), "delivery", source="hook", reason="advisory",
+                  event_id=mine.get("review_id"), review_id=mine.get("review_id"))
     return injection
 
 
@@ -1185,14 +1373,26 @@ def spawn_background_drain(config: Config) -> bool:
     import os
     import subprocess
     import sys
+    from pathlib import Path
 
+    from .supervisor import config_snapshot
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", "kindex.cli", "sim", "drain"],
+        # The workspace is data, not import authority. Isolated mode ignores
+        # cwd, PYTHONPATH and user-site additions on every supported Python.
+        # Pin the package root already executing this hook so editable installs
+        # work as well as wheels, without trusting a same-named workspace tree.
+        package_root = str(Path(__file__).resolve().parent.parent)
+        bootstrap = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                     "from kindex.supervisor import worker_main; worker_main()")
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", bootstrap, package_root],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, start_new_session=True,
-            env={**os.environ},
+            stdin=subprocess.PIPE, text=True, start_new_session=True,
+            cwd=str(config._project_path or config.data_path),
+            env={key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "PYTHONHOME"}},
         )
+        process.stdin.write(json.dumps(config_snapshot(config)))
+        process.stdin.close()
         return True
     except Exception:
         return False

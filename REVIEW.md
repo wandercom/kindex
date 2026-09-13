@@ -3,11 +3,11 @@
 ## Always check
 
 - **Hermetic tests pass**: `pytest tests/ -q` must be green. Tests strip LLM/embedding API keys via conftest and isolate storage with `Config(data_dir=str(tmp_path))`. CLI tests run via subprocess (`[sys.executable, '-m', 'kindex.cli', ..., '--data-dir', ...]`); MCP tests import tool functions and monkeypatch the module-global `_store`/`_config` singletons. New tests must follow these patterns — no real network, no `~/.kindex` reads.
-- **Hub modules are additive-only**: `store.py` and `config.py` have high fan-in. Changes must add new methods/fields/classes only — never change existing function semantics or signatures. Edits must never route through `add_node` (INSERT OR REPLACE); node mutation goes through `update_node`/`edit_node` (UPDATE only).
+- **Hub modules require compatibility evidence**: `store.py` and `config.py` have high fan-in. Prefer additive methods, fields, and optional arguments. The shared project-store repair intentionally changes explicit project selection and diagnoses ambiguous implicit home/project selection; preserve named profiles, explicit configuration and data-directory overrides, and verify these boundaries. Edits must never route through `add_node` (INSERT OR REPLACE); node mutation goes through `update_node`/`edit_node` (UPDATE only).
 - **MCP tools match CLI**: a new capability needs both surfaces (CLI subcommand in `cli.py` and `@mcp.tool()` in `mcp_server.py`) with consistent behavior and defaults. Verify the decorator lands on the intended public function — a misplaced `@mcp.tool()` silently registers the wrong thing.
 - **Forward-only migrations**: schema changes in `schema.py` append migrations; never edit or reorder applied ones. Existing databases must open cleanly after the change.
 - **No private-audience data in git-tracked artifacts**: `.kin/index.json` and exports must respect audience boundaries (`public`/`team` only unless the repo `.kin` audience is `private`). No secrets, transcripts, machine-local state, absolute local paths, or developer-local report pointers in tracked `.kin/` files.
-- **Backward compatibility for no-profiles configs**: a config without `profiles:` must behave byte-identically to pre-profile kindex — `data_dir` untouched, `active_profile` None, no stamp written. Profile resolution must only activate when profiles are configured or explicitly requested.
+- **Backward compatibility for no-profiles configs**: preserve explicit `data_dir`, keep `active_profile` None, and write no profile stamp. An explicit project scope uses the shared project store; an implicit selection must diagnose a populated home graph being hidden by a project store. Profile resolution must only activate when profiles are configured or explicitly requested.
 
 ## Style
 

@@ -2,7 +2,7 @@
   "$schema": "https://modelcontextprotocol.io/schemas/server-card.json",
   "serverInfo": {
     "name": "kindex",
-    "version": "0.36.2",
+    "version": "0.37.0",
     "title": "Kindex",
     "description": "Persistent knowledge graph for Claude Code, Codex, Gemini CLI, Google Antigravity, OpenCode, Cursor, and other AI-assisted workflows. Quarantined automatic capture, explicit verification and invalidation, trusted-only retrieval, bounded trusted resume, hybrid FTS5 + graph retrieval, operational guardrails, reminders, and git-tracked .kin project context.",
     "homepage": "https://kindex.tools",
@@ -120,7 +120,8 @@
       "task_cancel",
       "task_execute",
       "task_get",
-      "task_update"
+      "task_update",
+      "kinbase_sync"
     ],
     "resources": [],
     "prompts": []

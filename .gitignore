@@ -25,3 +25,11 @@ kin.yaml
 .envrc
 .direnv/
 .harness/
+
+# Local signed corpus and private validation records; never publication inputs.
+/.kin/events/
+/.kin/manifests/
+/.kin/kinbase.toml
+/kinbase-compatibility.md
+/docs/reviews/2026-09-12-supervisor-repair.md
+/docs/reviews/supervisor-acceptance/

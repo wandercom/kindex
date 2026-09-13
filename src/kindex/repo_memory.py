@@ -154,6 +154,8 @@ def _publish_locked(store, root, node_ids: list[str]) -> dict:
             raise ValueError("Publish only active concept, decision, or question nodes")
         if node.get("audience") not in {"public", "team"}:
             raise ValueError("Publish requires explicit public/team audience; private nodes never enter Git")
+        if isinstance((node.get("extra") or {}).get("kinbase"), dict):
+            raise ValueError("Kinbase evidence cannot be published through the unsigned repo transport; use the original signed Kinbase events")
         selected[node_id] = node
     for node_id, node in selected.items():
         record = redact({"id": node["id"], "title": node["title"], "content": node.get("content", ""),

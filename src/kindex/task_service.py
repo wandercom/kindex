@@ -120,17 +120,21 @@ def task_record(node: dict) -> dict:
     })
 
 
-def _in_scope(node: dict, scope: dict) -> bool:
+def _in_scope(node: dict, scope: dict, store=None) -> bool:
     extra = node.get("extra") or {}
     if scope["include_global"] and extra.get("scope") == "global":
         return True
     project = extra.get("project_path")
+    if not project and store is not None:
+        from .project_store import is_project_store
+        if is_project_store(store, scope["project_path"]):
+            return True  # historical unscoped tasks in this repo's own database
     return bool(project) and str(Path(project).resolve()) == scope["project_path"]
 
 
 def _get(store, task_id: Any, scope: dict) -> dict:
     node = tasks.get_task(store, _identifier(task_id, "task id"))
-    if not node or not _in_scope(node, scope):
+    if not node or not _in_scope(node, scope, store):
         raise TaskServiceError("not_found", "Task not found in the requested scope")
     return node
 
@@ -172,7 +176,7 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
         if not isinstance(cursor, str):
             raise TaskServiceError("invalid_argument", "cursor must be text")
         found = sorted((node for node in tasks.list_tasks(store, status=status, limit=None)
-                        if _in_scope(node, scope) and node["id"] > cursor), key=lambda node: node["id"])
+                        if _in_scope(node, scope, store) and node["id"] > cursor), key=lambda node: node["id"])
         return {"tasks": [task_record(node) for node in found[:limit]],
                 "next_cursor": found[limit - 1]["id"] if len(found) > limit else None}
     if operation == "get":
@@ -193,7 +197,7 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
             namespace = _identifier(args.get("namespace"), "namespace")
             for prior in tasks.list_tasks(store, status="all", limit=None):
                 extra = prior.get("extra") or {}
-                if (_in_scope(prior, scope) and extra.get("conversation_id") == scope["session_id"]
+                if (_in_scope(prior, scope, store) and extra.get("conversation_id") == scope["session_id"]
                         and extra.get("task_namespace") == namespace and extra.get("external_id") == args["external_id"]):
                     raise TaskServiceError("external_id_conflict", "External task ID already exists in this collection")
         task_id = tasks.create_task(
@@ -251,7 +255,7 @@ def _reconcile(store, args: dict, scope: dict) -> dict:
     if len(set(external_ids)) != len(external_ids):
         raise TaskServiceError("invalid_argument", "Duplicate external_id in task collection")
     owned = {node["extra"]["external_id"]: node for node in tasks.list_tasks(store, status="all", limit=None)
-             if _in_scope(node, scope) and (node.get("extra") or {}).get("conversation_id") == scope["session_id"]
+             if _in_scope(node, scope, store) and (node.get("extra") or {}).get("conversation_id") == scope["session_id"]
              and (node.get("extra") or {}).get("task_namespace") == namespace
              and (node.get("extra") or {}).get("external_id")}
     results = []

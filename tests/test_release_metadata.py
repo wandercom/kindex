@@ -70,7 +70,7 @@ def test_public_command_counts_match_registered_surfaces():
     )
 
     assert f"{tool_count} MCP Tools" in docs
-    assert tool_count == 65
+    assert tool_count == 66
     assert len(choices) >= 80
     assert "80+ CLI Commands" in docs
 

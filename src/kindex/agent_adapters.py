@@ -24,6 +24,29 @@ ADAPTER_ALIASES = {
 }
 
 
+def hook_project_path(payload: dict, explicit: str | None = None) -> str:
+    """Resolve native workspace metadata, independent of a hook's process cwd.
+
+    Antigravity runs global hook commands in its configuration directory and
+    sends the real workspace in workspacePaths. Multiple distinct worktrees
+    require an explicit project selection instead of arbitrarily taking one.
+    """
+    from pathlib import Path
+    from .config import resolve_project_root
+    selected = explicit or payload.get("cwd") or payload.get("project_path")
+    if selected:
+        if not isinstance(selected, str) or not Path(selected).is_absolute():
+            raise ValueError("Hook project path must be absolute")
+        return str(resolve_project_root(selected))
+    paths = payload.get("workspacePaths") or payload.get("workspace_paths") or payload.get("workspace_roots")
+    if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not Path(p).is_absolute() for p in paths):
+        raise ValueError("Hook requires an explicit workspace path")
+    roots = {str(resolve_project_root(path)) for path in paths}
+    if len(roots) != 1:
+        raise ValueError("Hook has multiple workspaces; select one explicit project_path")
+    return roots.pop()
+
+
 def normalize_adapter(adapter: str | None) -> str:
     """Return Kindex's canonical client/adapter name."""
     value = (adapter or "plain").strip().lower()
@@ -140,6 +163,14 @@ def render_hook_context(
 
     if canonical == "plain":
         return context
+
+    if canonical == "cursor":
+        if hook_event in {"sessionStart", "postToolUse"}:
+            return _json({"additional_context": context})
+        if hook_event == "stop":
+            return _json({"followup_message": context})
+        # Cursor's prompt/response hooks have no context injection field.
+        return _json({"continue": True} if hook_event == "beforeSubmitPrompt" else {})
 
     if canonical == "antigravity":
         if hook_event == "PreToolUse":

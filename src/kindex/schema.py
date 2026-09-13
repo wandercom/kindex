@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
+
+STANDINGS = ("unruled", "present", "prevalent", "exemplary", "enforced", "ratified", "authoritative")
 
 # Audience scopes for tenancy model
 AUDIENCES = ("private", "team", "org", "public")
@@ -115,6 +117,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     asserted_at TEXT,
     true_of TEXT,
     -- scoring
+    standing TEXT NOT NULL DEFAULT 'unruled',
     weight REAL NOT NULL DEFAULT 0.5,
     domains TEXT NOT NULL DEFAULT '',       -- JSON array
     status TEXT NOT NULL DEFAULT 'active',  -- active / archived / deprecated / open-question

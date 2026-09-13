@@ -239,3 +239,13 @@ expired, then run:
 ```bash
 mcp-publisher publish server.json
 ```
+
+## v0.37.0 Supervision, Notifications, and Transfer
+
+Periodic reviews compare the user's goal with recent actions, open tasks, constraints, and validation evidence. Before scaling workers or a long run, use a small representative pilot, state the expected durable outcome, and verify actual completed/remaining counts and restart/rebuild invariance. Review providers, cadence, budget, and optional Advocate escalation come from trusted user configuration. Quiet completion, missing credentials, failure, budget exhaustion, and undelivered advice remain distinct states.
+
+Install host adapters with `kin setup-hooks --mode modern` (qualified Claude version), `kin setup-codex-hooks`, `kin setup-opencode-hooks`, `kin setup-antigravity-hooks`, or `kin setup-cursor-hooks`. Start a new host session afterward. Antigravity needs an explicit workspace. Cursor authenticated delivery and IDE activity discovery remain unverified.
+
+`python3 -m kindex.supervisor_health install` enables the independent macOS checker. Sustained issues enter a private durable inbox; native desktop alerts are enabled by default while root mail remains off. No Postfix setup is required. Read `python3 -m kindex.supervisor_health inbox --json`; acknowledge an occurrence with `python3 -m kindex.supervisor_health ack --id ALERT_ID --json`. Acknowledgment does not resolve the underlying issue. Delivery acceptance is not human reading or usefulness; explicit `feedback --project PATH --agent HOST --session ID --verdict useful|acted_on|dismissed` records that distinction. See https://kindex.tools/supervisor-health.md for configuration and qualification boundaries.
+
+Project hooks and MCP use one durable store resolver and preserve conflicting populated stores. Explicit personal/company scopes remain separate. Kinbase imports preserve signed source bytes and distinguish raw evidence from reduced snapshots; schema 13 adds provenance-limited standing. Atomic JSON/JSONL graph transfer retains lifecycle and source identity without importing local verification authority. Shared exports scrub private paths and nested contact data. Doctor verifies actual FTS postings and repairs transactionally.
