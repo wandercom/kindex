@@ -26,6 +26,13 @@ from kindex import subscription_review as native
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="Local transport qualification requires tmux")
 
 
+@pytest.fixture(autouse=True)
+def isolated_health_registry(tmp_path, monkeypatch):
+    root = tmp_path / "health"
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(root))
+    return root
+
+
 FAKE_CODEX = r'''
 import json, os, pathlib, subprocess, sys, time
 ARGS = sys.argv[1:]
@@ -99,6 +106,7 @@ def test_a4_real_tmux_preserves_literal_prompt_filters_environment_and_resumes_e
     assert prompts[0] == hostile or hostile in calls[0]["argv"], "A4: native provider receives the exact literal prompt"
     assert not sentinels.intersection(calls[0]["env_names"])
     assert "KINDEX_REVIEW_WORKER" in calls[0]["env_names"]
+    assert "KIN_HEALTH_DIR" in calls[0]["env_names"], "The worker must inherit the explicit isolated health registry"
 
     second = native.run_review(Config(**cfg.model_dump()), "literal-and-resume", "Second synthetic review")
     assert second.get("status") == "ok" and second.get("session_id") == expected_id
@@ -151,12 +159,19 @@ def test_a3_a4_timeout_retains_reservation_and_terminates_provider_children(tmp_
                     pass
 
 
-def test_r2_native_session_id_emitted_before_timeout_is_used_for_next_fresh_review(tmp_path, monkeypatch):
+def test_r2_native_session_id_emitted_before_timeout_is_used_for_next_fresh_review(tmp_path, monkeypatch, isolated_health_registry):
     cfg, receipts, expected_id, _ = install_fake(tmp_path, monkeypatch, first_timeout=True)
     try:
         first = native.run_review(cfg, "first-turn-timeout", "First review which deliberately times out")
         assert first.get("status") != "ok", first
         assert len(rows(receipts / "calls.jsonl")) == 1
+        # The first review never produced a successful parent receipt: this
+        # registration can only come from the worker's streamed native init.
+        registry = isolated_health_registry / "health.sqlite3"
+        assert registry.is_file(), "Interrupted workers must use the explicitly isolated health registry"
+        with sqlite3.connect(registry.as_uri() + "?mode=ro", uri=True) as conn:
+            assert any(expected_id in statement for statement in conn.iterdump()), \
+                "The worker must persist its known native identity before parent completion"
         # Construct a fresh Config so receipt persistence, not caller-local state,
         # owns the native identity after unsuccessful first-turn completion.
         second = native.run_review(Config(**cfg.model_dump()), "first-turn-timeout", "New review after timeout")

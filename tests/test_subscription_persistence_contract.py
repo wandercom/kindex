@@ -21,6 +21,11 @@ from kindex import subscription_review as native
 CONVERSATION = "persisted-wire-conversation"
 
 
+@pytest.fixture(autouse=True)
+def isolated_health_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(tmp_path / "health"))
+
+
 @pytest.fixture
 def wire(tmp_path, monkeypatch):
     cfg = Config(data_dir=str(tmp_path / "data"), sim={

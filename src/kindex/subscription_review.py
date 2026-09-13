@@ -268,7 +268,7 @@ def _session_id(value):
 
 
 def _environment():
-    return {**{key: os.environ[key] for key in ("HOME", "PATH", "USER", "LANG", "TMPDIR") if key in os.environ},
+    return {**{key: os.environ[key] for key in ("HOME", "PATH", "USER", "LANG", "TMPDIR", "KIN_HEALTH_DIR") if key in os.environ},
             "KINDEX_REVIEW_WORKER": "1"}
 
 

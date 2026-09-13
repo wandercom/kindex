@@ -39,6 +39,7 @@ def hermetic(monkeypatch, tmp_path):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("KINDEX_REVIEW_WORKER", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(tmp_path / "health"))
     monkeypatch.setattr("kindex.llm.get_client", Mock(return_value=None))
     monkeypatch.setattr(supervisor, "record_health", lambda *a, **kw: None)
     monkeypatch.setattr(sim, "spawn_background_drain", lambda *a, **kw: False)
