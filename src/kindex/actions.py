@@ -158,11 +158,10 @@ def _update_action_status(
     store: Store, rid: str, reminder: dict, status: str, result: str,
 ) -> None:
     """Write ``action_status`` and ``action_result`` into the reminder's extra."""
-    extra = dict(reminder.get("extra") or {})
-    extra["action_status"] = status
-    extra["action_result"] = redact_text(result)[:4000]
-    extra["action_executed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-    store.update_reminder(rid, extra=extra)
+    store.update_reminder_action(
+        rid, status=status, result=redact_text(result)[:4000],
+        executed_at=datetime.datetime.now().isoformat(timespec="seconds"),
+    )
 
 
 def _run_shell(command: str, *, timeout: int = 300) -> dict:

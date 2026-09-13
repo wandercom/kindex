@@ -65,3 +65,26 @@ def test_idempotent_legacy_install_does_not_rewrite_settings(tmp_path):
     before = settings.stat().st_mtime_ns
     install(cfg)
     assert settings.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize("old_path", ["/opt/homebrew/bin/kin", "/usr/local/bin/kin"])
+def test_explicit_historical_location_requires_exact_command(old_path):
+    from kindex.claude_install import _known_commands
+    from kindex.setup import _kin_stop_hook_command
+
+    known = _known_commands(Config(), "/current/bin/kin")
+    command = _kin_stop_hook_command(old_path, ["compact-hook", "--text", "Session ended"])
+    assert command in known
+    assert command.replace("\n", "\\n") in known
+    assert command + "; custom-audit" not in known
+    assert command.replace("then exit 0", "then exit 7") not in known
+
+
+@pytest.mark.parametrize("unknown_path", ["/custom/bin/kin", "/custom tools/bin/kin"])
+def test_custom_kin_location_is_not_implicitly_owned(unknown_path):
+    from kindex.claude_install import _known_commands
+    from kindex.setup import _kin_stop_hook_command
+
+    command = _kin_stop_hook_command(unknown_path, ["compact-hook", "--text", "Session ended"])
+    assert command not in _known_commands(Config(), "/current/bin/kin")
+    assert command in _known_commands(Config(), unknown_path)

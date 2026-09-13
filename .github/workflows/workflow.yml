@@ -5,19 +5,15 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev,mcp]"
-      - run: pytest
+  ci:
+    uses: ./.github/workflows/ci.yml
 
   build:
-    needs: test
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

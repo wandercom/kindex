@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.36.2] - 2026-09-10
+
 ### Added
 - Optional Claude function-hook adapter, qualified against 2.1.263, with repo-local
   task routing, contextual retrieval, quarantined turn capture and visible owner
@@ -21,6 +23,12 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   Personal fallback or unsigned Company authority.
 
 ### Fixed
+- Legacy Claude hooks migrate from explicitly supported prior executable locations
+  while preserving custom commands.
+- Full pytest validation runs on pull requests and main pushes using the same job
+  that gates release builds and PyPI publication.
+- Automatic reminder snoozes preserve the action execution cutoff, preventing
+  stale actions from being revived by notification retries.
 - Claude advisory context no longer emits a permission auto-allow.
 - Shared credential sanitizer protects Kindex-owned persistence, logging, export,
   candidate, model and embedding boundaries without entropy-based destruction of
@@ -30,8 +38,7 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Hook installation tracks exact owned commands, preserves foreign siblings,
   reports unknown wrappers, backs up settings and uses correct Claude timeout units.
 
-See [function-hook boundaries and migration](docs/claude-function-hooks.md). A public
-major release is not cut by this development change.
+See [function-hook boundaries and migration](docs/claude-function-hooks.md).
 
 ## [0.36.0] - 2026-09-02
 

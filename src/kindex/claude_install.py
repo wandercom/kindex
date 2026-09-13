@@ -71,8 +71,10 @@ def _known_commands(config, kin_path):
                   "compact-hook", "compact-hook --emit-context", "stop-guard",
                   "attention reinforce --enqueue", "dream --detach --lightweight",
                   'compact-hook --text "Session ended"']
+    # Known prior install locations; never infer ownership from arbitrary paths.
+    historical_binaries = ("/opt/homebrew/bin/kin", "/usr/local/bin/kin")
     for args in historical:
-        for binary in dict.fromkeys(["kin", kin_path]):
+        for binary in dict.fromkeys(["kin", kin_path, *historical_binaries]):
             commands.add(f"{binary} {args}")
             commands.add(_kin_hook_command(binary, shlex.split(args)))
             commands.add(_kin_stop_hook_command(binary, shlex.split(args)))

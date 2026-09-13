@@ -38,6 +38,11 @@ def test_version_is_consistent_across_release_surfaces():
     assert registry["version"] == version
     assert registry["packages"][0]["version"] == version
     assert card["serverInfo"]["version"] == version
+    for manifest in (
+        ".claude-plugin/plugin.json",
+        "src/kindex/claude_modern/.claude-plugin/plugin.json",
+    ):
+        assert json.loads((ROOT / manifest).read_text())["version"] == version
     assert f"version-{version}-purple" in readme
     assert f"v{version}" in docs
     assert re.search(rf"^## \[{re.escape(version)}\]", changelog, re.MULTILINE)
