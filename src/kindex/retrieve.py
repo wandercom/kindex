@@ -355,6 +355,7 @@ def hybrid_search(
     from .trust import _operation_time, node_trust_decision
 
     admission_time = _operation_time(evaluation_time) if trusted_only else None
+    admission_today = admission_time.date().isoformat() if admission_time else None
 
     def standing_candidate_eligible(node):
         extra = node.get("extra")
@@ -363,7 +364,7 @@ def hybrid_search(
         # precedence must not let ineligible evidence consume that window.
         if not imported and node.get("standing", "unruled") == "unruled":
             return True
-        if (trusted_only or not include_expired) and node_expired(node):
+        if (trusted_only or not include_expired) and node_expired(node, today=admission_today):
             return False
         if trusted_only and not node_trust_decision(store, node, at=admission_time).eligible:
             return False
@@ -536,13 +537,8 @@ def hybrid_search(
     seen: set[str] = set()
     fenced_nodes: dict[str, dict] = {}
     trust_omissions: Counter[str] = Counter()
-    trusted_at = None
-    trusted_today = None
-    if trusted_only:
-        from .trust import _operation_time
-
-        trusted_at = _operation_time(evaluation_time)
-        trusted_today = trusted_at.date().isoformat()
+    trusted_at = admission_time
+    trusted_today = admission_today
     for nid, score in merged:
         if len(results) >= top_k:
             break

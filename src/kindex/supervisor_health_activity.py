@@ -17,6 +17,21 @@ WINDOW = 65536
 RECENT = 1200
 
 
+class ObservationIncomplete(ValueError):
+    """A bounded source scan cannot establish complete host coverage."""
+
+    def __init__(self, message, *, source_present=True):
+        super().__init__(message)
+        self.source_present = source_present
+
+
+def _extend_candidates(candidates, paths):
+    additional = list(islice(paths, max(0, 10001 - len(candidates))))
+    if len(candidates) + len(additional) > 10000:
+        raise ObservationIncomplete("Native file enumeration limit reached")
+    candidates.extend(additional)
+
+
 def _rows(path, head=False):
     with path.open("rb") as stream:
         size = path.stat().st_size
@@ -43,10 +58,12 @@ def _recent_dirs(root):
     with os.scandir(root) as scan:
         for index, entry in enumerate(scan):
             if index >= 10000:
-                break
+                raise ObservationIncomplete("Native directory enumeration limit reached")
             if entry.is_dir(follow_symlinks=False):
                 entries.append((entry.stat().st_mtime, Path(entry.path)))
-    return [p for _, p in sorted(entries, reverse=True)[:MAX_DIRS]]
+    if len(entries) > MAX_DIRS:
+        raise ObservationIncomplete("Native project directory limit reached")
+    return [p for _, p in sorted(entries, reverse=True)]
 
 
 
@@ -61,10 +78,12 @@ def _codex_index(root, now):
     try:
         rows = connection.execute(
             "SELECT rollout_path FROM threads WHERE updated_at>=? AND updated_at<=? ORDER BY updated_at DESC LIMIT ?",
-            (int(now - RECENT), int(now + 60), MAX_FILES),
+            (int(now - RECENT), int(now + 60), MAX_FILES + 1),
         ).fetchall()
     finally:
         connection.close()
+    if len(rows) > MAX_FILES:
+        raise ObservationIncomplete("Native Codex session index limit reached", source_present=root.exists())
     candidates = []
     resolved_root = root.resolve()
     for (value,) in rows:
@@ -83,7 +102,7 @@ def _files(agent, now):
         candidates = []
         for directory in _recent_dirs(root):
             # Top-level sessions; Claude's subagents are not separate hook sessions.
-            candidates.extend(islice(directory.glob("*.jsonl"), max(0, 10000 - len(candidates))))
+            _extend_candidates(candidates, directory.glob("*.jsonl"))
     elif agent == "codex":
         root = Path(os.environ.get("CODEX_HOME", str(home / ".codex"))) / "sessions"
         day = datetime.fromtimestamp(now, timezone.utc)
@@ -91,7 +110,7 @@ def _files(agent, now):
         for offset in range(2):
             directory = root / (day - timedelta(days=offset)).strftime("%Y/%m/%d")
             if directory.is_dir():
-                candidates.extend(islice(directory.glob("*.jsonl"), max(0, 10000 - len(candidates))))
+                _extend_candidates(candidates, directory.glob("*.jsonl"))
     else:
         root = home / ".gemini" / "antigravity-cli" / "brain"
         candidates = [p / ".system_generated/logs/transcript_full.jsonl" for p in _recent_dirs(root)]
@@ -103,7 +122,9 @@ def _files(agent, now):
                 eligible.append((stat.st_mtime, path))
         except OSError:
             continue
-    return root, [p for _, p in sorted(eligible, reverse=True)[:MAX_FILES]]
+    if len(eligible) > MAX_FILES:
+        raise ObservationIncomplete("Native recent transcript limit reached")
+    return root, [p for _, p in sorted(eligible, reverse=True)]
 
 
 def _ag_projects():
@@ -231,7 +252,9 @@ def _opencode(now):
     try:
         # Only identity and timestamp columns are selected; no prompts or titles.
         rows = conn.execute("SELECT s.id,s.directory,max(m.time_updated) FROM session s JOIN message m ON m.session_id=s.id WHERE m.time_updated>=? GROUP BY s.id ORDER BY max(m.time_updated) DESC LIMIT ?",
-                            (int((now - RECENT) * 1000), MAX_FILES)).fetchall()
+                            (int((now - RECENT) * 1000), MAX_FILES + 1)).fetchall()
+        if len(rows) > MAX_FILES:
+            raise ObservationIncomplete("Native OpenCode session limit reached")
         for sid, project, at in rows:
             scope = {"project_path": project, "agent": "opencode", "session_id": sid}
             record(scope, "activity", {"at": at / 1000, "source": "native", "event_id": "native:" + str(at)})
@@ -272,7 +295,7 @@ def _cursor(now):
             for entry in directories:
                 scanned += 1
                 if scanned > 10000:
-                    break
+                    raise ObservationIncomplete("Native Cursor session enumeration limit reached")
                 if not entry.is_dir(follow_symlinks=False):
                     continue
                 path = Path(entry.path) / "meta.json"
@@ -283,9 +306,9 @@ def _cursor(now):
                             candidates.append((modified, path))
                 except OSError:
                     result["errors"] += 1
-        if scanned > 10000:
-            break
-    for _, path in sorted(candidates, reverse=True)[:MAX_FILES]:
+    if len(candidates) > MAX_FILES:
+        raise ObservationIncomplete("Native Cursor recent session limit reached")
+    for _, path in sorted(candidates, reverse=True):
         try:
             with path.open("rb") as stream:
                 data = stream.read(WINDOW + 1)
@@ -337,14 +360,23 @@ def observe_activity(now):
                     errors += 1
             result[agent] = {"state": "observed" if count else "not_observed", "sessions": count,
                              "unidentified": unidentified, "errors": errors, "source_present": root.exists()}
+        except ObservationIncomplete as error:
+            result[agent] = {"state": "unavailable", "sessions": 0, "errors": 1, "reason": "scan_limit",
+                             "source_present": error.source_present}
         except (OSError, ValueError, sqlite3.Error):
             result[agent] = {"state": "unavailable", "sessions": 0}
     try:
         result["opencode"] = _opencode(now)
+    except ObservationIncomplete as error:
+        result["opencode"] = {"state": "unavailable", "sessions": 0, "errors": 1, "reason": "scan_limit",
+                              "source_present": error.source_present}
     except (OSError, ValueError, sqlite3.Error):
         result["opencode"] = {"state": "unavailable", "sessions": 0}
     try:
         result["cursor"] = _cursor(now)
+    except ObservationIncomplete as error:
+        result["cursor"] = {"state": "unavailable", "sessions": 0, "errors": 1, "reason": "scan_limit",
+                            "source_present": error.source_present}
     except (OSError, ValueError, sqlite3.Error):
         result["cursor"] = {"state": "unavailable", "sessions": 0}
     return result

@@ -35,6 +35,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   repeated repairs idempotent.
 - Stale, evicted, and superseded reviews receive exact terminal receipts. Idle
   sessions do not acquire false missing-hook alerts solely from elapsed time.
+- Trusted historical recall applies the requested evaluation date consistently.
+  Native session scans report incomplete coverage when a scan limit is reached.
 
 ### Qualification boundaries
 - Native advisory delivery was exercised in Claude, Codex, OpenCode, and
