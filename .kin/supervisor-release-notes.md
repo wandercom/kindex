@@ -19,3 +19,14 @@ scrubbing private paths and nested contact data from shared exports.
 
 Local source corpora, private validation artifacts and team-only publication
 records are excluded from this public repository's release inputs.
+
+Sustained health issues enter a private durable inbox independently of external
+notification success. Native macOS alerts reuse the existing user checker;
+root mail remains opt-in. Per-occurrence acknowledgment and per-transport retry
+and cooldown state survive restarts. Submission acceptance is not proof of a
+visible banner, human reading, or useful advice.
+
+The release reconciles upstream reminder concurrency, legacy-hook migration and
+CI work, doctor FTS integrity repairs, and transactional graph transfer. Background
+supervision imports the already-running trusted Kindex package under Python
+isolated mode so a reviewed workspace cannot shadow worker modules.

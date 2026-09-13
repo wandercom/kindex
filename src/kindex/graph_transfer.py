@@ -31,27 +31,47 @@ LIFECYCLE_KEYS = (
 def scrub_shared_text(value: str) -> str:
     """Remove contact and machine-path prose while retaining evidence URLs."""
     value = re.sub(r'\S+@\S+\.\S+', '[email]', value)
-    return re.sub(r'''https?://[^\s"'<>]+|(?<![\w:/])(?:[A-Za-z]:[\\/]|/(?!/)|~/)[^\s"'<>]+''',
+    return re.sub(r'''https?://[^\s"'<>]+|(?<![\w:/\\])(?:[A-Za-z]:|\\\\|//|/(?!/)|~/)[^\s"'<>]+''',
                   lambda match: match[0] if match[0].startswith(("https://", "http://")) else "[path]", value)
 
 
 def scrub_kinbase_metadata(metadata: dict) -> dict:
     """Preserve evidence structure and stable grouping without shared-copy PII."""
+    source = redact(metadata)
+    identities = {}
+
+    def collect(value):
+        if isinstance(value, dict):
+            candidates = [value.get(key) for key in ("logical_key", "source_identity", "repo")]
+            if isinstance(value.get("evidence_refs"), list):
+                candidates.extend(value["evidence_refs"])
+            for key in candidates:
+                if isinstance(key, str) and scrub_shared_text(key) != key:
+                    identities[key] = "sha256:" + hashlib.sha256(key.encode()).hexdigest()
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(source)
+
     def scrub(value):
         if isinstance(value, str):
-            return scrub_shared_text(value)
+            # Logical identities also appear in evidence_refs and reducer
+            # receipts. Match exact references throughout this evidence tree.
+            return identities.get(value, scrub_shared_text(value))
         if isinstance(value, list):
             return [scrub(item) for item in value]
         if isinstance(value, dict):
             result = {}
             for key, item in value.items():
-                clean_key = scrub_shared_text(key)
+                clean_key = identities.get(key, scrub_shared_text(key))
                 if clean_key in result:
                     raise ValueError("Sharing redaction would merge Kinbase metadata fields")
                 result[clean_key] = "[owner identity redacted]" if key == "owner_identity" and item else scrub(item)
             return result
         return value
-    source = redact(metadata)
     result = scrub(source)
     repo = source.get("repo", "")
     if not isinstance(repo, str):
@@ -85,7 +105,10 @@ def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, publi
             if isinstance(record.get(key), str):
                 record[key] = scrub_shared_text(record[key])
         for key in ("aka", "domains"):
-            record[key] = [scrub_shared_text(value) for value in record[key]]
+            record[key] = ["sha256:" + hashlib.sha256(value.encode()).hexdigest()
+                           if key == "aka" and isinstance(record["extra"].get("kinbase"), dict)
+                           and scrub_shared_text(value) != value else scrub_shared_text(value)
+                           for value in record[key]]
         if isinstance(record["extra"].get("kinbase"), dict):
             record["extra"]["kinbase"] = scrub_kinbase_metadata(record["extra"]["kinbase"])
             record["prov_source"] = "kinbase:" + record["extra"]["kinbase"]["repo"]
@@ -153,7 +176,17 @@ def _fields(item: dict) -> dict:
         if not isinstance(metadata, dict):
             raise ValueError("Kinbase metadata must be an object")
         metadata = dict(metadata)
-        for key in ("repo", "source_identity", "logical_key", "mode", "provenance"):
+        for key in ("repo", "logical_key"):
+            if not isinstance(metadata.get(key), str) or not metadata[key].strip():
+                raise ValueError(f"Kinbase {key} must be nonempty text")
+        if metadata.get("mode") not in ("raw", "reduced"):
+            raise ValueError("Kinbase mode must be raw or reduced")
+        if "source_identity" in metadata and (not isinstance(metadata["source_identity"], str)
+                                               or not metadata["source_identity"].strip()):
+            raise ValueError("Kinbase source_identity must be nonempty text")
+        if "reduction" in metadata and not isinstance(metadata["reduction"], dict):
+            raise ValueError("Kinbase reduction must be an object")
+        for key in ("provenance", "owner_role", "owner_identity", "status"):
             if key in metadata and not isinstance(metadata[key], str):
                 raise ValueError(f"Kinbase {key} must be text")
         for key in ("standing", "claimed_standing"):

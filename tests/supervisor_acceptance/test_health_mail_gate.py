@@ -14,7 +14,9 @@ from test_health import b, issues
 
 
 def install_plan(b):
-    result = subprocess.run([sys.executable, "-m", "kindex.supervisor_health",
+    # Simulated macOS plan qualification only; no native operation is performed.
+    result = subprocess.run([sys.executable, "-c",
+                             "from kindex import supervisor_health as health; import sys; sys.platform='darwin'; health.main()",
                              "install", "--dry-run", "--json"],
                             text=True, capture_output=True, env=b.env)
     assert result.returncode == 0, result.stderr  # Public dry-run installer API.

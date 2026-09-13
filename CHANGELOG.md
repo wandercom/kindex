@@ -4,6 +4,43 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-12
+
+### Added
+- Shared periodic goal, trajectory, adherence, and validation reviews for Claude,
+  Codex, OpenCode, Antigravity, and Cursor. Trusted configuration controls review
+  providers, cadence, budgets, and optional Advocate escalation.
+- Independent health monitoring distinguishes hook execution, agent use, review
+  outcomes, advice delivery, and explicit usefulness feedback. A durable inbox
+  and native macOS desktop alerts surface sustained issues without a mail daemon;
+  root mail remains a separate opt-in. Acknowledgment, recurrence, cooldowns, and
+  transport retries persist across checker restarts.
+- Kinbase interoperability verifies signed source bytes, preserves source identity
+  and effective times, and distinguishes raw evidence from reduced snapshots.
+  Schema 13 adds provenance-limited standing. Shared exports scrub nested private
+  paths and contact data without rewriting signed source events.
+
+### Fixed
+- Project hooks and MCP resolve the same durable project store; conflicting
+  populated stores are diagnosed and preserved instead of silently selecting an
+  empty graph. Explicit personal and company scopes remain separate.
+- JSON/JSONL graph transfers are atomic, preserve lifecycle and provenance, and
+  keep imported verification as evidence rather than granting local authority.
+  Replays are idempotent; conflicting claims fail without partial writes.
+- Doctor checks actual FTS postings, repairs corruption transactionally, and keeps
+  repeated repairs idempotent.
+- Stale, evicted, and superseded reviews receive exact terminal receipts. Idle
+  sessions do not acquire false missing-hook alerts solely from elapsed time.
+
+### Qualification boundaries
+- Native advisory delivery was exercised in Claude, Codex, OpenCode, and
+  Antigravity. Cursor's adapter and session metadata have automated coverage;
+  authenticated model delivery and IDE activity discovery remain unverified.
+- Desktop submission and advisory delivery do not prove a person read the output
+  or found it useful. Explicit feedback records that distinction.
+
+See [supervision and notifications](docs/supervisor-health.md).
+
 ## [0.36.2] - 2026-09-10
 
 ### Added

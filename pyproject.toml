@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kindex"
-version = "0.36.2"
+version = "0.37.0"
 description = "Every agent is smart inside its own silo. Kindex lets them work together: a local-first knowledge graph and MCP server shared by Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and Cursor."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,7 +68,12 @@ packages = ["src/kindex"]
 
 [tool.hatch.build.targets.sdist]
 # Runtime state is private even when a build backend does not honor Git ignores.
-exclude = ["/.kin/local", "/.kin/local/**"]
+exclude = [
+    "/.kin/local", "/.kin/local/**",
+    "/.kin/events", "/.kin/events/**",
+    "/.kin/manifests", "/.kin/manifests/**", "/.kin/kinbase.toml",
+    "/kinbase-compatibility.md", "/docs/reviews/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

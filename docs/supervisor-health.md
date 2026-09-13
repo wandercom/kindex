@@ -77,7 +77,7 @@ separate from the knowledge graph. It records scoped hook invocations, agent use
 review outcomes, delivery, and explicit feedback. Native transcript/index metadata
 lets the checker notice active sessions whose hooks never fired. It retains
 identifiers, times, fixed codes, and counts; it does not copy conversation content
-or arbitrary tool arguments into the registry or mail.
+or arbitrary tool arguments into the registry or notifications.
 
 ```sh
 python3 -m kindex.supervisor_health install --dry-run
@@ -88,7 +88,7 @@ python3 -m kindex.supervisor_health check --json
 
 On macOS, installation creates `com.kindex.supervisor-health` as a user launchd
 agent, running every 60 seconds independently of the coding agent. Installation
-backs up existing settings. Monitoring works with mail disabled. `uninstall` removes the service and disables monitoring while
+backs up existing settings. Sustained issues enter a durable local inbox. Desktop alerts are enabled by default on macOS when monitoring is installed; root mail remains off. `uninstall` removes the service and disables monitoring while
 preserving evidence. `KIN_HEALTH_DIR` provides an explicit isolated diagnostic
 registry; it is also an opt-in for automatic recording in that process.
 
@@ -97,6 +97,8 @@ The trusted health `config.json` defaults are:
 | Setting | Default |
 | --- | --- |
 | `enabled` | `false`; installation enables it |
+| `desktop_enabled` | `true`; native desktop alerts when monitoring is enabled |
+| `desktop_command` | `/usr/bin/osascript`; trusted absolute executable |
 | `mail_enabled` | `false`; separate explicit opt-in for root mail |
 | `active_seconds` | 1200 |
 | `hook_grace_seconds` | 300 |
@@ -129,7 +131,7 @@ are separately reported as unverified; actual scoped hook/MCP receipts can still
 record operation. A configured Cursor hook or successful CLI installation alone
 does not establish an authenticated native model run.
 
-## Value and local root mail
+## Value and notifications
 
 Delivery and a reviewer's self-rating do not demonstrate usefulness. Value remains
 unverified until explicit feedback is recorded:
@@ -143,19 +145,32 @@ Other verdicts are `dismissed` and `acted_on`. These are attributed feedback, no
 independent guarantee of usefulness. Apply them to the actual host session whose
 advice was evaluated.
 
-Root mail is optional. Only explicit `mail_enabled: true` in the trusted health
-configuration allows `check --notify` to send sustained issues to local system
-mail for **root only**. Installation and reinstallation preserve that choice and
-omit `--notify` when mail is off. A command-line `--notify` cannot override the
-mail-disabled setting. The local user has declined Postfix: monitoring remains
-on, root mail is off, and no replacement desktop alert transport is claimed. Recipient arguments are fixed and no shell is used.
-Mail includes scope identifiers, counts, times, issue codes, and a diagnostic
-command. Cooldowns persist across restarts; transport errors remain visible and
-retryable.
+Sustained issues create durable inbox entries even when a check does not request
+notifications. Each occurrence has a stable alert ID and stays unread until
+acknowledged or resolved. Acknowledgment stops repeat alerts for that occurrence;
+it does not mark the underlying health problem fixed. A recurrence after resolution
+gets a new alert ID. Records are retained for 30 days.
 
-A successful `sendmail` exit means acceptance, not mailbox delivery or human
-reading. Local mail service must be running. On macOS, `mailq` can reveal a stopped
-Postfix service; starting it may require `sudo /usr/sbin/postfix start` in an
-administrator's terminal. Inspect `~/.kindex/health/stderr.log` and launchd status
-if the checker itself stops; `status` reports a stale last check rather than
-claiming the monitor is healthy.
+```sh
+python3 -m kindex.supervisor_health inbox --json
+python3 -m kindex.supervisor_health ack --id ALERT_ID --json
+python3 -m kindex.supervisor_health check --notify --json
+```
+
+The existing checker submits native macOS notifications without Postfix, root
+access, or another account. A banner contains fixed issue information and an alert
+ID; private scope details remain in the owner-only inbox. Native transport errors
+are explicit and retryable. Submission acceptance does not prove a banner appeared
+or that a person read it; desktop permissions and notification settings still apply.
+On an unsupported platform, the native transport reports that state and retains
+the inbox entry. No additional background service is installed for notifications.
+
+Set `desktop_enabled: false` to disable desktop submissions. Root mail is separately
+optional: only explicit `mail_enabled: true` permits the checker to submit messages
+to local **root**. Installation preserves both choices and schedules `--notify`
+when either transport is enabled. A command-line `--notify` cannot override a
+disabled transport. Root mail requires a working local mail service; a successful
+`sendmail` exit means acceptance, not mailbox delivery or human reading.
+
+Inspect `~/.kindex/health/stderr.log` and launchd status if the checker itself stops;
+`status` reports a stale last check rather than claiming the monitor is healthy.

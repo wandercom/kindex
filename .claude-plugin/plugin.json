@@ -1,7 +1,7 @@
 {
   "name": "kindex",
   "description": "Every agent is smart inside its own silo. Kindex lets them work together: a persistent knowledge graph that Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and Cursor all read and write.",
-  "version": "0.36.2",
+  "version": "0.37.0",
   "author": {
     "name": "Wander",
     "url": "https://github.com/wandercom"

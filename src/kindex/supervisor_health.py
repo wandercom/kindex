@@ -2,7 +2,8 @@
 
 The registry contains identifiers, timestamps, counters and fixed codes only. It is
 not a second knowledge graph. Delivery and observed calls do not establish value.
-Notifications are opt-in, local root mail, with durable failure/cooldown state.
+Monitoring is opt-in; its durable inbox and native desktop alerts need no mail daemon.
+Root mail remains a separate explicit opt-in.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+from .supervisor_notifications import REASONS, SUBMISSION_TIMEOUT_SECONDS, diagnostic_command
 
 KINDS = {"hook", "use", "review", "delivery", "feedback", "activity"}
 TOOLS = {"search", "context", "ask", "show", "add", "edit", "learn", "link",
@@ -22,7 +24,8 @@ TOOLS = {"search", "context", "ask", "show", "add", "edit", "learn", "link",
          "task_release", "task_get", "task_execute", "tag_start", "tag_resume",
          "tag_update", "status", "list_nodes", "suggest", "graph_stats",
          "watch_add", "watch_resolve", "coord_read", "coord_post"}
-DEFAULTS = {"enabled": False, "mail_enabled": False, "active_seconds": 1200, "hook_grace_seconds": 300,
+DEFAULTS = {"enabled": False, "mail_enabled": False, "desktop_enabled": True,
+            "desktop_command": "/usr/bin/osascript", "active_seconds": 1200, "hook_grace_seconds": 300,
             "use_grace_seconds": 1800, "queue_grace_seconds": 900,
             "failure_threshold": 3, "dismissed_threshold": 3,
             "consecutive_checks": 2, "cooldown_seconds": 21600, "sendmail_path": "/usr/sbin/sendmail"}
@@ -42,9 +45,7 @@ def _time(value=None):
 
 
 def _diagnostic():
-    import shlex
-    import sys
-    return shlex.join([sys.executable, "-m", "kindex.supervisor_health", "status", "--json"])
+    return diagnostic_command()
 
 
 def _iso(value):
@@ -66,12 +67,12 @@ def settings():
             if key not in data:
                 continue
             value = data[key]
-            if key in {"enabled", "mail_enabled"}:
+            if key in {"enabled", "mail_enabled", "desktop_enabled"}:
                 if not isinstance(value, bool):
                     raise ValueError("Health enablement settings must be boolean")
-            elif key == "sendmail_path":
+            elif key in {"sendmail_path", "desktop_command"}:
                 if not isinstance(value, str) or not Path(value).is_absolute():
-                    raise ValueError("Health sendmail_path must be absolute")
+                    raise ValueError("Health transport command must be absolute")
             elif isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
                 raise ValueError("Health thresholds must be positive numbers")
             result[key] = value
@@ -106,6 +107,8 @@ def _db():
                 last_notified REAL, transport_error TEXT);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         ''')
+        from .supervisor_notifications import ensure_schema
+        ensure_schema(conn)
         with conn:
             yield conn
     finally:
@@ -217,8 +220,8 @@ def _summarize(scope, rows, now, cfg):
                "counts": {k: len(v) for k, v in by_kind.items()}, "value": value,
                "use_evidence": "observed" if uses else "not_observed"}
     found = []
-    def issue(code, reason):
-        found.append({"id": scope["id"] + ":" + code, "code": code, "reason": reason,
+    def issue(code):
+        found.append({"id": scope["id"] + ":" + code, "code": code, "reason": REASONS[code],
                       "scope": {k: summary[k] for k in ("project_path", "agent", "session_id")},
                       "evidence": {"last": summary["last"], "counts": summary["counts"]},
                       "diagnostic": _diagnostic()})
@@ -241,9 +244,9 @@ def _summarize(scope, rows, now, cfg):
         else:
             hook_missing = observed_through - hook_at >= cfg["hook_grace_seconds"]
         if hook_missing:
-            issue("missing_hooks", "Native session activity was observed but a corresponding recent Kindex hook invocation was not.")
+            issue("missing_hooks")
         if observed_through - max(uses[-1]["at"] if uses else 0, first_active) >= cfg["use_grace_seconds"]:
-            issue("missing_use", "Sustained active work has no recent successful or natively observed agent-initiated Kindex use; intent is not inferred.")
+            issue("missing_use")
     reviews = by_kind["review"]
     outcomes = [e for e in reviews if e["details"].get("state") in {"completed", "quiet", "failed", "unavailable", "budget_exhausted"}]
     failures = 0
@@ -252,7 +255,7 @@ def _summarize(scope, rows, now, cfg):
             break
         failures += 1
     if failures >= cfg["failure_threshold"] and active:
-        issue("review_failures", "Consecutive review failures prevent a fresh lookback.")
+        issue("review_failures")
     deliveries = by_kind["delivery"]
     def settled(event, candidates):
         review_id = event["details"].get("review_id")
@@ -264,14 +267,14 @@ def _summarize(scope, rows, now, cfg):
     completed = [e for e in reviews if e["details"].get("state") == "completed" and
                  e["details"].get("reason") == "advisory" and not settled(e, deliveries + discarded)]
     if active and (pending or completed) and now - min(e["at"] for e in pending + completed) >= cfg["queue_grace_seconds"]:
-        issue("undelivered_review", "A queued review or completed advisory remains undelivered beyond the grace period.")
+        issue("undelivered_review")
     dismissed = 0
     for event in reversed(feedback):
         if event["details"].get("verdict") != "dismissed":
             break
         dismissed += 1
     if dismissed >= cfg["dismissed_threshold"] and active:
-        issue("dismissed_advice", "Repeated explicit dismissals warrant review of relevance; delivery alone does not demonstrate value.")
+        issue("dismissed_advice")
     summary["feedback_counts"] = {verdict: sum(e["details"].get("verdict") == verdict for e in feedback)
                                   for verdict in ("useful", "dismissed", "acted_on")}
     summary["consecutive_review_failures"] = failures
@@ -291,7 +294,7 @@ def _sendmail(issue):
                         "\n\nTransport acceptance does not prove root mailbox delivery.\n")
     try:
         result = subprocess.run([settings()["sendmail_path"], "-i", "--", "root"], input=message.as_bytes(),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=SUBMISSION_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"accepted": False, "error": type(exc).__name__}
     return {"accepted": result.returncode == 0, "error": None if result.returncode == 0 else "sendmail_exit_" + str(result.returncode)}
@@ -306,7 +309,7 @@ def check_health(now=None, notify=False):
     for agent, evidence in coverage.items():
         if evidence.get("state") == "unavailable" or evidence.get("errors", 0) or evidence.get("unidentified", 0):
             found.append({"id": "observer:" + agent, "code": "observation_unavailable",
-                          "reason": "Native session observation failed or recent activity could not be scoped; Kindex use and hook health are unverified for this evidence.",
+                          "reason": REASONS["observation_unavailable"],
                           "scope": {"project_path": None, "agent": agent, "session_id": None},
                           "evidence": evidence, "diagnostic": _diagnostic()})
     with _db() as conn:
@@ -326,15 +329,18 @@ def check_health(now=None, notify=False):
             due = state["consecutive"] >= cfg["consecutive_checks"] and (state["last_notified"] is None or now - state["last_notified"] >= cfg["cooldown_seconds"])
             issue.update({"consecutive_checks": state["consecutive"], "notification_due": due,
                           "last_notified": _iso(state["last_notified"]), "transport_error": state["transport_error"]})
-            if notify and cfg["enabled"] and cfg["mail_enabled"] and due:
-                result = _sendmail(issue)
-                if result["accepted"]:
-                    conn.execute("UPDATE issues SET last_notified=?,transport_error=NULL WHERE id=?", (now, issue["id"]))
-                    issue.update({"last_notified": _iso(now), "transport_accepted": True, "transport_error": None, "notification_due": False})
-                else:
-                    conn.execute("UPDATE issues SET transport_error=? WHERE id=?", (result["error"], issue["id"]))
-                    issue.update({"transport_accepted": False, "transport_error": result["error"]})
-        result = {"checked_at": _iso(now), "enabled": cfg["enabled"], "mail_enabled": cfg["mail_enabled"], "issues": found, "sessions": summaries,
+        from .supervisor_notifications import reconcile
+        notification = reconcile(conn, found, now, cfg, notify, _sendmail)
+        for issue in found:
+            current_state = conn.execute("SELECT last_notified,transport_error FROM issues WHERE id=?", (issue["id"],)).fetchone()
+            issue["last_notified"] = _iso(current_state["last_notified"])
+            issue["transport_error"] = current_state["transport_error"]
+            if current_state["last_notified"] == now:
+                issue.update({"transport_accepted": True, "notification_due": False})
+            elif current_state["transport_error"]:
+                issue["transport_accepted"] = False
+        result = {"checked_at": _iso(now), "enabled": cfg["enabled"], "mail_enabled": cfg["mail_enabled"], "desktop_enabled": cfg["desktop_enabled"],
+                  **notification, "issues": found, "sessions": summaries,
                   "coverage": coverage, "value": "Explicit feedback is required; activity, review completion and delivery alone do not establish usefulness."}
         conn.execute("INSERT INTO meta VALUES ('last_check',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(result),))
         # Bounded retention, with persistent notification state across checker restarts.
@@ -354,11 +360,31 @@ def status():
             summary, _ = _summarize(scope, rows, now, cfg)
             summaries.append(summary)
         row = conn.execute("SELECT value FROM meta WHERE key='last_check'").fetchone()
+        from .supervisor_notifications import inbox_snapshot, transport_snapshot
+        notification = {"unread_count": inbox_snapshot(conn)["unread_count"],
+                        "transports": transport_snapshot(conn, cfg)}
     previous = json.loads(row[0]) if row else {}
-    return {"enabled": cfg["enabled"], "mail_enabled": cfg["mail_enabled"], "sessions": summaries, "issues": previous.get("issues", []),
+    return {"enabled": cfg["enabled"], "mail_enabled": cfg["mail_enabled"], "desktop_enabled": cfg["desktop_enabled"],
+            **notification, "sessions": summaries, "issues": previous.get("issues", []),
             "coverage": previous.get("coverage", {}), "checked_at": previous.get("checked_at"),
             "monitor": ("stale" if now - _time(previous["checked_at"]) > 180 else "checked") if row else "not_observed"}
 
+
+
+def inbox():
+    """Read local alerts; displaying the inbox does not acknowledge them."""
+    from .supervisor_notifications import inbox_snapshot
+    with _db() as conn:
+        return inbox_snapshot(conn)
+
+
+def ack(alert_id):
+    """Acknowledge an occurrence without resolving the underlying health issue."""
+    from .supervisor_notifications import acknowledge
+    if not isinstance(alert_id, str) or not alert_id or len(alert_id) > 128:
+        raise ValueError("A bounded alert ID is required")
+    with _db() as conn:
+        return acknowledge(conn, alert_id, _time())
 
 
 def _atomic_write(path, content):
@@ -399,11 +425,12 @@ def install_monitor(*, uninstall=False, dry_run=False):
         raise ValueError("Health configuration must be an object")
     updated = {**old, "enabled": not uninstall}
     mail_enabled = old.get("mail_enabled") is True
-    if mail_enabled:
+    desktop_enabled = old.get("desktop_enabled", True) is True
+    if desktop_enabled or mail_enabled:
         command.append("--notify")
     plan = {"action": "uninstall" if uninstall else "install", "dry_run": dry_run,
             "plist": str(plist), "health_dir": str(root), "command": command, "interval_seconds": 60,
-            "mail_enabled": mail_enabled}
+            "mail_enabled": mail_enabled, "desktop_enabled": desktop_enabled}
     if dry_run:
         return plan
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -449,12 +476,13 @@ def install_monitor(*, uninstall=False, dry_run=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("status", "check", "feedback", "install", "uninstall"))
+    parser.add_argument("command", choices=("status", "check", "feedback", "install", "uninstall", "inbox", "ack"))
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--notify", action="store_true")
     parser.add_argument("--quiet", action="store_true", help="Persist checker results without routine log output")
     parser.add_argument("--now", help="Local diagnostic clock override (ISO timestamp)")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--id", help="Stable local alert ID to acknowledge")
     parser.add_argument("--project", help="Absolute project path for explicit feedback")
     parser.add_argument("--agent", choices=("claude", "codex", "opencode", "antigravity", "cursor"))
     parser.add_argument("--session", help="Explicit host session ID for feedback")
@@ -465,6 +493,10 @@ def main(argv=None):
             result = check_health(now=args.now, notify=args.notify)
         elif args.command == "status":
             result = status()
+        elif args.command == "inbox":
+            result = inbox()
+        elif args.command == "ack":
+            result = ack(args.id)
         elif args.command == "feedback":
             if not all((args.project, args.agent, args.session, args.verdict)):
                 raise ValueError("Feedback requires project, agent, session and verdict")

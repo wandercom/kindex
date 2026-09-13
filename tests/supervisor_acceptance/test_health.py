@@ -47,7 +47,7 @@ class Boundary:
                         CLAUDE_CONFIG_DIR=str(self.home / ".claude"),
                         XDG_DATA_HOME=str(self.home / ".local/share"),
                         XDG_CONFIG_HOME=str(self.home / ".config"))
-        self.config = dict(enabled=True, mail_enabled=True, active_seconds=7200,
+        self.config = dict(enabled=True, mail_enabled=True, desktop_enabled=False, active_seconds=7200,
                            hook_grace_seconds=300, use_grace_seconds=1800,
                            queue_grace_seconds=900, failure_threshold=3,
                            dismissed_threshold=3, consecutive_checks=2,

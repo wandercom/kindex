@@ -1342,14 +1342,23 @@ def spawn_background_drain(config: Config) -> bool:
     import os
     import subprocess
     import sys
+    from pathlib import Path
 
     from .supervisor import config_snapshot
     try:
+        # The workspace is data, not import authority. Isolated mode ignores
+        # cwd, PYTHONPATH and user-site additions on every supported Python.
+        # Pin the package root already executing this hook so editable installs
+        # work as well as wheels, without trusting a same-named workspace tree.
+        package_root = str(Path(__file__).resolve().parent.parent)
+        bootstrap = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                     "from kindex.supervisor import worker_main; worker_main()")
         process = subprocess.Popen(
-            [sys.executable, "-m", "kindex.supervisor"],
+            [sys.executable, "-I", "-c", bootstrap, package_root],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.PIPE, text=True, start_new_session=True,
-            cwd=str(config._project_path or config.data_path), env={**os.environ},
+            cwd=str(config._project_path or config.data_path),
+            env={key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "PYTHONHOME"}},
         )
         process.stdin.write(json.dumps(config_snapshot(config)))
         process.stdin.close()

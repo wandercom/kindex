@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![v0.36.2](https://img.shields.io/badge/version-0.36.2-purple.svg)](https://github.com/wandercom/kindex/releases)
+[![v0.37.0](https://img.shields.io/badge/version-0.37.0-purple.svg)](https://github.com/wandercom/kindex/releases)
 [![PyPI](https://img.shields.io/pypi/v/kindex.svg)](https://pypi.org/project/kindex/)
 [![MCP Market](https://img.shields.io/badge/MCP%20Market-kindex-blue.svg)](https://mcpmarket.com/server/kindex)
 [![Tests](https://github.com/wandercom/kindex/actions/workflows/ci.yml/badge.svg)](https://github.com/wandercom/kindex/actions/workflows/ci.yml)
@@ -182,6 +182,7 @@ Or hand-edit `~/.gemini/config/mcp_config.json` and
 
 ```bash
 kin setup-opencode-mcp
+kin setup-opencode-hooks
 kin setup-agents-md --install --global
 ```
 
@@ -196,12 +197,13 @@ Or hand-edit `~/.config/opencode/opencode.json`:
 ```
 
 OpenCode reads `AGENTS.md` natively, so install the MCP server and the shared `AGENTS.md` instructions together.
-OpenCode also supports plugins, but Kindex currently uses MCP + instructions there rather than prompt-time attention injection.
+The OpenCode plugin supplies periodic supervisor advice on the primary user message. See [supervision and independent health](docs/supervisor-health.md) for configuration and notification setup.
 
 ### Cursor
 
 ```bash
 kin setup-cursor-mcp
+kin setup-cursor-hooks
 kin setup-cursor-rules --install   # writes ~/.cursor/rules/kindex.mdc
 ```
 
@@ -210,7 +212,7 @@ Or hand-edit `~/.cursor/mcp.json`:
 { "mcpServers": { "kindex": { "type": "stdio", "command": "kin-mcp" } } }
 ```
 
-Cursor integration is MCP + always-applied rules. Cursor rules provide prompt-level guidance, but Kindex does not currently install a Cursor prompt-submit hook because Cursor does not expose the same hook surface as Claude Code or Codex CLI.
+Cursor integration includes MCP, always-applied rules, and native supervisor hooks. The adapter has automated boundary coverage; authenticated Cursor model delivery and IDE activity discovery remain unverified. No Cursor account is needed to use Kindex with the other supported agents. See [supervision and independent health](docs/supervisor-health.md).
 
 ## Why Kindex
 
