@@ -302,6 +302,7 @@ def hybrid_search(
     graph_hops: int = 1,
     ranking: str = "ensemble",
     *,
+    use_vectors: bool = True,
     include_expired: bool = False,
     include_archived: bool = False,
     fence_stats: dict | None = None,
@@ -318,6 +319,8 @@ def hybrid_search(
 
     Args:
         ranking: 'ensemble' (weighted, with confidence) or 'rrf' (legacy).
+        use_vectors: False restricts retrieval to local FTS/graph and ranking
+            signals, skipping embedding providers and register translation.
         include_expired: When False (default), nodes whose extra['expires']
             is in the past are filtered out — expired knowledge stops
             surfacing in search/context/ask everywhere, matching the primed
@@ -406,48 +409,49 @@ def hybrid_search(
     # Transmogrifier normalizes register for embeddings only — FTS5 stays raw
     vec_ranked: list[tuple[str, float]] = []
     verdict = None
-    try:
-        from .grounding import evaluate as _evaluate_grounding
-        from .grounding import similarity_from_distance
-        from .vectors import _resolve_embedding_config, is_available, vector_search
-        if is_available():
-            vec_query = query
-            try:
-                from transmogrifier.core import Transmogrifier
-                _transmog = Transmogrifier()
-                result = _transmog.translate(query)
-                if not result.skipped and result.output_text:
-                    vec_query = result.output_text
-            except (ImportError, Exception):
-                pass
-            # Fetch unfiltered, then judge. Judging the full set is what makes
-            # shadow mode possible and what gives the verdict its near-misses:
-            # filtering first would destroy the evidence for the decision.
-            vec_results = vector_search(store, vec_query, top_k=top_k)
-            vec_hits = [(r["id"], similarity_from_distance(r.get("vec_distance")))
-                        for r in vec_results]
-            try:
-                provider, model, _, _ = _resolve_embedding_config(store.config)
-                verdict = _evaluate_grounding(
-                    store, store.config, vec_hits, provider=provider, model=model)
-            except Exception:
-                verdict = None
-            # Enforcement is a separate act from judgement, and it is opt-in.
-            # Shadow mode reports the verdict while every row still flows, so
-            # the gate can be measured against real traffic before it is
-            # allowed to withhold anything.
-            if (verdict is not None and verdict.enforced
-                    and verdict.floor is not None):
-                vec_results = [r for r in vec_results
-                               if similarity_from_distance(r.get("vec_distance"))
-                               >= verdict.floor]
-            if verdict is not None and verdict.should_warn:
-                _log.info("grounding %s for query %r: %s",
-                          verdict.verdict, query[:80], verdict.reason)
-            vec_ranked = [(r["id"], 1.0 / (1.0 + r.get("vec_distance", 1.0)))
-                          for r in vec_results]
-    except Exception:
-        pass
+    if use_vectors:
+        try:
+            from .grounding import evaluate as _evaluate_grounding
+            from .grounding import similarity_from_distance
+            from .vectors import _resolve_embedding_config, is_available, vector_search
+            if is_available():
+                vec_query = query
+                try:
+                    from transmogrifier.core import Transmogrifier
+                    _transmog = Transmogrifier()
+                    result = _transmog.translate(query)
+                    if not result.skipped and result.output_text:
+                        vec_query = result.output_text
+                except (ImportError, Exception):
+                    pass
+                # Fetch unfiltered, then judge. Judging the full set is what makes
+                # shadow mode possible and what gives the verdict its near-misses:
+                # filtering first would destroy the evidence for the decision.
+                vec_results = vector_search(store, vec_query, top_k=top_k)
+                vec_hits = [(r["id"], similarity_from_distance(r.get("vec_distance")))
+                            for r in vec_results]
+                try:
+                    provider, model, _, _ = _resolve_embedding_config(store.config)
+                    verdict = _evaluate_grounding(
+                        store, store.config, vec_hits, provider=provider, model=model)
+                except Exception:
+                    verdict = None
+                # Enforcement is a separate act from judgement, and it is opt-in.
+                # Shadow mode reports the verdict while every row still flows, so
+                # the gate can be measured against real traffic before it is
+                # allowed to withhold anything.
+                if (verdict is not None and verdict.enforced
+                        and verdict.floor is not None):
+                    vec_results = [r for r in vec_results
+                                   if similarity_from_distance(r.get("vec_distance"))
+                                   >= verdict.floor]
+                if verdict is not None and verdict.should_warn:
+                    _log.info("grounding %s for query %r: %s",
+                              verdict.verdict, query[:80], verdict.reason)
+                vec_ranked = [(r["id"], 1.0 / (1.0 + r.get("vec_distance", 1.0)))
+                              for r in vec_results]
+        except Exception:
+            pass
 
     if grounding is not None and verdict is not None:
         grounding["verdict"] = verdict

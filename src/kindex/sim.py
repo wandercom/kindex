@@ -250,7 +250,8 @@ def sim_status(store: "Store", config: Config) -> dict:
         "runtime_override": override,
         "threshold": config.sim.threshold,
         "tick_interval": config.sim.tick_interval,
-        "model": config.sim.model or config.llm.model,
+        "backend": config.sim.backend,
+        "model": (config.sim.model or config.llm.model) if config.sim.backend == "api" else config.sim.agent_model,
         "command": config.sim.command or "(LLM supervisor)",
         "guidance": get_sim_guidance(store) or "(none)",
         "triage_banter": bool(config.sim.triage_banter),
@@ -366,7 +367,10 @@ def build_sim_grounding(store: "Store", window: str, config: Config) -> str:
 
     try:
         from .retrieve import hybrid_search
-        for r in hybrid_search(store, (window or "")[-2000:], top_k=6):
+        # Native subscription reviews cannot spend through query embedding or
+        # register translation in the parent, even when ambient keys are present.
+        retrieval_options = {"use_vectors": False} if config.sim.backend != "api" else {}
+        for r in hybrid_search(store, (window or "")[-2000:], top_k=6, **retrieval_options):
             ntype = r.get("type", "concept")
             if ntype in ("constraint", "watch"):
                 continue  # surfaced with action/owner detail by operational_summary below
@@ -499,6 +503,16 @@ def call_sim(
     prompt = build_supervisor_prompt(
         window, sc.window_chars, guidance=guidance, grounding=grounding, intent=intent
     )
+
+    if sc.backend != "api":
+        from .subscription_review import run_review
+        accounting = run_review(config, conversation_id, redact_text(prompt))
+        if accounting.get("status") != "ok":
+            return None, accounting
+        parsed = _parse_sim(accounting.get("response", ""))
+        result = _result_from_parsed(parsed) if isinstance(parsed.get("note"), str) else None
+        accounting = {**accounting, "status": "ok" if result is not None else "invalid_output"}
+        return result, accounting
 
     if not ledger.can_spend():
         return None, {"status": "over_global_budget"}
@@ -779,7 +793,7 @@ def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
                 finish("queued", "review_complete_pending_delivery", "completed", "advisory")
                 flagged += 1
                 continue
-            budget = ledger or BudgetLedger(cfg.ledger_path, cfg.budget)
+            budget = (ledger or BudgetLedger(cfg.ledger_path, cfg.budget)) if cfg.sim.backend == "api" else None
             grounding = build_sim_grounding(store, window, cfg)
             if claim.result is None:
                 # Durable dispatch boundary comes before any possible provider
@@ -814,7 +828,7 @@ def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
                 "fingerprint": job.get("fingerprint") or [], "tick": job.get("tick", 0), "at": _now(),
             }
             if result.escalate and not _advocate_gate_open(store, cfg, conv, job.get("tick", 0)):
-                state, reason = (("disabled", "recommend_only") if not cfg.sim.advocate.enabled else
+                state, reason = (("disabled", "recommend_only") if cfg.sim.backend != "api" or not cfg.sim.advocate.enabled else
                                  ("unavailable", "command_unavailable") if not cfg.sim.advocate.command else
                                  ("skipped", "cooldown"))
                 write_state(store, conv, None, advocate_state=state, advocate_reason=reason)
@@ -870,7 +884,7 @@ def _advocate_last_ticks(store: "Store") -> dict[str, int]:
 def _advocate_gate_open(store: "Store", config: Config, conversation_id: str, tick: int) -> bool:
     """True when a deep escalation is permitted: enabled, wired, and off cooldown."""
     ac = config.sim.advocate
-    if not ac.enabled or not ac.command or not conversation_id:
+    if config.sim.backend != "api" or not ac.enabled or not ac.command or not conversation_id:
         return False
     last = _advocate_last_ticks(store).get(conversation_id)
     if last is not None and int(tick) - int(last) < ac.cooldown_ticks:
@@ -1123,7 +1137,7 @@ def maybe_escalate_to_advocate(
     """
     from .supervisor import write_state
     ac = config.sim.advocate
-    if not ac.command or not ac.enabled:
+    if config.sim.backend != "api" or not ac.command or not ac.enabled:
         write_state(store, conversation_id, None, advocate_state="disabled", advocate_reason="recommend_only")
         return False, []
     import os

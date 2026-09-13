@@ -137,6 +137,9 @@ def _transcript(path: str, limit: int) -> tuple[str, str]:
 
 def preflight(config, conversation: str) -> tuple[str, str] | None:
     """Cheap known-unavailable checks; the worker repeats all spend gates."""
+    if config.sim.backend != "api":
+        from .subscription_review import preflight as subscription_preflight
+        return subscription_preflight(config, conversation)
     from .budget import BudgetLedger
     from .sim import SIM_PURPOSE
     budget = BudgetLedger(config.ledger_path, config.budget)
@@ -168,9 +171,51 @@ def preflight(config, conversation: str) -> tuple[str, str] | None:
     return None
 
 
+def _allowance_notice(store, config, conversation, *, deliver=True):
+    """Warn once per threshold crossing, rearming after a changed allowance."""
+    from .budget import BudgetLedger
+    from .sim import SIM_PURPOSE
+    try:
+        if config.sim.backend != "api":
+            from .subscription_review import allowance_status
+            status = allowance_status(config, conversation)
+            parts = {name: status[name] for name in ("conversation", "day")}
+        else:
+            budget = BudgetLedger(config.ledger_path, config.budget)
+            parts = {
+                "conversation": {"used": budget.conversation_spend(conversation, purpose=SIM_PURPOSE),
+                                 "limit": config.sim.max_conversation_cost},
+                "day": {"used": budget.today_spend, "limit": budget.limits.daily},
+            }
+            from .budget import _today
+            status = {**parts, "day_id": _today()}
+            for part in parts.values():
+                part["remaining"] = max(0, part["limit"] - part["used"])
+        low = {name: part for name, part in parts.items()
+               if part["limit"] > 0 and part["used"] >= part["limit"] * config.sim.budget_warning_fraction}
+        status["low"] = bool(low)
+        key = "supervisor.allowance-notice." + conversation
+        previous = json.loads(store.get_meta(key) or "{}")
+        current = {name: [part["limit"], config.sim.budget_warning_fraction,
+                          status["day_id"] if name == "day" else "", config.sim.backend == "api"]
+                   for name, part in low.items()}
+        crossed = [name for name in current if previous.get(name) != current[name]]
+        if deliver:
+            store.set_meta(key, json.dumps(current))
+        if not deliver or not crossed:
+            return "", status
+        units = "USD" if config.sim.backend == "api" else "reviews"
+        detail = "; ".join(f"{name} {parts[name]['used']:g}/{parts[name]['limit']:g} {units}" for name in crossed)
+        return f"Kindex supervisor: review budget low ({detail}); adjust the conversation or project allowance to continue reviewing.", status
+    except (OSError, ValueError, TypeError):
+        return "", {"state": "unavailable", "reason": "review_accounting_unavailable"}
+
+
 def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial_goal=None,
                     event_id=None, transcript_path=None, deliver: bool = True,
                     text_is_goal: bool = True) -> dict:
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "review_worker"}}
     from .sim import (enqueue_sim_review, pop_pending_sim_injection, format_sim_injection,
                       sim_effective_enabled, spawn_background_drain)
     conversation = session_key(scope)
@@ -205,6 +250,10 @@ def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial
         with store_lock(store, "queue"):
             injection = pop_pending_sim_injection(store, config, conversation, window, tick=tick, intent=intent) if deliver else None
         lines = format_sim_injection(injection, display=config.sim.display)
+        warning, allowance = _allowance_notice(store, config, conversation, deliver=deliver)
+        diagnostics["allowance"] = allowance
+        if warning:
+            lines.append(warning)
         # Status diagnostics contain no transcript, goal, provider key, or command.
         if not duplicate:
             write_state(store, conversation, None, tick=tick,
@@ -234,15 +283,17 @@ def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial
               {"state", "reason", "tick", "updated_at", "reviewed_at", "review_tick", "delivered_tick", "accounting_status", "advocate_state", "advocate_reason", "delivery_drop_reason", "delivery_drop_tick"}}
     public.setdefault("state", "skipped")
     context = "\n".join(lines)
-    if not context and public["state"] in {"failed", "unavailable", "budget_exhausted"}:
+    if not injection and public["state"] in {"failed", "unavailable", "budget_exhausted"}:
         notice = public["state"] + ":" + public.get("reason", "unknown")
         if latest.get("notice") != notice:
-            context = f"Kindex supervisor: {public['state']} ({public.get('reason', 'unknown')}); no fresh lookback completed."
+            context = (context + "\n" if context else "") + f"Kindex supervisor: {public['state']} ({public.get('reason', 'unknown')}); no fresh lookback completed."
             write_state(store, conversation, None, notice=notice)
     return {"ok": True, "context": context, "supervisor": {**diagnostics, **public}}
 
 
 def hook_request(payload: dict, adapter: str, *, config=None, project_path=None) -> dict:
+    if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
+        return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "review_worker"}}
     from .attention import extract_conversation_text, resolve_conversation_id
     from .integrations import open_project_store, project_scope
     from .agent_settings import apply_agent_overrides, resolve_agent_instance_key
