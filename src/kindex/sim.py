@@ -260,6 +260,7 @@ def sim_status(store: "Store", config: Config) -> dict:
         ),
         "pending": len(_read_meta_list(store, SIM_PENDING_META)),
         "queued": len(_read_meta_list(store, SIM_QUEUE_META)),
+        "claimed": bool(store.get_meta("sim.claim")),
         # Visibility into the silent-suppression paths the expansion added, so a
         # feature that has gone quiet for the WRONG reason is observable.
         "suppressed": sim_counters(store),
@@ -706,72 +707,103 @@ def drain_sim_queue(
     client: Any | None = None,
     ledger: BudgetLedger | None = None,
     max_jobs: int = 5,
+    background: bool = False,
 ) -> dict:
-    """Grade queued windows with Sim. Runs in the daemon — this is the spend.
-
-    A review that clears the threshold becomes a PENDING injection keyed by
-    conversation; pop_pending_sim_injection surfaces it on the next tick.
-    """
-    from .supervisor import store_lock, restore_config, write_state
-    try:
-        with store_lock(store, "worker", blocking=False):
-            return _drain_claimed(store, config, client=client, ledger=ledger, max_jobs=max_jobs)
-    except BlockingIOError:
-        return {"status": "reviewing", "reviewed": 0, "pending": 0}
+    """Drain a bounded batch; native admission retains one waiting successor."""
+    from contextlib import ExitStack
+    from .supervisor import store_lock
+    with ExitStack() as held:
+        try:
+            if background:
+                # At most one process waits for the active worker. Other wakeups
+                # coalesce into it; the waiter releases this gate once active.
+                with store_lock(store, "wake", blocking=False):
+                    held.enter_context(store_lock(store, "worker", blocking=True))
+            else:
+                held.enter_context(store_lock(store, "worker", blocking=False))
+        except BlockingIOError:
+            return {"status": "reviewing", "reviewed": 0, "pending": 0}
+        result = _drain_claimed(store, config, client=client, ledger=ledger, max_jobs=max_jobs)
+        if background and result["status"] == "ok":
+            with store_lock(store, "queue"):
+                remaining = bool(_read_meta_list(store, SIM_QUEUE_META))
+            if remaining and not spawn_background_drain(config):
+                result["status"] = "handoff_failed"
+        return result
 
 
 def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
-    from .supervisor import store_lock, restore_config, write_state, record_health
+    from dataclasses import asdict
+    from .supervisor import restore_config, write_state
+    from .sim_queue import (CLAIM_META, SavedSim, acknowledge, claim_next,
+                            flush_receipts, save_claim)
+    flush_receipts(store)
     if not sim_effective_enabled(store, config):
         return {"status": "disabled", "reviewed": 0, "pending": 0}
-    with store_lock(store, "queue"):
-        queue = _read_meta_list(store, SIM_QUEUE_META)
-        jobs, rest = queue[:max_jobs], queue[max_jobs:]
-        store.set_meta(SIM_QUEUE_META, json.dumps(rest))
     reviewed = flagged = 0
-    for job in jobs:
+    for _ in range(max(0, max_jobs)):
+        claim, recovered = claim_next(store)
+        if claim is None:
+            break
+        job = claim.job
         conv, window = job.get("conversation_id"), job.get("window") or ""
-        def health(state, reason=""):
-            record_health(job.get("scope"), "review", state=state, reason=reason, source="worker",
-                          event_id=str(job.get("review_id", "")) + ":result", review_id=job.get("review_id"))
-        if not conv or not window.strip():
-            health("failed", "review_failed")
+
+        def finish(state, reason, health_state=None, health_reason="review_failed"):
+            acknowledge(store, claim, state=state, reason=reason,
+                        health_state=health_state or state, health_reason=health_reason)
+            flush_receipts(store)
+
+        if recovered and claim.phase in {"sim_started", "advocate_started"}:
+            # A dead worker may already have paid. Keep its saved Sim result in
+            # the receipt, report uncertainty, and never replay either provider.
+            finish("failed", "interrupted_spend_unknown")
+            continue
+        if not conv or not isinstance(window, str) or not window.strip():
+            finish("failed", "invalid_job")
             continue
         try:
             cfg = restore_config(job["config"]) if job.get("config") else config
         except Exception:
-            write_state(store, conv, "failed", reason="invalid_snapshot")
-            health("failed", "review_failed")
+            finish("failed", "invalid_snapshot")
             continue
         if cfg.data_path != store.config.data_path:
-            write_state(store, conv, "failed", reason="store_mismatch")
-            health("failed", "review_failed")
+            finish("failed", "store_mismatch")
             continue
         if not sim_effective_enabled(store, cfg):
-            write_state(store, conv, "disabled", reason="kill_switch")
-            health("disabled", "disabled")
-            _record_advisory_discard(job, reason="superseded", source="worker")
+            finish("disabled", "kill_switch", health_state="discarded", health_reason="superseded")
             continue
         write_state(store, conv, "reviewing", reason="claimed", review_tick=job.get("tick", 0))
-        budget = ledger or BudgetLedger(cfg.ledger_path, cfg.budget)
         intent = job.get("intent") or ""
         try:
-            grounding = build_sim_grounding(store, window, cfg)
-            result, acct = call_sim(cfg, budget, window, conv, client=client,
-                                   guidance=job.get("guidance", ""), grounding=grounding, intent=intent)
-            status = acct.get("status", "unknown")
-            if status != "ok" or result is None:
-                state = ("budget_exhausted" if "budget" in status else
-                         "unavailable" if "unavailable" in status else "failed")
-                write_state(store, conv, state, reason=status, accounting_status=status)
-                health(state, "budget_exhausted" if state == "budget_exhausted" else
-                       "llm_unavailable" if state == "unavailable" else "review_failed")
+            if claim.phase == "ready":
+                finish("queued", "review_complete_pending_delivery", "completed", "advisory")
+                flagged += 1
                 continue
+            budget = ledger or BudgetLedger(cfg.ledger_path, cfg.budget)
+            grounding = build_sim_grounding(store, window, cfg)
+            if claim.result is None:
+                # Durable dispatch boundary comes before any possible provider
+                # spend. Recovery earlier than this point can safely resume.
+                claim.phase = "sim_started"
+                save_claim(store, claim)
+                result, acct = call_sim(cfg, budget, window, conv, client=client,
+                                       guidance=job.get("guidance", ""), grounding=grounding, intent=intent)
+                status = acct.get("status", "unknown")
+                if status != "ok" or result is None:
+                    state = ("budget_exhausted" if "budget" in status else
+                             "unavailable" if "unavailable" in status else "failed")
+                    finish(state, status, health_reason="budget_exhausted" if state == "budget_exhausted" else
+                           "llm_unavailable" if state == "unavailable" else "review_failed")
+                    continue
+                claim.result = SavedSim(**asdict(result))
+                claim.phase = "sim_saved"
+                save_claim(store, claim)
+            else:
+                result = _SimResult(**claim.result.model_dump())
             reviewed += 1
             if not result.note or result.rating < cfg.sim.threshold:
                 _bump_counter(store, "sub_threshold")
-                write_state(store, conv, "reviewed_quiet", reason="below_threshold", reviewed_at=_now())
-                health("reviewed_quiet", "no_findings")
+                finish("reviewed_quiet", "below_threshold", health_reason="no_findings")
                 continue
             item = {
                 "conversation_id": conv, "scope": job.get("scope"), "review_id": job.get("review_id"),
@@ -787,6 +819,8 @@ def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
                                  ("skipped", "cooldown"))
                 write_state(store, conv, None, advocate_state=state, advocate_reason=reason)
             if result.escalate and _advocate_gate_open(store, cfg, conv, job.get("tick", 0)):
+                claim.phase = "advocate_started"
+                save_claim(store, claim)
                 ran, survivors = maybe_escalate_to_advocate(
                     store, cfg, budget, window, grounding, intent, result, conv, client=client)
                 if ran:
@@ -795,21 +829,18 @@ def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
                         item["advocate"] = survivors
                     else:
                         _bump_counter(store, "escalation_failures")
-            with store_lock(store, "queue"):
-                previous_pending = _read_meta_list(store, SIM_PENDING_META)
-                superseded = [p for p in previous_pending if p.get("conversation_id") == conv
-                              and p.get("review_id") != item.get("review_id")]
-                pending = [p for p in previous_pending if p.get("conversation_id") != conv]
-                pending.append(item)
-                store.set_meta(SIM_PENDING_META, json.dumps(pending))
-                for previous in superseded:
-                    _record_advisory_discard(previous, reason="superseded", source="worker")
+            claim.pending = item
+            claim.phase = "ready"
+            save_claim(store, claim)
+            finish("queued", "review_complete_pending_delivery", "completed", "advisory")
             flagged += 1
-            write_state(store, conv, "queued", reason="review_complete_pending_delivery", reviewed_at=_now())
-            health("completed", "advisory")
         except Exception as exc:
+            # A completed transaction may already have removed this exact claim;
+            # never overwrite its successful receipt after a later output error.
+            if not store.get_meta(CLAIM_META):
+                raise
             write_state(store, conv, "failed", reason="review_error", error=safe_error(exc))
-            health("failed", "review_failed")
+            finish("failed", "review_error")
     return {"status": "ok", "reviewed": reviewed, "flagged": flagged,
             "pending": len(_read_meta_list(store, SIM_PENDING_META))}
 

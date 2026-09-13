@@ -368,7 +368,7 @@ def worker_main():
     config = restore_config(snapshot)
     store = Store(config)
     try:
-        drain_sim_queue(store, config)
+        drain_sim_queue(store, config, background=True)
     finally:
         store.close()
 

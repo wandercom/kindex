@@ -33,6 +33,13 @@ review format described by that brief. With no command, the configured Kindex LL
 must be enabled and available. Missing credentials, exhausted budget, failed reviews,
 pending work, completed quiet reviews, and delivered advice have distinct states.
 
+Review claims survive worker interruption. Recovery runs on the next worker
+invocation: saved results can finish without repeating the provider call, while
+an interrupted call with an unknown spending outcome records
+`interrupted_spend_unknown` and requires fresh direction. Work admitted behind an
+active worker has a waiting successor. The health checker reports stalled reviews
+while they await recovery.
+
 Advocate escalation is separately opt-in under `sim.advocate`, requires a working
 command and verification provider, and is subject to conversation budget and
 cooldown. External command allowances are admission reservations, **not measured
@@ -84,6 +91,10 @@ review outcomes, delivery, and explicit feedback. Native transcript/index metada
 lets the checker notice active sessions whose hooks never fired. It retains
 identifiers, times, fixed codes, and counts; it does not copy conversation content
 or arbitrary tool arguments into the registry or notifications.
+
+Native observation is bounded. If a directory, file, or session limit prevents a
+complete scan, the checker reports unavailable coverage with `scan_limit` rather
+than treating the unexamined activity as absent.
 
 ```sh
 python3 -m kindex.supervisor_health install --dry-run

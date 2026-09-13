@@ -101,7 +101,7 @@ When asked to release, follow these steps exactly. Do NOT install twine or attem
 4. Push to main: `git push origin main`
 5. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
 6. Create GitHub release: `gh release create vX.Y.Z --title "..." --notes "..."`
-7. Watch the workflow: `gh run watch <id> -R jmcentire/kindex` -- all three jobs (test, build, publish) must pass
+7. Watch the workflow: `gh run watch <id> -R wandercom/kindex` -- all three jobs (test, build, publish) must pass
 8. Verify on PyPI: `pip index versions kindex 2>/dev/null | head -1` or check https://pypi.org/project/kindex/
 9. Verify the MCP listing metadata is current: `server.json` version/package fields match the release, and https://mcpmarket.com/server/kindex reflects the published package after indexing.
 

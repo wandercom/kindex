@@ -37,6 +37,11 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   sessions do not acquire false missing-hook alerts solely from elapsed time.
 - Trusted historical recall applies the requested evaluation date consistently.
   Native session scans report incomplete coverage when a scan limit is reached.
+- Durable review claims and worker handoff preserve queued work through crashes
+  and overlapping admissions. Recovery reports uncertain paid attempts without
+  automatically repeating them. Persisted alert payloads are validated on read.
+- Explicit Kinbase unknowns retain their source identity across raw and reduced
+  refreshes; signed-source and graph-transfer timestamps share strict validation.
 
 ### Qualification boundaries
 - Native advisory delivery was exercised in Claude, Codex, OpenCode, and

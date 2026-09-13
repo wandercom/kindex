@@ -33,3 +33,7 @@ The release reconciles upstream reminder concurrency, legacy-hook migration and
 CI work, doctor FTS integrity repairs, and transactional graph transfer. Background
 supervision imports the already-running trusted Kindex package under Python
 isolated mode so a reviewed workspace cannot shadow worker modules.
+Durable claims recover on the next worker invocation; uncertain paid attempts
+become explicit failures without replay. A waiting worker handles new admissions
+behind an active review. Native scan limits are reported as incomplete coverage,
+and persisted alert payloads are validated before display.

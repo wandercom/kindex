@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .privacy import redact
 from .schema import ALL_NODE_TYPES, STANDINGS
+from .trust import parse_rfc3339
 
 _CEILINGS = {"human": "authoritative", "transcript": "prevalent",
              "human_review": "prevalent", "human-review": "prevalent",
@@ -58,12 +59,7 @@ def _dependencies():
 
 
 def _timestamp(value):
-    if not isinstance(value, str):
-        raise ValueError("Kinbase validity timestamps must be RFC 3339 strings")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("Kinbase validity timestamps require a timezone")
-    return parsed
+    return parse_rfc3339(value, field="Kinbase validity timestamp")
 
 
 def _validate(doc, *, unknown=False):
@@ -163,10 +159,14 @@ def _identity(repo, identity):
 
 def _reduced(root, binary, documents):
     by_event = {}
+    by_unknown = {}
     for digest, doc in documents:
         event_id = doc.get("event_id")
         if event_id:
             by_event.setdefault(event_id, []).append((digest, doc))
+        fact_id = doc.get("fact_id")
+        if doc.get("schema") == "kinbase-unknown/1" and isinstance(fact_id, str) and fact_id:
+            by_unknown.setdefault((fact_id, doc["logical_key"]), []).append((digest, doc))
     rows = []
     for key in sorted({doc["logical_key"] for _, doc in documents}):
         try:
@@ -207,8 +207,14 @@ def _reduced(root, binary, documents):
                 identity = unknown.get("unknown_id")
                 if not isinstance(identity, str) or not identity:
                     raise ValueError("explain unknown requires unknown_id")
-                rows.append(("reduced-unknown:" + identity,
-                             {**unknown, "schema": "kinbase-unknown/1"}, receipt))
+                # Kinbase's explicit DerivedUnknown uses the signed unknown's
+                # fact_id as unknown_id and omits event_id. Match only one exact
+                # verified source; ambiguous histories keep the derived identity.
+                matches = by_unknown.get((identity, key), []) if unknown.get("kind") == "explicit" else []
+                source = matches[0] if len(matches) == 1 else None
+                doc = {**(source[1] if source else {}), **unknown, "schema": "kinbase-unknown/1"}
+                _validate(doc, unknown=True)
+                rows.append((source[0] if source else "reduced-unknown:" + identity, doc, receipt))
         except (ValueError, TypeError, KeyError) as exc:
             raise ValueError(f"Invalid Kinbase explain response: {exc}; sync not applied") from exc
     return rows

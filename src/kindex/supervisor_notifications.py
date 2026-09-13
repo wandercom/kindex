@@ -10,6 +10,9 @@ import subprocess
 import sys
 import time
 import uuid
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_PAYLOAD_BYTES = 16 * 1024
 SUBMISSION_TIMEOUT_SECONDS = 10
@@ -29,6 +32,113 @@ AGENTS = {"claude", "codex", "opencode", "antigravity", "cursor", "unknown"}
 SCRIPT = '''on run argv
     display notification (item 1 of argv) with title "Kindex needs attention" subtitle (item 2 of argv)
 end run'''
+
+
+IssueCode = Literal["missing_hooks", "missing_use", "review_failures", "undelivered_review", "dismissed_advice", "observation_unavailable"]
+EvidenceKind = Literal["hook", "use", "review", "delivery", "feedback", "activity"]
+
+
+class _PersistentModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False, hide_input_in_errors=True)
+
+
+class AlertScope(_PersistentModel):
+    project_path: str | None
+    session_id: str | None
+    agent: Literal["claude", "codex", "opencode", "antigravity", "cursor", "unknown"]
+
+
+class NativeSources(_PersistentModel):
+    cli: Literal["session_metadata", "unverified"] | None = None
+    ide: Literal["session_metadata", "unverified"] | None = None
+    native_use: Literal["session_metadata", "unverified"] | None = None
+
+
+class AlertEvidence(_PersistentModel):
+    last: dict[EvidenceKind, str | None] | None = None
+    counts: dict[EvidenceKind, int] | None = None
+    sessions: int | None = Field(default=None, ge=0)
+    unidentified: int | None = Field(default=None, ge=0)
+    errors: int | None = Field(default=None, ge=0)
+    state: Literal["observed", "not_observed", "unavailable"] | None = None
+    source_present: bool | None = None
+    sources: NativeSources | None = None
+    reason: Literal["scan_limit"] | None = None
+    omitted: Literal["payload_limit"] | None = None
+
+    @field_validator("last")
+    @classmethod
+    def timestamps(cls, value):
+        from .trust import parse_rfc3339
+        for timestamp in (value or {}).values():
+            if timestamp is not None:
+                parse_rfc3339(timestamp, field="notification evidence timestamp")
+        return value
+
+    @field_validator("counts")
+    @classmethod
+    def nonnegative_counts(cls, value):
+        if any(count < 0 for count in (value or {}).values()):
+            raise ValueError("Notification counts must be nonnegative")
+        return value
+
+
+class AlertPayload(_PersistentModel):
+    code: IssueCode
+    scope: AlertScope
+    reason: str
+    evidence: AlertEvidence
+    diagnostic: str
+
+    @model_validator(mode="after")
+    def fixed_reason(self):
+        if self.reason != REASONS[self.code]:
+            raise ValueError("Notification reason does not match its issue code")
+        if len(self.model_dump_json(exclude_unset=True).encode()) > MAX_PAYLOAD_BYTES:
+            raise ValueError("Notification payload exceeds its size limit")
+        return self
+
+
+def _read_payload(encoded):
+    if not isinstance(encoded, str) or len(encoded.encode()) > MAX_PAYLOAD_BYTES:
+        raise ValueError("Invalid persisted notification payload")
+    try:
+        return AlertPayload.model_validate_json(encoded)
+    except ValueError:
+        # Do not echo malformed persisted content through validation diagnostics.
+        raise ValueError("Invalid persisted notification payload") from None
+
+
+class AlertRecord(_PersistentModel):
+    id: str = Field(min_length=1, max_length=128)
+    issue_id: str = Field(min_length=1, max_length=512)
+    created_at: float
+    updated_at: float
+    acknowledged_at: float | None
+    resolved_at: float | None
+    payload: AlertPayload
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def persisted_payload(cls, value):
+        return _read_payload(value) if isinstance(value, str) else value
+
+
+class TransportRecord(_PersistentModel):
+    alert_id: str = Field(min_length=1, max_length=128)
+    name: Literal["desktop", "mail"]
+    attempted_at: float | None
+    accepted_at: float | None
+    error: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")
+    claim_until: float | None
+    claim_token: str | None = Field(default=None, max_length=128)
+
+
+def _record(model, row):
+    try:
+        return model.model_validate(dict(row))
+    except ValueError:
+        raise ValueError("Invalid persisted notification record") from None
 
 
 def _iso(value):
@@ -104,6 +214,8 @@ def _projection(issue):
                 safe_evidence[key] = evidence[key]
         if evidence.get("state") in {"observed", "not_observed", "unavailable"}:
             safe_evidence["state"] = evidence["state"]
+        if evidence.get("reason") == "scan_limit":
+            safe_evidence["reason"] = "scan_limit"
         if isinstance(evidence.get("source_present"), bool):
             safe_evidence["source_present"] = evidence["source_present"]
         sources = evidence.get("sources")
@@ -120,7 +232,7 @@ def _projection(issue):
         encoded = json.dumps(payload, ensure_ascii=True)
     if len(encoded.encode()) > MAX_PAYLOAD_BYTES:
         raise ValueError("Notification identity exceeds payload limit")
-    return encoded
+    return AlertPayload.model_validate(payload).model_dump_json(exclude_unset=True)
 
 
 def submit_desktop(alert, cfg):
@@ -143,18 +255,20 @@ def submit_desktop(alert, cfg):
 
 
 def _alert(conn, row):
-    value = json.loads(row["payload"])
-    value.update({"id": row["id"], "issue_id": row["issue_id"],
-                  "created_at": _iso(row["created_at"]), "updated_at": _iso(row["updated_at"]),
-                  "acknowledged_at": _iso(row["acknowledged_at"]), "resolved_at": _iso(row["resolved_at"]),
-                  "state": "resolved" if row["resolved_at"] is not None else
-                           "acknowledged" if row["acknowledged_at"] is not None else "unread",
+    record = _record(AlertRecord, row)
+    value = record.payload.model_dump(mode="json", exclude_unset=True)
+    value.update({"id": record.id, "issue_id": record.issue_id,
+                  "created_at": _iso(record.created_at), "updated_at": _iso(record.updated_at),
+                  "acknowledged_at": _iso(record.acknowledged_at), "resolved_at": _iso(record.resolved_at),
+                  "state": "resolved" if record.resolved_at is not None else
+                           "acknowledged" if record.acknowledged_at is not None else "unread",
                   "transports": {}})
     for name in TRANSPORTS:
-        transport = conn.execute("SELECT * FROM health_alert_transports WHERE alert_id=? AND name=?", (row["id"], name)).fetchone()
-        value["transports"][name] = {"attempted_at": _iso(transport["attempted_at"]) if transport else None,
-                                     "accepted_at": _iso(transport["accepted_at"]) if transport else None,
-                                     "error": transport["error"] if transport else None}
+        row = conn.execute("SELECT * FROM health_alert_transports WHERE alert_id=? AND name=?", (record.id, name)).fetchone()
+        transport = _record(TransportRecord, row) if row else None
+        value["transports"][name] = {"attempted_at": _iso(transport.attempted_at) if transport else None,
+                                     "accepted_at": _iso(transport.accepted_at) if transport else None,
+                                     "error": transport.error if transport else None}
     return value
 
 
@@ -168,13 +282,14 @@ def transport_snapshot(conn, cfg):
     result = {}
     for name in TRANSPORTS:
         row = conn.execute("SELECT * FROM health_alert_transports WHERE name=? AND attempted_at IS NOT NULL ORDER BY attempted_at DESC LIMIT 1", (name,)).fetchone()
+        record = _record(TransportRecord, row) if row else None
         enabled = cfg["enabled"] and cfg[name + "_enabled"]
         result[name] = {"enabled": enabled,
-                        "attempted_at": _iso(row["attempted_at"]) if row else None,
-                        "accepted_at": _iso(row["accepted_at"]) if row else None,
-                        "error": row["error"] if row else None,
-                        "state": "disabled" if not enabled else "not_attempted" if not row else
-                                 "failed" if row["error"] else "submitted" if row["accepted_at"] else "attempting"}
+                        "attempted_at": _iso(record.attempted_at) if record else None,
+                        "accepted_at": _iso(record.accepted_at) if record else None,
+                        "error": record.error if record else None,
+                        "state": "disabled" if not enabled else "not_attempted" if not record else
+                                 "failed" if record.error else "submitted" if record.accepted_at else "attempting"}
     return result
 
 
