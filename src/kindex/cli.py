@@ -1700,42 +1700,20 @@ def _strip_pii(node: dict) -> dict:
     from .privacy import redact
     node = redact(node)
     node["prov_who"] = ["anonymous"]
-    node["prov_source"] = Path(node.get("prov_source", "")).name if node.get("prov_source") else ""
+    from pathlib import PureWindowsPath
+    from urllib.parse import urlsplit
+    source = node.get("prov_source", "")
+    if urlsplit(source).scheme not in ("http", "https"):
+        node["prov_source"] = PureWindowsPath(source).name
     # Strip emails from content
     content = node.get("content", "")
     content = re.sub(r'\S+@\S+\.\S+', '[email]', content)
     # Credentials use the common policy; ordinary evidence hashes remain intact.
     node["content"] = content
-    # Kinbase's preserved source document can repeat statement/owner data.
-    # Apply this sharing boundary recursively, retaining the receipt's scope:
-    # signatures were verified against original external bytes, not this copy.
-    def scrub_metadata(value):
-        if isinstance(value, str):
-            return re.sub(r'\S+@\S+\.\S+', '[email]', value)
-        if isinstance(value, list):
-            return [scrub_metadata(item) for item in value]
-        if isinstance(value, dict):
-            return {scrub_metadata(key): scrub_metadata(item) for key, item in value.items()}
-        return value
-
     metadata = (node.get("extra") or {}).get("kinbase")
     if isinstance(metadata, dict):
-        scrubbed = scrub_metadata(metadata)
-        # Source paths and owner identities are provenance PII even when they
-        # do not happen to contain an email address.
-        import hashlib
-        source_repo = metadata.get("repo", "")
-        # Opaque but stable grouping survives export/import without disclosing
-        # a home path or merging unrelated repositories' contested keys.
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", source_repo):
-            scrubbed["repo"] = source_repo
-        else:
-            scrubbed["repo"] = "sha256:" + hashlib.sha256(source_repo.encode()).hexdigest()
-        if scrubbed.get("owner_identity"):
-            scrubbed["owner_identity"] = "[owner identity redacted]"
-        scrubbed["source_document_redacted"] = True
-        scrubbed["signature_verification_scope"] = "original external source bytes; shared copy redacted"
-        node["extra"] = {**node["extra"], "kinbase": scrubbed}
+        from .graph_transfer import scrub_kinbase_metadata
+        node["extra"] = {**node["extra"], "kinbase": scrub_kinbase_metadata(metadata)}
     # Strip actor from activity log entries stored in extra
     extra = node.get("extra")
     if isinstance(extra, dict):
@@ -1798,29 +1776,10 @@ def cmd_export(args):
               file=sys.stderr)
         sys.exit(1)
 
-    if target_audience == "private":
-        nodes = store.all_nodes(limit=10000)
-    elif target_audience == "team":
-        team = store.all_nodes(audience="team", limit=10000)
-        org = store.all_nodes(audience="org", limit=10000)
-        public = store.all_nodes(audience="public", limit=10000)
-        seen = set()
-        nodes = []
-        for n in team + org + public:
-            if n["id"] not in seen:
-                seen.add(n["id"])
-                nodes.append(n)
-    elif target_audience == "org":
-        org = store.all_nodes(audience="org", limit=10000)
-        public = store.all_nodes(audience="public", limit=10000)
-        seen = set()
-        nodes = []
-        for n in org + public:
-            if n["id"] not in seen:
-                seen.add(n["id"])
-                nodes.append(n)
-    else:  # public
-        nodes = store.all_nodes(audience="public", limit=10000)
+    audiences = {"private": (None,), "team": ("team", "org", "public"),
+                 "org": ("org", "public"), "public": ("public",)}[target_audience]
+    # A snapshot must not silently truncate at the query helper's display limit.
+    nodes = [n for audience in audiences for n in store.all_nodes(audience=audience, limit=-1)]
 
     # Apply PII stripping for public/org exports
     strip_pii = target_audience in ("public", "org")
@@ -1828,33 +1787,11 @@ def cmd_export(args):
     # Strip edges that cross audience boundaries
     output = []
     node_ids = {n["id"] for n in nodes}
+    from .graph_transfer import export_record
     for n in nodes:
         if strip_pii:
             n = _strip_pii(n)
-        edges = store.edges_from(n["id"])
-        # Only keep edges where target is in our exported set
-        filtered_edges = [e for e in edges if e["to_id"] in node_ids]
-
-        record = {
-            "id": n["id"], "type": n["type"], "title": n["title"],
-            "content": n.get("content", ""),
-            "weight": n["weight"], "domains": n.get("domains", []),
-            "standing": n.get("standing", "unruled"),
-            "status": n.get("status", "active"),
-            "audience": n.get("audience", "private"),
-            "edges": [{"to": e["to_id"], "type": e["type"], "weight": e["weight"]}
-                      for e in filtered_edges],
-        }
-        if isinstance((n.get("extra") or {}).get("kinbase"), dict):
-            record["extra"] = {"kinbase": n["extra"]["kinbase"]}
-        # R0 referent binding + clocks round-trip through export/import.
-        if isinstance(n.get("referent"), dict):
-            record["referent"] = n["referent"]
-        for clock in ("asserted_at", "true_of"):
-            if n.get(clock):
-                record[clock] = n[clock]
-        from .privacy import redact
-        output.append(redact(record))
+        output.append(export_record(n, store.edges_from(n["id"]), node_ids, public=strip_pii))
 
     if args.format == "jsonl":
         for item in output:
@@ -3767,134 +3704,28 @@ def cmd_skills(args):
 
 def cmd_import_graph(args):
     """Import nodes and edges from a JSON or JSONL file."""
+    from .graph_transfer import import_records
+
     store = _store(args)
-    filepath = Path(args.filepath)
-
-    if not filepath.exists():
-        print(f"Error: '{filepath}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    text = filepath.read_text()
-    if filepath.suffix == ".jsonl" or args.format == "jsonl":
-        items = [json.loads(line) for line in text.strip().split("\n") if line.strip()]
-    else:
-        data = json.loads(text)
-        items = data if isinstance(data, list) else [data]
-
     dry_run = getattr(args, "dry_run", False)
-    merge = getattr(args, "mode", "merge") == "merge"
-    created = updated = edges_created = skipped = 0
-
-    for item in items:
-        title = item.get("title", "")
-        node_id = item.get("id", "")
-
-        if not title and not node_id:
-            skipped += 1
-            continue
-
-        existing = None
-        if node_id:
-            existing = store.get_node(node_id)
-        if not existing and title and not (item.get("extra") or {}).get("kinbase"):
-            existing = store.get_node_by_title(title)
-
-        if existing:
-            if merge:
-                metadata = {key: item[key] for key in ("standing", "extra", "status")
-                            if key in item and item[key] != existing.get(key)}
-                # Merge: update content if new content is provided
-                new_content = item.get("content", "")
-                old_content = existing.get("content", "")
-                if new_content and new_content != old_content:
-                    if not dry_run:
-                        combined = old_content + "\n\n" + new_content if old_content else new_content
-                        store.update_node(existing["id"], content=combined, **metadata)
-                    updated += 1
-                    if dry_run:
-                        print(f"  Would update: {title}")
-                elif metadata:
-                    if not dry_run:
-                        store.update_node(existing["id"], **metadata)
-                    updated += 1
-                else:
-                    skipped += 1
-            else:
-                # Replace
-                if not dry_run:
-                    store.update_node(existing["id"],
-                                      title=title,
-                                      content=item.get("content", ""),
-                                      weight=item.get("weight", existing["weight"]),
-                                      standing=item.get("standing", existing.get("standing", "unruled")),
-                                      extra=item.get("extra", existing.get("extra", {})),
-                                      status=item.get("status", existing.get("status", "active")))
-                updated += 1
-                if dry_run:
-                    print(f"  Would replace: {title}")
+    try:
+        filepath = Path(args.filepath)
+        text = filepath.read_text()
+        if filepath.suffix == ".jsonl" or args.format == "jsonl":
+            items = [json.loads(line) for line in text.splitlines() if line.strip()]
         else:
-            if not dry_run:
-                # R0 binding travels with the import; a malformed binding is
-                # reported visibly and the node is created unbound rather
-                # than silently dropped or silently bound wrong.
-                binding: dict = {}
-                if any(item.get(k) for k in ("referent", "asserted_at", "true_of")):
-                    try:
-                        from .store import _normalize_binding
-                        _normalize_binding(
-                            item.get("referent"),
-                            item.get("asserted_at"),
-                            item.get("true_of"),
-                        )
-                        binding = {
-                            "referent": item.get("referent"),
-                            "asserted_at": item.get("asserted_at"),
-                            "true_of": item.get("true_of"),
-                        }
-                    except (ValueError, TypeError) as exc:
-                        print(f"  Warning: invalid referent binding on "
-                              f"'{title}' ({exc}); imported unbound",
-                              file=sys.stderr)
-                store.add_node(
-                    title=title,
-                    content=item.get("content", ""),
-                    node_id=node_id or None,
-                    node_type=item.get("type", "concept"),
-                    domains=item.get("domains", []),
-                    weight=item.get("weight", 0.5),
-                    standing=item.get("standing", "unruled"),
-                    extra=item.get("extra", {}),
-                    status=item.get("status", "active"),
-                    audience=item.get("audience", "private"),
-                    prov_activity="import",
-                    prov_source=str(filepath),
-                    **binding,
-                )
-            created += 1
-            if dry_run:
-                print(f"  Would create: {title}")
-
-        # Process edges
-        for edge in item.get("edges", []):
-            to_id = edge.get("to", "")
-            if not to_id:
-                continue
-            from_id = node_id or (existing["id"] if existing else "")
-            if not from_id:
-                continue
-            # Check if target exists
-            target = store.get_node(to_id) or store.get_node_by_title(to_id)
-            if target and not dry_run:
-                store.add_edge(from_id, target["id"],
-                               edge_type=edge.get("type", "relates_to"),
-                               weight=edge.get("weight", 0.5),
-                               provenance="import")
-                edges_created += 1
-
+            data = json.loads(text)
+            items = data if isinstance(data, list) else [data]
+        counts = import_records(store, items, replace=getattr(args, "mode", "merge") == "replace",
+                                dry_run=dry_run)
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    finally:
+        store.close()
     prefix = "[DRY RUN] " if dry_run else ""
-    print(f"{prefix}Import complete: {created} created, {updated} updated, "
-          f"{edges_created} edges, {skipped} skipped")
-    store.close()
+    print(f"{prefix}Import complete: {counts['created']} created, {counts['updated']} updated, "
+          f"{counts['edges']} edges, {counts['skipped']} skipped")
 
 
 # ── cron ──────────────────────────────────────────────────────────────

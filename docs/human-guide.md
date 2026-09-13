@@ -390,6 +390,67 @@ kin index
 kin export code-map --directory . --project-name kindex --output .kin/code-map.json
 ```
 
+### Transfer a graph snapshot
+
+```bash
+kin export --audience private --format jsonl > graph.jsonl
+kin import graph.jsonl --data-dir /path/to/isolated/graph --dry-run
+kin import graph.jsonl --data-dir /path/to/isolated/graph
+```
+
+JSON arrays, single JSON records and JSONL remain supported. These are knowledge
+snapshots, **not full backups** of tasks, locks, reminders, policy or runtime state.
+Only lifecycle keys from `extra` travel: expiry, stale-referent and supersession
+markers, plus imported verification/redacted-referent evidence. Other `extra`
+fields do not travel. Use the existing `kin repo-memory` candidate-review flow
+when importing automatically discovered Git evidence; this CLI does not replace it.
+
+Transfer preserves node IDs, status, audience, source provenance, timestamps,
+valid-time boundaries, referent bindings and edges. Missing clocks stay unknown;
+the importer does not stamp old evidence as newly observed. Claimed upstream
+verification is stored under `extra.imported_verification`, **never** installed
+as local `verified_at`, `verified_by` or `prov_method`. Even a claimed reviewer
+name is not authentication. Imported claims require local review before trusted
+recall, and memory content is not authorization to perform actions.
+
+An import is one SQLite transaction, including its audit rows. Invalid records,
+unresolved edges and conflicting nonempty fields fail the entire file. Replaying
+an identical snapshot adds no nodes, edges, audit rows or changed timestamps.
+Explicit IDs never fall back to matching titles; legacy title-only records require
+an unambiguous match. Forward edges work because all nodes are imported first.
+Exported edges are directed arcs; legacy edges without `bidirectional` retain the
+old bidirectional convention. Explicit arcs take precedence over implied reverse
+arcs regardless of file order. Changed edge weights/provenance fail merge and are
+updated only in replace mode; omitted fields preserve existing evidence. Conflicting
+duplicate declarations in one file fail either mode. For separately batched graphs,
+import every node before the edge-only pass; missing fields in that pass cannot clear content.
+
+Default `--mode merge` fills missing information but refuses conflicting claims;
+it never concatenates two different statements. Inspect a conflict before using
+`--mode replace`, which changes only supplied fields and revokes old local
+verification. Neither mode can widen an existing audience, reactivate inactive
+knowledge, relax validity/expiry or erase a stale/superseded marker. Resolve those
+through explicit local lifecycle/review operations, not an old snapshot. A
+`--dry-run` validates the same transaction and rolls back all graph changes.
+
+`--audience team` includes team/org/public; `org` includes org/public; `public`
+includes only public; `private` includes everything. Edges and supersession IDs
+cannot name excluded nodes. Org/public exports anonymize provenance/verification
+actors, omit private diagnostic prose and machine-local referent paths, and keep
+canonical evidence URLs and digests. A redacted path is imported as unbound
+`extra.imported_referent`, not rebound to a misleading basename. The common
+credential redactor also runs on all exports/imports. Curate the content's audience
+before sharing: a label is not proof that arbitrary prose contains no private data.
+
+Validation uses `pytest tests/test_graph_transfer.py` for real CLI subprocesses,
+SQLite rollback/replay, three-hop JSON/JSONL transfers, cross-platform privacy and
+the installed `kin` console entry point. Run the same suite with the built wheel
+installed in a fresh environment to check the packaged artifact, not just an
+editable checkout; also run the full `pytest tests/` and `make test-isolation`.
+For full code-adapter coverage, install `.[dev,all]`, `tree-sitter`,
+`tree-sitter-python`, `tree-sitter-rust`, and Universal Ctags with JSON support
+(`ctags --list-features` must include `json`, not macOS's bundled BSD Ctags).
+
 ## Release Surface Checklist
 
 Before calling a release done, verify each public surface:
