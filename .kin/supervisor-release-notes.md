@@ -37,3 +37,12 @@ Durable claims recover on the next worker invocation; uncertain paid attempts
 become explicit failures without replay. A waiting worker handles new admissions
 behind an active review. Native scan limits are reported as incomplete coverage,
 and persisted alert payloads are validated before display.
+
+Offline supervisor reviews can select installed local Ollama weights through a
+loopback HTTP endpoint. Inventory checks reject cloud-backed or unknown models
+before prompt delivery. Native clients and Ollama share durable attempt limits;
+Ollama never reads the API dollar ledger or invokes paid escalation. Local graph
+grounding, a total request deadline, bounded output, and validated advisory content
+apply before the existing queue delivers a result on a subsequent host event.
+Backend and model overrides remain adjustable per conversation. The local Ollama
+service is trusted; this is not an operating-system network sandbox.

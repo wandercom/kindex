@@ -270,7 +270,7 @@ kin agent-config set sim.max_daily_reviews 800 --client claude --global
 The `--client` identifies the host being supervised; `sim.backend` independently
 selects its reviewer. Limits are local attempted-review counts. Conversation
 counts persist across days and backend changes, and the UTC daily count covers
-all conversations and subscription backends in the project store. An attempt is
+all conversations, subscription backends, and Ollama reviews in the project store. An attempt is
 reserved atomically before transport; failed and unknown attempts remain counted.
 Changes take effect on the next admission without resetting accounting. Existing
 sim queue claims remain the only dispatch authority, and already admitted work
@@ -318,3 +318,53 @@ Subscription reviewer grounding uses only local full-text search, graph expansio
 and local ranking signals. It skips both query embeddings and register translation,
 so parent-process API credentials cannot cause paid grounding requests. API reviews
 retain their configured hybrid retrieval behavior.
+
+## Offline Ollama reviews
+
+Use `sim.backend: ollama` to run reviews with installed local model weights. This
+is separate from the installed Antigravity, Codex, and Claude clients, which use
+their providers' services. Install Ollama and explicitly download a suitable model
+before enabling this backend; Kindex does not download models automatically.
+
+```yaml
+sim:
+  enabled: true
+  backend: ollama
+  ollama_url: http://127.0.0.1:11434
+  ollama_model: qwen3:0.6b
+  max_conversation_reviews: 100
+  max_daily_reviews: 500
+  agent_timeout: 90
+  max_output_tokens: 500
+```
+
+The small model above is useful for checking installation and transport. Review
+quality depends on the chosen model and available hardware; a successful response
+does not establish that its advice is useful. Select a model you have evaluated
+for your work.
+
+Only HTTP loopback endpoints are accepted. Before sending a prompt, Kindex checks
+the installed-model inventory for local weights and rejects cloud-backed, missing,
+or unrecognized entries. It bypasses proxy settings, does not follow redirects,
+and has no cloud or API fallback. Grounding uses local full-text search and graph
+data. The local Ollama service is trusted: these checks do not sandbox the daemon
+or establish network isolation for the whole computer.
+
+Ollama shares the native clients' durable attempted-review limits and low-allowance
+notices. Failed attempts count. It does not read or debit the API dollar ledger or
+invoke paid Advocate escalation. `agent_timeout` bounds the complete local request,
+including the inventory check, and `max_output_tokens` bounds generated output.
+Reported token counts are retained without assigning a dollar cost.
+
+Change a conversation while it is running using trusted user overrides:
+
+```sh
+kin agent-config set sim.ollama_model qwen3:0.6b --client codex --scope instance --instance SESSION_ID --global
+kin agent-config set sim.backend ollama --client codex --scope instance --instance SESSION_ID --global
+```
+
+The next admitted review uses the new settings; existing claims retain their
+snapshot and counts are preserved. Set `sim.backend` to `api`, `antigravity`,
+`codex`, or `claude` to switch back. Set `sim.enabled` to `false` at the same scope
+to disable reviews. Adding Ollama support does not change an existing backend
+selection.

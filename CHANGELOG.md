@@ -4,6 +4,41 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-09-13
+
+### Added
+- Subscription-backed supervisor reviews through installed Antigravity, Codex,
+  and Claude clients, with private stdin prompts, explicit native session resume,
+  scoped health exemptions, and no automatic API fallback.
+- Fully offline supervisor reviews through installed local Ollama weights.
+  Loopback transport rejects cloud-backed models and redirects, bounds lock waits,
+  total request time and output, and persists reported token counts without a
+  dollar charge. Offline grounding uses local full-text search and graph data.
+- Shared durable conversation and daily attempt limits for installed-agent and
+  Ollama reviews, with low-allowance notices and live conversation overrides.
+
+### Fixed
+- Conversation-specific cadence and budgets now apply consistently. Trusted
+  settings can be inspected without repository configuration hiding them.
+- Native reviewer identities survive first-turn interruption when supplied by
+  the client; optional health-registration failures preserve valid results.
+- Intentional reviewer hook exemptions match exact registered sessions.
+
+### Changed
+- Copyright and repository links identify Wander. The canonical MCP Registry
+  name is now `io.github.wandercom/kindex`; the PyPI package remains `kindex`.
+- API dollar budgets remain separate from review-attempt limits. Reviews can be
+  disabled or switched among API, installed-client, and offline modes without
+  resetting recorded usage. Existing backend selections remain unchanged.
+
+### Qualification boundaries
+- A small local model qualified offline queue, inference, receipt persistence,
+  next-hook delivery, and allowance notifications; advice quality is not certified.
+- Ollama is a trusted local service, not an operating-system network sandbox.
+  Installed clients remain subject to their providers' availability and quotas.
+
+See [supervision and notifications](docs/supervisor-health.md).
+
 ## [0.37.0] - 2026-09-12
 
 ### Added

@@ -137,6 +137,9 @@ def _transcript(path: str, limit: int) -> tuple[str, str]:
 
 def preflight(config, conversation: str) -> tuple[str, str] | None:
     """Cheap known-unavailable checks; the worker repeats all spend gates."""
+    if config.sim.backend == "ollama":
+        from .ollama_review import preflight as ollama_preflight
+        return ollama_preflight(config, conversation)
     if config.sim.backend != "api":
         from .subscription_review import preflight as subscription_preflight
         return subscription_preflight(config, conversation)
@@ -207,6 +210,8 @@ def _allowance_notice(store, config, conversation, *, deliver=True):
         units = "USD" if config.sim.backend == "api" else "reviews"
         detail = "; ".join(f"{name} {parts[name]['used']:g}/{parts[name]['limit']:g} {units}" for name in crossed)
         return f"Kindex supervisor: review budget low ({detail}); adjust the conversation or project allowance to continue reviewing.", status
+    except TimeoutError:
+        return "", {"state": "unavailable", "reason": "ollama_timeout"}
     except (OSError, ValueError, TypeError):
         return "", {"state": "unavailable", "reason": "review_accounting_unavailable"}
 

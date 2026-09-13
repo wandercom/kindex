@@ -155,10 +155,21 @@ def _write(path, data: _PersistentModel):
 
 
 @contextmanager
-def _lock(path):
+def _lock(path, *, deadline=None):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if deadline is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("review_lock_timeout")
+                    time.sleep(min(0.01, remaining))
         yield
     finally:
         os.close(fd)
@@ -180,11 +191,38 @@ def _status(config, counts, conversation_id):
             "provider_quota": "unknown"}
 
 
-def allowance_status(config, conversation_id):
+def allowance_status(config, conversation_id, *, deadline=None):
     """Return local attempt allowances; native provider quota is independent."""
+    if deadline is None and config.sim.backend == "ollama":
+        deadline = time.monotonic() + min(float(config.sim.agent_timeout), 0.1)
     root = _root(config)
-    with _lock(root / "allowances.lock"):
+    with _lock(root / "allowances.lock", deadline=deadline):
         return _status(config, _counts(root), conversation_id)
+
+
+def reserve_attempt(config, conversation_id, *, deadline=None):
+    """Atomically reserve one durable local-review attempt.
+
+    Native subscription clients and Ollama share this existing allowance ledger.
+    Reservations are retained when a provider fails, preventing retry loops from
+    bypassing the conversation and UTC-day limits.
+    """
+    try:
+        root = _root(config)
+        key = _key(conversation_id)
+        with _lock(root / "allowances.lock", deadline=deadline):
+            counts = _counts(root)
+            status = _status(config, counts, conversation_id)
+            if any(status[name]["remaining"] <= 0 for name in ("conversation", "day")):
+                return {"status": "review_budget_exhausted", "allowance": status}
+            counts.conversations[key] = status["conversation"]["used"] + 1
+            counts.days[status["day_id"]] = status["day"]["used"] + 1
+            _write(root / "allowances.json", counts)
+            return {"status": "ok", "allowance": _status(config, counts, conversation_id)}
+    except TimeoutError:
+        return {"status": "review_lock_timeout"}
+    except (OSError, ValueError, TypeError):
+        return {"status": "review_accounting_unavailable"}
 
 
 def preflight(config, conversation_id):
@@ -220,14 +258,9 @@ def run_review(config, conversation_id, prompt):
             # Adopt its durable checkpoint only for a freshly dispatched sim job.
             receipt = _adopt_native(workspace, receipt)
             session_id = receipt.session_id
-            with _lock(root / "allowances.lock"):
-                counts = _counts(root)
-                status = _status(config, counts, conversation_id)
-                if any(status[name]["remaining"] <= 0 for name in ("conversation", "day")):
-                    return {"status": "review_budget_exhausted", "allowance": status}
-                counts.conversations[key] = status["conversation"]["used"] + 1
-                counts.days[status["day_id"]] = status["day"]["used"] + 1
-                _write(root / "allowances.json", counts)
+            reservation = reserve_attempt(config, conversation_id)
+            if reservation.get("status") != "ok":
+                return reservation
             receipt = SessionReceipt(backend=backend, conversation=key, session_id=session_id,
                                      status="completion_unknown")
             _write(workspace / "session.json", receipt)
