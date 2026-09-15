@@ -77,7 +77,12 @@ class TestDrain:
         assert _queue(store) == [nid]
 
         res = drain_embedding_queue(store)
-        assert res == {"status": "ok", "embedded": 1, "pending": 0}
+        assert res["status"] == "ok"
+        assert res["embedded"] == 1
+        assert res["pending"] == 0
+        assert res["quarantined"] == 0
+        assert res["drain_complete"] is True
+        assert res["coverage_complete"] is True
         assert embed_calls == [(nid, "Title body")]
         assert _queue(store) == []
 

@@ -21,12 +21,14 @@ import math
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .privacy import redact, redact_text, safe_error
+from .privacy import redact, redact_serialized, redact_text, safe_error
 from .privacy import redacting_print as print
 
 if TYPE_CHECKING:
@@ -45,12 +47,63 @@ PROVIDER_DEFAULTS = {
 }
 
 EMBED_QUEUE_META = "embed.queue"
+EMBED_QUARANTINE_META = "embed.quarantine.v1"
+EMBED_QUARANTINE_VERSION = 1
 EMBEDDING_PRICE_PER_MILLION = {
     ("voyage", "voyage-context-4"): 0.12,
     ("voyage", "voyage-context-3"): 0.18,
     ("voyage", "voyage-3.5"): 0.06,
     ("voyage", "voyage-3-large"): 0.18,
 }
+
+
+@dataclass(frozen=True)
+class _EmbeddingOutcome:
+    """Internal outcome used by the queue drain without changing bool callers."""
+
+    ok: bool
+    terminal: bool = False
+    kind: str | None = None
+    http_status: int | None = None
+    message: str | None = None
+
+
+class EmbeddingTerminalError(Exception):
+    """A provider rejected unchanged input such that retrying cannot help."""
+
+    def __init__(self, outcome: _EmbeddingOutcome):
+        super().__init__(outcome.message or "Embedding failed")
+        self.outcome = outcome
+
+
+class _EmbeddingProviderError(Exception):
+    def __init__(self, *, kind: str, http_status: int | None, message: str):
+        super().__init__(message)
+        self.kind = kind
+        self.http_status = http_status
+
+
+def _provider_http_error(error: urllib.error.HTTPError) -> _EmbeddingProviderError:
+    """Classify deterministic input-size rejections without exposing payloads."""
+    try:
+        detail = error.read().decode("utf-8", errors="replace")
+    except Exception:
+        detail = ""
+    message = safe_error(Exception(detail or str(error)))
+    normalized = message.lower()
+    input_too_large = error.code == 400 and (
+        "context length" in normalized
+        or "maximum context" in normalized
+        or "max context" in normalized
+        or "maximum input" in normalized
+        or "max input" in normalized
+        or ("maximum" in normalized and "length" in normalized)
+    )
+    return _EmbeddingProviderError(
+        kind="input_too_large" if input_too_large else "provider_http_error",
+        http_status=error.code,
+        message=message,
+    )
 
 
 def _resolve_embedding_config(config: Config | None) -> tuple[str, str, int, str]:
@@ -190,6 +243,8 @@ def _embed_openai(text: str, model: str, dimensions: int, api_key_env: str) -> l
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode())
             return result["data"][0]["embedding"]
+    except urllib.error.HTTPError as e:
+        raise _provider_http_error(e) from e
     except Exception as e:
         print(f"OpenAI embedding error: {safe_error(e)}", file=sys.stderr)
         return None
@@ -223,6 +278,8 @@ def _embed_gemini(text: str, model: str, dimensions: int, api_key_env: str) -> l
             if "embedding" in result and "values" in result["embedding"]:
                 return result["embedding"]["values"]
             return None
+    except urllib.error.HTTPError as e:
+        raise _provider_http_error(e) from e
     except Exception as e:
         print(f"Gemini embedding error: {safe_error(e)}", file=sys.stderr)
         return None
@@ -272,6 +329,8 @@ def _embed_voyage_context_chunks(
                 return [item["data"][0]["embedding"] for item in result["data"]]
             items = sorted(result["data"][0]["data"], key=lambda item: item.get("index", 0))
             return [item["embedding"] for item in items]
+    except urllib.error.HTTPError as e:
+        raise _provider_http_error(e) from e
     except Exception as e:
         print(f"Voyage embedding error: {safe_error(e)}", file=sys.stderr)
         return None
@@ -344,6 +403,7 @@ def embed_text(
     config: Config | None = None,
     *,
     input_type: str = "document",
+    _raise_provider_errors: bool = False,
 ) -> list[float] | None:
     """Embed a text string into a vector using the configured provider."""
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
@@ -352,7 +412,13 @@ def embed_text(
         print(f"Warning: unknown embedding provider '{provider}'. "
               f"Supported: {', '.join(PROVIDER_DEFAULTS)}", file=sys.stderr)
         return None
-    return fn(redact_text(text), model, dims, api_key_env, input_type)
+    try:
+        return fn(redact_text(text), model, dims, api_key_env, input_type)
+    except _EmbeddingProviderError as e:
+        if _raise_provider_errors:
+            raise
+        print(f"{provider.title()} embedding error: {safe_error(e)}", file=sys.stderr)
+        return None
 
 
 def _get_embedding_dim(config: Config | None) -> int:
@@ -496,14 +562,17 @@ def ensure_vec_table(store: Store) -> bool:
         return False
 
 
-def embed_document_chunks(text: str, config: Config | None = None) -> list[dict] | None:
+def embed_document_chunks(
+    text: str, config: Config | None = None, *, _raise_provider_errors: bool = False
+) -> list[dict] | None:
     """Embed document text and return chunk records ready for storage."""
     if not text:
         return []
     strategy = embedding_strategy(config)
     text_hash = _hash_text(text)
     if strategy != "contextual":
-        embedding = embed_text(text, config, input_type="document")
+        embedding = embed_text(text, config, input_type="document",
+                               _raise_provider_errors=_raise_provider_errors)
         if embedding is None:
             return None
         return [{
@@ -516,7 +585,8 @@ def embed_document_chunks(text: str, config: Config | None = None) -> list[dict]
 
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
     if provider != "voyage" or not _is_voyage_context_model(model):
-        embedding = embed_text(text, config, input_type="document")
+        embedding = embed_text(text, config, input_type="document",
+                               _raise_provider_errors=_raise_provider_errors)
         if embedding is None:
             return None
         return [{
@@ -536,9 +606,14 @@ def embed_document_chunks(text: str, config: Config | None = None) -> list[dict]
     records: list[dict] = []
     for offset in range(0, len(chunks), opts["max_group_chunks"]):
         group = chunks[offset:offset + opts["max_group_chunks"]]
-        embeddings = _embed_voyage_context_chunks(
-            group, model, dims, api_key_env, input_type="document"
-        )
+        try:
+            embeddings = _embed_voyage_context_chunks(
+                group, model, dims, api_key_env, input_type="document"
+            )
+        except _EmbeddingProviderError:
+            if _raise_provider_errors:
+                raise
+            return None
         if embeddings is None or len(embeddings) != len(group):
             return None
         for i, (chunk_text, embedding) in enumerate(zip(group, embeddings)):
@@ -552,14 +627,27 @@ def embed_document_chunks(text: str, config: Config | None = None) -> list[dict]
     return records
 
 
-def upsert_embedding(store: Store, node_id: str, text: str) -> bool:
-    """Compute and store embeddings for a node."""
+def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _EmbeddingOutcome:
+    """Compute embeddings and retain the reason a queue item could not run."""
     if not ensure_vec_table(store):
-        return False
+        return _EmbeddingOutcome(False, kind="backend_unavailable",
+                                 message="Vector backend unavailable")
 
-    chunks = embed_document_chunks(text, store.config)
+    try:
+        chunks = embed_document_chunks(text, store.config, _raise_provider_errors=True)
+    except TypeError as e:
+        # Preserve the long-standing test/plugin seam for callers that replace
+        # this helper with its two-argument legacy shape.
+        if "_raise_provider_errors" not in str(e):
+            raise
+        chunks = embed_document_chunks(text, store.config)
+    except _EmbeddingProviderError as e:
+        return _EmbeddingOutcome(False, terminal=e.kind == "input_too_large",
+                                 kind=e.kind, http_status=e.http_status,
+                                 message=safe_error(e))
     if not chunks:
-        return False
+        return _EmbeddingOutcome(False, kind="embedding_unavailable",
+                                 message="Embedding provider returned no vector")
 
     try:
         fingerprint = embedding_fingerprint(store.config)
@@ -587,9 +675,53 @@ def upsert_embedding(store: Store, node_id: str, text: str) -> bool:
                 ),
             )
         store.conn.commit()
-        return True
+        return _EmbeddingOutcome(True)
+    except Exception as e:
+        return _EmbeddingOutcome(False, kind="storage_error", message=safe_error(e))
+
+
+def upsert_embedding(store: Store, node_id: str, text: str) -> bool:
+    """Compute and store embeddings for a node (legacy boolean surface)."""
+    outcome = _upsert_embedding_outcome(store, node_id, text)
+    if outcome.terminal:
+        raise EmbeddingTerminalError(outcome)
+    return outcome.ok
+
+
+def _load_embedding_queue(store: Store) -> list[str]:
+    try:
+        value = json.loads(store.get_meta(EMBED_QUEUE_META) or "[]")
+        return value if isinstance(value, list) else []
     except Exception:
-        return False
+        return []
+
+
+def _load_embedding_quarantine(store: Store) -> dict[str, dict]:
+    try:
+        value = json.loads(store.get_meta(EMBED_QUARANTINE_META) or "{}")
+        items = value.get("items") if value.get("version") == EMBED_QUARANTINE_VERSION else None
+        return items if isinstance(items, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_embedding_meta(store: Store, queue: list[str], quarantine: dict[str, dict], *, commit: bool) -> None:
+    """Atomically persist the legacy queue and versioned quarantine metadata."""
+    queue_json = redact_serialized(json.dumps(queue))
+    quarantine_json = redact_serialized(json.dumps({"version": EMBED_QUARANTINE_VERSION, "items": quarantine}))
+    if not commit:
+        # The task service owns the surrounding node + receipt transaction.
+        store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUEUE_META, queue_json))
+        store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUARANTINE_META, quarantine_json))
+        return
+    store.conn.execute("BEGIN IMMEDIATE")
+    try:
+        store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUEUE_META, queue_json))
+        store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUARANTINE_META, quarantine_json))
+        store.conn.commit()
+    except BaseException:
+        store.conn.rollback()
+        raise
 
 
 def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000,
@@ -603,25 +735,14 @@ def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000,
     """
     if not node_id:
         return False
-    try:
-        raw = store.get_meta(EMBED_QUEUE_META)
-        queue = json.loads(raw) if raw else []
-        if not isinstance(queue, list):
-            queue = []
-    except Exception:
-        queue = []
+    queue = _load_embedding_queue(store)
+    quarantine = _load_embedding_quarantine(store)
     # Dedup and move to the tail so the newest edit wins ordering.
     queue = [n for n in queue if n != node_id]
     queue.append(node_id)
     try:
-        value = json.dumps(queue[-max_queue:])
-        if commit:
-            store.set_meta(EMBED_QUEUE_META, value)
-        else:
-            # The task service owns the surrounding node + receipt transaction.
-            from .privacy import redact_serialized
-            store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)",
-                               (EMBED_QUEUE_META, redact_serialized(value)))
+        quarantine.pop(node_id, None)
+        _write_embedding_meta(store, queue[-max_queue:], quarantine, commit=commit)
         return True
     except Exception:
         return False
@@ -637,12 +758,7 @@ def enqueue_embeddings(store: Store, node_ids: list[str], *, max_queue: int = 10
 
 
 def _embedding_queue_len(store: Store) -> int:
-    try:
-        raw = store.get_meta(EMBED_QUEUE_META)
-        queue = json.loads(raw) if raw else []
-        return len(queue) if isinstance(queue, list) else 0
-    except Exception:
-        return 0
+    return len(_load_embedding_queue(store))
 
 
 def drain_embedding_queue(store: Store, config: Config | None = None, *,
@@ -665,24 +781,24 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
         max_jobs = opts["reindex_max_jobs"]
     if time_budget is None:
         time_budget = opts["drain_time_budget"]
-    try:
-        raw = store.get_meta(EMBED_QUEUE_META)
-        queue = json.loads(raw) if raw else []
-        if not isinstance(queue, list):
-            queue = []
-    except Exception:
-        queue = []
+    queue = _load_embedding_queue(store)
+    quarantine = _load_embedding_quarantine(store)
     if not queue:
-        return {"status": "empty", "embedded": 0, "pending": 0}
+        return {"status": "empty", "embedded": 0, "pending": 0,
+                "quarantined": len(quarantine), "drain_complete": True,
+                "coverage_complete": not quarantine}
     if not is_available():
         # Backend not installed/usable; leave the (bounded) queue intact in case
         # it becomes available later.
-        return {"status": "unavailable", "embedded": 0, "pending": len(queue)}
+        return {"status": "unavailable", "embedded": 0, "pending": len(queue),
+                "quarantined": len(quarantine), "drain_complete": False,
+                "coverage_complete": False}
 
     # De-dup preserving order; drop falsy ids.
     deduped = list(dict.fromkeys(n for n in queue if n))
     remaining: list[str] = []
     embedded = 0
+    quarantined = 0
     attempts = 0
     deadline = time.monotonic() + float(time_budget)
     for i, node_id in enumerate(deduped):
@@ -696,19 +812,46 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
         if not text:
             continue  # nothing to embed — drop
         attempts += 1
+        outcome: _EmbeddingOutcome | None = None
         try:
             ok = upsert_embedding(store, node_id, text)
+        except EmbeddingTerminalError as e:
+            outcome = e.outcome
+            ok = False
         except Exception:
-            ok = False  # provider raised — treat as transient
+            outcome = None
+            ok = False
         if ok:
             embedded += 1
+        elif outcome and outcome.terminal:
+            now = _now_iso()
+            previous = quarantine.get(node_id, {})
+            quarantine[node_id] = {
+                "kind": outcome.kind or "terminal_failure",
+                "http_status": outcome.http_status,
+                "message": safe_error(Exception(outcome.message or "Embedding failed")),
+                "text_hash": _hash_text(text),
+                "fingerprint": embedding_fingerprint(config or store.config),
+                "provider": _resolve_embedding_config(config or store.config)[0],
+                "model": _resolve_embedding_config(config or store.config)[1],
+                "first_seen_at": previous.get("first_seen_at", now),
+                "last_seen_at": now,
+                "attempts": int(previous.get("attempts", 0) or 0) + 1,
+            }
+            quarantined += 1
         else:
             remaining.append(node_id)  # transient (e.g. provider down) — retry
     try:
-        store.set_meta(EMBED_QUEUE_META, json.dumps(remaining))
+        _write_embedding_meta(store, remaining, quarantine, commit=True)
     except Exception:
         pass
-    return {"status": "ok", "embedded": embedded, "pending": len(remaining)}
+    # Missing/superseded nodes are deliberately dropped too, so an empty
+    # actionable queue is complete even when no provider attempt was needed.
+    drain_complete = not remaining
+    return {"status": "ok", "embedded": embedded, "pending": len(remaining),
+            "quarantined": len(quarantine), "quarantined_this_drain": quarantined,
+            "drain_complete": drain_complete,
+            "coverage_complete": not remaining and not quarantine}
 
 
 def _node_embedding_fresh(store: Store, node: dict, fingerprint: str) -> bool:
@@ -867,6 +1010,7 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
         "embedded": embedded,
         "failed": failed,
         "queue_pending": _embedding_queue_len(store),
+        "quarantined": len(_load_embedding_quarantine(store)),
     })
     return plan
 
@@ -883,9 +1027,12 @@ def embedding_status(store: Store) -> dict:
         "contextual_supported": contextual_embeddings_supported(store.config),
         "fingerprint": embedding_fingerprint(store.config),
         "queue_pending": _embedding_queue_len(store),
+        "quarantined": len(_load_embedding_quarantine(store)),
         "vector_rows": None,
         "indexed_nodes": None,
     }
+    status["coverage_complete"] = not status["queue_pending"] and not status["quarantined"]
+    status["drain_complete"] = not status["queue_pending"]
     try:
         status["vector_rows"] = store.conn.execute(
             "SELECT COUNT(*) FROM node_vector_meta"

@@ -3298,6 +3298,9 @@ def cmd_embed(args):
             print(f"Indexed nodes: {result.get('indexed_nodes')}")
             print(f"Vector rows: {result.get('vector_rows')}")
             print(f"Queue pending: {result['queue_pending']}")
+            print(f"Quarantined: {result.get('quarantined', 0)}")
+            print(f"Drain complete: {result.get('drain_complete', False)}")
+            print(f"Coverage complete: {result.get('coverage_complete', False)}")
         elif action == "calibrate":
             if result.get("status") == "uncalibrated":
                 print(f"No calibration record for "
