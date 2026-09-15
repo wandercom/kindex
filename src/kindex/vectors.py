@@ -398,25 +398,33 @@ def is_available() -> bool:
     return _check_vec()
 
 
-def embed_text(
+def _embed_text_or_raise(
     text: str,
     config: Config | None = None,
     *,
     input_type: str = "document",
-    _raise_provider_errors: bool = False,
 ) -> list[float] | None:
-    """Embed a text string into a vector using the configured provider."""
+    """Call a provider while retaining its typed failure for queue handling."""
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
     fn = _EMBED_DISPATCH.get(provider)
     if fn is None:
         print(f"Warning: unknown embedding provider '{provider}'. "
               f"Supported: {', '.join(PROVIDER_DEFAULTS)}", file=sys.stderr)
         return None
+    return fn(redact_text(text), model, dims, api_key_env, input_type)
+
+
+def embed_text(
+    text: str,
+    config: Config | None = None,
+    *,
+    input_type: str = "document",
+) -> list[float] | None:
+    """Embed a text string into a vector using the configured provider."""
     try:
-        return fn(redact_text(text), model, dims, api_key_env, input_type)
+        return _embed_text_or_raise(text, config, input_type=input_type)
     except _EmbeddingProviderError as e:
-        if _raise_provider_errors:
-            raise
+        provider, _, _, _ = _resolve_embedding_config(config)
         print(f"{provider.title()} embedding error: {safe_error(e)}", file=sys.stderr)
         return None
 
@@ -562,17 +570,19 @@ def ensure_vec_table(store: Store) -> bool:
         return False
 
 
-def embed_document_chunks(
-    text: str, config: Config | None = None, *, _raise_provider_errors: bool = False
+def _embed_document_chunks(
+    text: str,
+    config: Config | None,
+    *,
+    embed_one,
 ) -> list[dict] | None:
-    """Embed document text and return chunk records ready for storage."""
+    """Embed document text using an explicitly selected provider-call boundary."""
     if not text:
         return []
     strategy = embedding_strategy(config)
     text_hash = _hash_text(text)
     if strategy != "contextual":
-        embedding = embed_text(text, config, input_type="document",
-                               _raise_provider_errors=_raise_provider_errors)
+        embedding = embed_one(text, config, input_type="document")
         if embedding is None:
             return None
         return [{
@@ -585,8 +595,7 @@ def embed_document_chunks(
 
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
     if provider != "voyage" or not _is_voyage_context_model(model):
-        embedding = embed_text(text, config, input_type="document",
-                               _raise_provider_errors=_raise_provider_errors)
+        embedding = embed_one(text, config, input_type="document")
         if embedding is None:
             return None
         return [{
@@ -606,14 +615,9 @@ def embed_document_chunks(
     records: list[dict] = []
     for offset in range(0, len(chunks), opts["max_group_chunks"]):
         group = chunks[offset:offset + opts["max_group_chunks"]]
-        try:
-            embeddings = _embed_voyage_context_chunks(
-                group, model, dims, api_key_env, input_type="document"
-            )
-        except _EmbeddingProviderError:
-            if _raise_provider_errors:
-                raise
-            return None
+        embeddings = _embed_voyage_context_chunks(
+            group, model, dims, api_key_env, input_type="document"
+        )
         if embeddings is None or len(embeddings) != len(group):
             return None
         for i, (chunk_text, embedding) in enumerate(zip(group, embeddings)):
@@ -627,6 +631,14 @@ def embed_document_chunks(
     return records
 
 
+def embed_document_chunks(text: str, config: Config | None = None) -> list[dict] | None:
+    """Embed document text and return chunk records ready for storage."""
+    try:
+        return _embed_document_chunks(text, config, embed_one=embed_text)
+    except _EmbeddingProviderError:
+        return None
+
+
 def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _EmbeddingOutcome:
     """Compute embeddings and retain the reason a queue item could not run."""
     if not ensure_vec_table(store):
@@ -634,13 +646,7 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
                                  message="Vector backend unavailable")
 
     try:
-        chunks = embed_document_chunks(text, store.config, _raise_provider_errors=True)
-    except TypeError as e:
-        # Preserve the long-standing test/plugin seam for callers that replace
-        # this helper with its two-argument legacy shape.
-        if "_raise_provider_errors" not in str(e):
-            raise
-        chunks = embed_document_chunks(text, store.config)
+        chunks = _embed_document_chunks(text, store.config, embed_one=_embed_text_or_raise)
     except _EmbeddingProviderError as e:
         return _EmbeddingOutcome(False, terminal=e.kind == "input_too_large",
                                  kind=e.kind, http_status=e.http_status,
