@@ -56,6 +56,19 @@ def _context_limit_error():
 
 
 class TestEmbeddingQuarantine:
+    def test_public_upsert_keeps_legacy_boolean_contract_for_terminal_failure(
+        self, store, monkeypatch
+    ):
+        monkeypatch.setattr(
+            vectors,
+            "_upsert_embedding_outcome",
+            lambda *_args: vectors._EmbeddingOutcome(
+                False, terminal=True, kind="input_too_large"
+            ),
+        )
+
+        assert vectors.upsert_embedding(store, "node-id", "too large") is False
+
     def test_terminal_context_limit_failure_is_quarantined_and_dropped_from_queue(
         self, store, openai_config, monkeypatch
     ):

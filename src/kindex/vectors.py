@@ -78,14 +78,6 @@ class _EmbeddingOutcome:
     message: str | None = None
 
 
-class EmbeddingTerminalError(Exception):
-    """A provider rejected unchanged input such that retrying cannot help."""
-
-    def __init__(self, outcome: _EmbeddingOutcome):
-        super().__init__(outcome.message or "Embedding failed")
-        self.outcome = outcome
-
-
 class _EmbeddingProviderError(Exception):
     def __init__(self, *, kind: str, http_status: int | None, message: str):
         super().__init__(message)
@@ -710,10 +702,7 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
 
 def upsert_embedding(store: Store, node_id: str, text: str) -> bool:
     """Compute and store embeddings for a node (legacy boolean surface)."""
-    outcome = _upsert_embedding_outcome(store, node_id, text)
-    if outcome.terminal:
-        raise EmbeddingTerminalError(outcome)
-    return outcome.ok
+    return _upsert_embedding_outcome(store, node_id, text).ok
 
 
 def _load_embedding_queue(store: Store) -> list[str]:
@@ -842,18 +831,16 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
         if not text:
             continue  # nothing to embed — drop
         attempts += 1
-        outcome: _EmbeddingOutcome | None = None
+        # The queue boundary owns classification: expected provider failures are
+        # returned as outcomes, while a genuinely unexpected failure stays
+        # retryable.  Do not use exceptions as an alternate terminal channel.
         try:
-            ok = upsert_embedding(store, node_id, text)
-        except EmbeddingTerminalError as e:
-            outcome = e.outcome
-            ok = False
+            outcome = _upsert_embedding_outcome(store, node_id, text)
         except Exception:
-            outcome = None
-            ok = False
-        if ok:
+            outcome = _EmbeddingOutcome(False, kind="unexpected_error")
+        if outcome.ok:
             embedded += 1
-        elif outcome and outcome.terminal:
+        elif outcome.terminal:
             now = _now_iso()
             previous = quarantine.get(node_id, {})
             quarantine[node_id] = {

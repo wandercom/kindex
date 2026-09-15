@@ -218,7 +218,7 @@ class TestEmbeddingDrainTimeBudget:
             vectors.enqueue_embedding(store, f"n{i}")
 
         monkeypatch.setattr(vectors, "is_available", lambda: True)
-        monkeypatch.setattr(vectors, "upsert_embedding", lambda s, nid, text: True)
+        monkeypatch.setattr(vectors, "_upsert_embedding_outcome", lambda s, nid, text: vectors._EmbeddingOutcome(True))
 
         class FakeClock:
             t = 0.0
@@ -248,7 +248,7 @@ class TestEmbeddingDrainTimeBudget:
         store.add_node("Node", content="text", node_id="n0")
         vectors.enqueue_embedding(store, "n0")
         monkeypatch.setattr(vectors, "is_available", lambda: True)
-        monkeypatch.setattr(vectors, "upsert_embedding", lambda s, nid, text: True)
+        monkeypatch.setattr(vectors, "_upsert_embedding_outcome", lambda s, nid, text: vectors._EmbeddingOutcome(True))
 
         result = vectors.drain_embedding_queue(store, config)
         assert result["embedded"] == 1
@@ -264,7 +264,7 @@ class TestEmbeddingDrainTimeBudget:
             vectors.enqueue_embedding(store, f"n{i}")
 
         monkeypatch.setattr(vectors, "is_available", lambda: True)
-        monkeypatch.setattr(vectors, "upsert_embedding", lambda s, nid, text: True)
+        monkeypatch.setattr(vectors, "_upsert_embedding_outcome", lambda s, nid, text: vectors._EmbeddingOutcome(True))
 
         class SlowClock:
             t = 0.0
