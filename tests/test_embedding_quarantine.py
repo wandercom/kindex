@@ -103,6 +103,22 @@ class TestEmbeddingQuarantine:
         assert record["http_status"] == 400
         assert "8192" in record["message"]
 
+    def test_openai_http_error_reaches_drain_classifier(self, store, monkeypatch):
+        monkeypatch.setattr(vectors, "is_available", lambda: True)
+        monkeypatch.setattr(vectors, "ensure_vec_table", lambda _store: True)
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        def reject_oversize(*_args, **_kwargs):
+            raise _context_limit_error()
+        monkeypatch.setattr(
+            vectors.urllib.request, "urlopen", reject_oversize
+        )
+        node_id = store.add_node("HTTP path", content="x" * 202_000)
+
+        result = drain_embedding_queue(store)
+
+        assert result["pending"] == 0
+        assert _quarantine(store)["items"][node_id]["kind"] == "input_too_large"
+
     def test_transient_provider_failure_remains_actionable_and_is_not_quarantined(
         self, store, openai_config, monkeypatch
     ):
@@ -141,6 +157,79 @@ class TestEmbeddingQuarantine:
 
         assert _queue(store) == [node_id]
         assert node_id not in _quarantine(store)["items"]
+
+    def test_unchanged_quarantine_is_not_sent_to_provider_again(self, store, monkeypatch):
+        node_id = store.add_node("Rejected", content="body")
+        text = vectors._embedding_text_for_node(store.get_node(node_id))
+        store.set_meta(
+            QUARANTINE_META,
+            json.dumps({"version": 1, "items": {node_id: {
+                "kind": "input_too_large", "text_hash": vectors._hash_text(text),
+                "fingerprint": vectors.embedding_fingerprint(store.config), "attempts": 1,
+            }}}),
+        )
+        calls = []
+        monkeypatch.setattr(vectors, "is_available", lambda: True)
+        monkeypatch.setattr(
+            vectors, "_upsert_embedding_outcome",
+            lambda *_args: calls.append(True) or vectors._EmbeddingOutcome(True),
+        )
+
+        result = drain_embedding_queue(store)
+
+        assert calls == []
+        assert result["pending"] == 0
+        assert node_id in _quarantine(store)["items"]
+
+    def test_delete_retires_quarantine_even_without_vector_table(self, store):
+        node_id = store.add_node("Deleted", content="body")
+        store.set_meta(QUARANTINE_META, json.dumps({"version": 1, "items": {
+            node_id: {"kind": "input_too_large"},
+        }}))
+
+        vectors.delete_embedding(store, node_id)
+
+        assert node_id not in _quarantine(store)["items"]
+
+    def test_successful_direct_reindex_retires_quarantine(self, store, monkeypatch):
+        node_id = store.add_node("Recovered", content="body")
+        text = vectors._embedding_text_for_node(store.get_node(node_id))
+        store.set_meta(QUARANTINE_META, json.dumps({"version": 1, "items": {
+            node_id: {
+                "kind": "input_too_large", "text_hash": vectors._hash_text(text),
+                "fingerprint": vectors.embedding_fingerprint(store.config),
+            },
+        }}))
+        store.conn.execute("CREATE TABLE node_vectors (node_id TEXT PRIMARY KEY, embedding BLOB)")
+        monkeypatch.setattr(vectors, "ensure_vec_table", lambda _store: True)
+        monkeypatch.setattr(vectors, "_embed_document_chunks", lambda *_args, **_kwargs: [{
+            "index": 0, "text": text, "embedding": [0.1],
+            "text_hash": vectors._hash_text(text), "token_estimate": 1,
+        }])
+
+        assert vectors.upsert_embedding(store, node_id, text) is True
+        assert node_id not in _quarantine(store)["items"]
+
+    def test_malformed_attempts_cannot_abort_drain(self, store, monkeypatch):
+        node_id = store.add_node("Malformed", content="body")
+        store.set_meta(QUARANTINE_META, json.dumps({"version": 1, "items": {
+            node_id: {"kind": "input_too_large", "attempts": "not-an-int"},
+        }}))
+        monkeypatch.setattr(vectors, "is_available", lambda: True)
+        monkeypatch.setattr(
+            vectors, "_upsert_embedding_outcome",
+            lambda *_args: vectors._EmbeddingOutcome(False, terminal=True, kind="input_too_large"),
+        )
+
+        assert drain_embedding_queue(store)["status"] == "ok"
+        assert _quarantine(store)["items"][node_id]["attempts"] == 1
+
+    def test_enqueue_persists_when_caller_has_pending_dml(self, store):
+        node_id = store.add_node("Pending transaction", content="body")
+        store.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("test.pending", "1"))
+
+        assert enqueue_embedding(store, node_id) is True
+        assert node_id in _queue(store)
 
     def test_drain_result_reports_actionable_pending_quarantine_and_drain_completion(self, store, monkeypatch):
         """Contract 4: drain completion and complete vector coverage are distinct."""

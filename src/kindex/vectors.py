@@ -26,7 +26,9 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from .privacy import redact, redact_serialized, redact_text, safe_error
 from .privacy import redacting_print as print
@@ -78,6 +80,39 @@ class _EmbeddingOutcome:
     message: str | None = None
 
 
+class _EmbeddingQuarantineRecord(BaseModel):
+    """Persistent terminal-failure state for one node/text/config triple."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str = "terminal_failure"
+    http_status: int | None = None
+    message: str = ""
+    text_hash: str = ""
+    fingerprint: str = ""
+    provider: str = ""
+    model: str = ""
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+    attempts: int = 0
+
+    @field_validator("attempts", mode="before")
+    @classmethod
+    def _coerce_attempts(cls, value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    @field_validator("http_status", mode="before")
+    @classmethod
+    def _coerce_http_status(cls, value: Any) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+
 class _EmbeddingProviderError(Exception):
     def __init__(self, *, kind: str, http_status: int | None, message: str):
         super().__init__(message)
@@ -104,7 +139,19 @@ def _provider_http_error(error: urllib.error.HTTPError) -> _EmbeddingProviderErr
     except Exception:
         detail = ""
     message = safe_error(Exception(detail or str(error)))
-    normalized = message.lower()
+    structured = ""
+    try:
+        payload = json.loads(detail)
+        if isinstance(payload, dict):
+            provider_error = payload.get("error", payload)
+            if isinstance(provider_error, dict):
+                structured = " ".join(
+                    str(provider_error.get(field, ""))
+                    for field in ("code", "type", "status", "reason")
+                )
+    except (TypeError, ValueError):
+        pass
+    normalized = f"{message} {structured}".lower()
     input_too_large = error.code == 400 and (
         "context length" in normalized
         or "maximum context" in normalized
@@ -112,6 +159,13 @@ def _provider_http_error(error: urllib.error.HTTPError) -> _EmbeddingProviderErr
         or "maximum input" in normalized
         or "max input" in normalized
         or ("maximum" in normalized and "length" in normalized)
+        or "maximum number of tokens" in normalized
+        or "max allowed tokens" in normalized
+        or "too many tokens" in normalized
+        or "input too long" in normalized
+        or "context_length_exceeded" in normalized
+        or "input_too_large" in normalized
+        or "token_limit_exceeded" in normalized
     )
     return _EmbeddingProviderError(
         kind="input_too_large" if input_too_large else "provider_http_error",
@@ -394,6 +448,8 @@ def _embed_voyage(
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode())
             return result["data"][0]["embedding"]
+    except urllib.error.HTTPError as e:
+        raise _provider_http_error(e) from e
     except Exception as e:
         print(f"Voyage embedding error: {safe_error(e)}", file=sys.stderr)
         return None
@@ -674,7 +730,7 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
         strategy = embedding_strategy(store.config)
         now = _now_iso()
         count = len(chunks)
-        delete_embedding(store, node_id)
+        delete_embedding(store, node_id, clear_quarantine=False)
         _ensure_vector_meta_table(store)
         for chunk in chunks:
             index = int(chunk["index"])
@@ -695,6 +751,7 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
                 ),
             )
         store.conn.commit()
+        _clear_embedding_quarantine(store, node_id)
         return _EmbeddingOutcome(True)
     except Exception as e:
         return _EmbeddingOutcome(False, kind="storage_error", message=safe_error(e))
@@ -713,25 +770,49 @@ def _load_embedding_queue(store: Store) -> list[str]:
         return []
 
 
-def _load_embedding_quarantine(store: Store) -> dict[str, dict]:
+def _load_embedding_quarantine(store: Store) -> dict[str, _EmbeddingQuarantineRecord]:
     try:
-        value = json.loads(store.get_meta(EMBED_QUARANTINE_META) or "{}")
-        items = value.get("items") if value.get("version") == EMBED_QUARANTINE_VERSION else None
-        return items if isinstance(items, dict) else {}
+        value: Any = json.loads(store.get_meta(EMBED_QUARANTINE_META) or "{}")
+        if not isinstance(value, dict) or value.get("version") != EMBED_QUARANTINE_VERSION:
+            return {}
+        raw_items = value.get("items")
+        if not isinstance(raw_items, dict):
+            return {}
+        # Validate one record at a time: one hand-edited/corrupt entry must
+        # never prevent the remainder of the drain from making progress.
+        items: dict[str, _EmbeddingQuarantineRecord] = {}
+        for node_id, record in raw_items.items():
+            if not isinstance(node_id, str) or not isinstance(record, dict):
+                continue
+            try:
+                items[node_id] = _EmbeddingQuarantineRecord.model_validate(record)
+            except Exception:
+                # Retain a safe record instead of making one corrupt field
+                # poison the whole queue.
+                items[node_id] = _EmbeddingQuarantineRecord()
+        return items
     except Exception:
         return {}
 
 
-def _write_embedding_meta(store: Store, queue: list[str], quarantine: dict[str, dict], *, commit: bool) -> None:
+def _write_embedding_meta(
+    store: Store,
+    queue: list[str],
+    quarantine: dict[str, _EmbeddingQuarantineRecord],
+    *,
+    commit: bool,
+) -> None:
     """Atomically persist the legacy queue and versioned quarantine metadata."""
     queue_json = redact_serialized(json.dumps(queue))
-    quarantine_json = redact_serialized(json.dumps({"version": EMBED_QUARANTINE_VERSION, "items": quarantine}))
+    quarantine_json = redact_serialized(json.dumps({
+        "version": EMBED_QUARANTINE_VERSION,
+        "items": {node_id: record.model_dump() for node_id, record in quarantine.items()},
+    }))
     if not commit:
         # The task service owns the surrounding node + receipt transaction.
         store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUEUE_META, queue_json))
         store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUARANTINE_META, quarantine_json))
         return
-    store.conn.execute("BEGIN IMMEDIATE")
     try:
         store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUEUE_META, queue_json))
         store.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (EMBED_QUARANTINE_META, quarantine_json))
@@ -739,6 +820,24 @@ def _write_embedding_meta(store: Store, queue: list[str], quarantine: dict[str, 
     except BaseException:
         store.conn.rollback()
         raise
+
+
+def _quarantine_matches(
+    record: _EmbeddingQuarantineRecord,
+    *,
+    text_hash: str,
+    fingerprint: str,
+) -> bool:
+    return record.text_hash == text_hash and record.fingerprint == fingerprint
+
+
+def _clear_embedding_quarantine(store: Store, node_id: str, *, commit: bool = True) -> None:
+    """Retire a terminal-failure claim once its node is resolved or removed."""
+    queue = _load_embedding_queue(store)
+    quarantine = _load_embedding_quarantine(store)
+    if node_id in quarantine:
+        quarantine.pop(node_id)
+        _write_embedding_meta(store, queue, quarantine, commit=commit)
 
 
 def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000,
@@ -754,11 +853,22 @@ def enqueue_embedding(store: Store, node_id: str, *, max_queue: int = 100000,
         return False
     queue = _load_embedding_queue(store)
     quarantine = _load_embedding_quarantine(store)
+    record = quarantine.get(node_id)
+    if record:
+        node = store.get_node(node_id)
+        text = _embedding_text_for_node(node) if node else ""
+        if not text or not _quarantine_matches(
+            record,
+            text_hash=_hash_text(text),
+            fingerprint=embedding_fingerprint(store.config),
+        ):
+            # The record describes a previous node/text/config triple, not the
+            # node id forever. A changed edit is actionable again.
+            quarantine.pop(node_id)
     # Dedup and move to the tail so the newest edit wins ordering.
     queue = [n for n in queue if n != node_id]
     queue.append(node_id)
     try:
-        quarantine.pop(node_id, None)
         _write_embedding_meta(store, queue[-max_queue:], quarantine, commit=commit)
         return True
     except Exception:
@@ -820,6 +930,8 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
     quarantined = 0
     attempts = 0
     deadline = time.monotonic() + time_budget
+    fingerprint = embedding_fingerprint(config or store.config)
+    provider, model, _, _ = _resolve_embedding_config(config or store.config)
     for i, node_id in enumerate(deduped):
         if attempts >= max_jobs or time.monotonic() >= deadline:
             remaining.extend(deduped[i:])  # carry the rest to the next cron
@@ -830,6 +942,14 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
         text = _embedding_text_for_node(node)
         if not text:
             continue  # nothing to embed — drop
+        text_hash = _hash_text(text)
+        existing = quarantine.get(node_id)
+        if existing and _quarantine_matches(
+            existing, text_hash=text_hash, fingerprint=fingerprint
+        ):
+            # The exact rejected input/config pair is already diagnosed. It is
+            # not actionable work and must not incur another provider call.
+            continue
         attempts += 1
         # The queue boundary owns classification: expected provider failures are
         # returned as outcomes, while a genuinely unexpected failure stays
@@ -842,26 +962,34 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
             embedded += 1
         elif outcome.terminal:
             now = _now_iso()
-            previous = quarantine.get(node_id, {})
-            quarantine[node_id] = {
-                "kind": outcome.kind or "terminal_failure",
-                "http_status": outcome.http_status,
-                "message": safe_error(Exception(outcome.message or "Embedding failed")),
-                "text_hash": _hash_text(text),
-                "fingerprint": embedding_fingerprint(config or store.config),
-                "provider": _resolve_embedding_config(config or store.config)[0],
-                "model": _resolve_embedding_config(config or store.config)[1],
-                "first_seen_at": previous.get("first_seen_at", now),
-                "last_seen_at": now,
-                "attempts": int(previous.get("attempts", 0) or 0) + 1,
-            }
+            previous = existing if existing and _quarantine_matches(
+                existing, text_hash=text_hash, fingerprint=fingerprint
+            ) else _EmbeddingQuarantineRecord()
+            quarantine[node_id] = _EmbeddingQuarantineRecord(
+                kind=outcome.kind or "terminal_failure",
+                http_status=outcome.http_status,
+                message=safe_error(Exception(outcome.message or "Embedding failed")),
+                text_hash=text_hash,
+                fingerprint=fingerprint,
+                provider=provider,
+                model=model,
+                first_seen_at=previous.first_seen_at or now,
+                last_seen_at=now,
+                attempts=previous.attempts + 1,
+            )
             quarantined += 1
         else:
             remaining.append(node_id)  # transient (e.g. provider down) — retry
     try:
         _write_embedding_meta(store, remaining, quarantine, commit=True)
     except Exception:
-        pass
+        # Do not report a drained/quarantined result unless the queue state is
+        # durable. The pre-drain metadata is still authoritative after rollback.
+        store.conn.rollback()
+        return {"status": "persistence_error", "embedded": embedded,
+                "pending": len(queue), "quarantined": len(_load_embedding_quarantine(store)),
+                "quarantined_this_drain": 0, "drain_complete": False,
+                "coverage_complete": False}
     # Missing/superseded nodes are deliberately dropped too, so an empty
     # actionable queue is complete even when no provider attempt was needed.
     drain_complete = not remaining
@@ -1035,6 +1163,7 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
 def embedding_status(store: Store) -> dict:
     """Return current embedding configuration and queue/index status."""
     provider, model, dims, api_key_env = _resolve_embedding_config(store.config)
+    quarantine = _load_embedding_quarantine(store)
     status = {
         "provider": provider,
         "model": model,
@@ -1044,11 +1173,17 @@ def embedding_status(store: Store) -> dict:
         "contextual_supported": contextual_embeddings_supported(store.config),
         "fingerprint": embedding_fingerprint(store.config),
         "queue_pending": _embedding_queue_len(store),
-        "quarantined": len(_load_embedding_quarantine(store)),
+        "quarantined": len(quarantine),
+        "quarantine_items": [
+            {"node_id": node_id, "kind": record.kind,
+             "http_status": record.http_status, "message": record.message,
+             "attempts": record.attempts, "last_seen_at": record.last_seen_at}
+            for node_id, record in sorted(quarantine.items())
+        ],
         "vector_rows": None,
         "indexed_nodes": None,
+        "coverage_complete": False,
     }
-    status["coverage_complete"] = not status["queue_pending"] and not status["quarantined"]
     status["drain_complete"] = not status["queue_pending"]
     try:
         status["vector_rows"] = store.conn.execute(
@@ -1057,18 +1192,26 @@ def embedding_status(store: Store) -> dict:
         status["indexed_nodes"] = store.conn.execute(
             "SELECT COUNT(DISTINCT node_id) FROM node_vector_meta"
         ).fetchone()[0]
+        eligible = [node for node in select_reindex_nodes(store) if _embedding_text_for_node(node)]
+        fingerprint = status["fingerprint"]
+        status["coverage_complete"] = (
+            not status["queue_pending"]
+            and not status["quarantined"]
+            and all(_node_embedding_fresh(store, node, fingerprint) for node in eligible)
+        )
     except Exception:
-        pass
+        status["coverage_complete"] = False
     return status
 
 
-def delete_embedding(store: Store, node_id: str) -> bool:
+def delete_embedding(store: Store, node_id: str, *, clear_quarantine: bool = True) -> bool:
     """Remove a node's stored embedding (best-effort).
 
     Used when a node is deleted or superseded so vector search stops
     surfacing its stale text. Returns True if a row was deleted; False
     when no row existed or the vector table is unavailable.
     """
+    deleted = 0
     try:
         vector_ids = [node_id]
         try:
@@ -1079,7 +1222,6 @@ def delete_embedding(store: Store, node_id: str) -> bool:
             vector_ids.extend(row["vector_id"] for row in rows)
         except Exception:
             pass
-        deleted = 0
         for vector_id in dict.fromkeys(vector_ids):
             cur = store.conn.execute(
                 "DELETE FROM node_vectors WHERE node_id = ?", (vector_id,)
@@ -1093,9 +1235,14 @@ def delete_embedding(store: Store, node_id: str) -> bool:
         except Exception:
             pass
         store.conn.commit()
-        return deleted > 0
     except Exception:
-        return False
+        pass
+    if clear_quarantine:
+        try:
+            _clear_embedding_quarantine(store, node_id)
+        except Exception:
+            pass
+    return deleted > 0
 
 
 def _vector_row_node(store: Store, vector_id: str) -> tuple[str, int | None]:

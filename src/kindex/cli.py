@@ -3299,6 +3299,9 @@ def cmd_embed(args):
             print(f"Vector rows: {result.get('vector_rows')}")
             print(f"Queue pending: {result['queue_pending']}")
             print(f"Quarantined: {result.get('quarantined', 0)}")
+            for item in result.get("quarantine_items", []):
+                code = f" HTTP {item['http_status']}" if item.get("http_status") else ""
+                print(f"  {item['node_id']}: {item['kind']}{code} — {item['message']}")
             print(f"Drain complete: {result.get('drain_complete', False)}")
             print(f"Coverage complete: {result.get('coverage_complete', False)}")
         elif action == "calibrate":
