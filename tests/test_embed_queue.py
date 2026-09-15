@@ -29,12 +29,12 @@ def store(tmp_path):
 
 @pytest.fixture
 def embed_calls(monkeypatch):
-    """Capture upsert_embedding calls and pretend the backend is available."""
+    """Capture queue embedding attempts and return a successful outcome."""
     calls = []
     monkeypatch.setattr(vectors, "is_available", lambda: True)
     monkeypatch.setattr(
-        vectors, "upsert_embedding",
-        lambda store, node_id, text: calls.append((node_id, text)) or True,
+        vectors, "_upsert_embedding_outcome",
+        lambda store, node_id, text: calls.append((node_id, text)) or vectors._EmbeddingOutcome(True),
     )
     return calls
 
@@ -77,7 +77,12 @@ class TestDrain:
         assert _queue(store) == [nid]
 
         res = drain_embedding_queue(store)
-        assert res == {"status": "ok", "embedded": 1, "pending": 0}
+        assert res["status"] == "ok"
+        assert res["embedded"] == 1
+        assert res["pending"] == 0
+        assert res["quarantined"] == 0
+        assert res["drain_complete"] is True
+        assert res["coverage_complete"] is True
         assert embed_calls == [(nid, "Title body")]
         assert _queue(store) == []
 
@@ -100,8 +105,8 @@ class TestDrain:
     def test_drain_requeues_transient_failure(self, store, monkeypatch):
         monkeypatch.setattr(vectors, "is_available", lambda: True)
         monkeypatch.setattr(
-            vectors, "upsert_embedding",
-            lambda store, node_id, text: False,        # provider down
+            vectors, "_upsert_embedding_outcome",
+            lambda store, node_id, text: vectors._EmbeddingOutcome(False),  # provider down
         )
         store.add_node("Flaky", content="x", node_type="concept")
         res = drain_embedding_queue(store)
@@ -114,7 +119,7 @@ class TestDrain:
         def boom(*a, **kw):
             raise RuntimeError("provider exploded")
 
-        monkeypatch.setattr(vectors, "upsert_embedding", boom)
+        monkeypatch.setattr(vectors, "_upsert_embedding_outcome", boom)
         store.add_node("Boom", content="x", node_type="concept")
         # Must not propagate; node is re-queued for a later attempt.
         res = drain_embedding_queue(store)
