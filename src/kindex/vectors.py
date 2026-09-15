@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from .privacy import redact, redact_serialized, redact_text, safe_error
 from .privacy import redacting_print as print
@@ -57,6 +57,16 @@ EMBEDDING_PRICE_PER_MILLION = {
 }
 
 
+class _EmbeddingOptions(TypedDict):
+    strategy: str
+    chunk_chars: int
+    chunk_overlap_chars: int
+    max_group_chunks: int
+    reindex_max_jobs: int
+    reindex_max_queue: int
+    drain_time_budget: int
+
+
 @dataclass(frozen=True)
 class _EmbeddingOutcome:
     """Internal outcome used by the queue drain without changing bool callers."""
@@ -81,6 +91,18 @@ class _EmbeddingProviderError(Exception):
         super().__init__(message)
         self.kind = kind
         self.http_status = http_status
+
+
+class _EmbedOne(Protocol):
+    """The provider-call boundary used while assembling document vectors."""
+
+    def __call__(
+        self,
+        text: str,
+        config: Config | None = None,
+        *,
+        input_type: str = "document",
+    ) -> list[float] | None: ...
 
 
 def _provider_http_error(error: urllib.error.HTTPError) -> _EmbeddingProviderError:
@@ -124,7 +146,7 @@ def _resolve_embedding_config(config: Config | None) -> tuple[str, str, int, str
     return provider, model, dims, api_key_env
 
 
-def _embedding_options(config: Config | None) -> dict:
+def _embedding_options(config: Config | None) -> _EmbeddingOptions:
     """Return embedding tuning options with defaults for old configs."""
     ec = getattr(config, "embedding", None) if config is not None else None
     return {
@@ -227,7 +249,7 @@ def _embed_openai(text: str, model: str, dimensions: int, api_key_env: str) -> l
         print(f"Warning: {api_key_env} not set. Cannot embed text.", file=sys.stderr)
         return None
 
-    body = {"input": text, "model": model}
+    body: dict[str, object] = {"input": text, "model": model}
     if dimensions:
         body["dimensions"] = dimensions
 
@@ -574,7 +596,7 @@ def _embed_document_chunks(
     text: str,
     config: Config | None,
     *,
-    embed_one,
+    embed_one: _EmbedOne,
 ) -> list[dict] | None:
     """Embed document text using an explicitly selected provider-call boundary."""
     if not text:
@@ -787,6 +809,8 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
         max_jobs = opts["reindex_max_jobs"]
     if time_budget is None:
         time_budget = opts["drain_time_budget"]
+    max_jobs = int(max_jobs)
+    time_budget = float(time_budget)
     queue = _load_embedding_queue(store)
     quarantine = _load_embedding_quarantine(store)
     if not queue:
@@ -806,7 +830,7 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
     embedded = 0
     quarantined = 0
     attempts = 0
-    deadline = time.monotonic() + float(time_budget)
+    deadline = time.monotonic() + time_budget
     for i, node_id in enumerate(deduped):
         if attempts >= max_jobs or time.monotonic() >= deadline:
             remaining.extend(deduped[i:])  # carry the rest to the next cron
