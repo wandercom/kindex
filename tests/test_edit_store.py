@@ -153,8 +153,8 @@ class TestEditReembed:
         import kindex.vectors as vectors
         monkeypatch.setattr(vectors, "is_available", lambda: True)
         monkeypatch.setattr(
-            vectors, "upsert_embedding",
-            lambda store, node_id, text: calls.append((node_id, text)) or True,
+            vectors, "_upsert_embedding_outcome",
+            lambda store, node_id, text: calls.append((node_id, text)) or vectors._EmbeddingOutcome(True),
         )
         return calls
 
@@ -197,7 +197,7 @@ class TestEditReembed:
         def boom(*a, **kw):
             raise RuntimeError("embed exploded")
 
-        monkeypatch.setattr(vectors, "upsert_embedding", boom)
+        monkeypatch.setattr(vectors, "_upsert_embedding_outcome", boom)
         nid = store.add_node("Robust", content="a", node_type="concept")
         node = store.edit_node(nid, content="b")
         assert node["content"] == "b"

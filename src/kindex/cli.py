@@ -14,6 +14,7 @@ import yaml
 
 from . import __version__
 from .privacy import redacting_print as print
+from .privacy import safe_error
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -1373,6 +1374,37 @@ def cmd_doctor(args):
             f"generated or minified content being matched against itself; "
             f"run `kin doctor --oversized` to see the targets")
 
+    # ── Embedding queue ──
+    # A provider cannot make an input larger than its documented per-input
+    # limit succeed.  Diagnose these locally so --fix can terminate the stuck
+    # work without spending an API call; other provider errors remain the
+    # drain's responsibility and preserve their provider-supplied reason.
+    from .vectors import embedding_queue_diagnosis, quarantine_oversized_queue_items
+    embedding_queue = embedding_queue_diagnosis(store)
+    oversized_queue = embedding_queue["oversized"]
+    if oversized_queue:
+        limit = embedding_queue["single_input_token_limit"]
+        warnings.append(
+            f"{len(oversized_queue)} queued embedding input(s) exceed the configured "
+            f"{limit}-token {embedding_queue['provider']}/{embedding_queue['model']} "
+            "single-input limit"
+        )
+        if do_fix:
+            try:
+                remediation = quarantine_oversized_queue_items(store)
+            except Exception as exc:
+                warnings[-1] += f" (FIX FAILED: {safe_error(exc)})"
+            else:
+                quarantined_now = remediation["quarantined_now"]
+                if quarantined_now:
+                    fixes_applied += quarantined_now
+                    warnings[-1] += f" (FIXED: quarantined {quarantined_now})"
+                else:
+                    warnings[-1] += " (already quarantined)"
+                # Report the durable post-fix state, not the pre-fix scan.
+                embedding_queue = embedding_queue_diagnosis(store)
+                oversized_queue = embedding_queue["oversized"]
+
     # ── Oversized nodes ──
     # A knowledge node past this size is not knowledge; it is ingested build
     # output or a runaway merge. They dominate embedding cost and poison
@@ -1517,6 +1549,10 @@ def cmd_doctor(args):
             "warnings": warnings,
             "stats": stats,
             "fixes_applied": fixes_applied,
+            "embedding_queue": {
+                key: value for key, value in embedding_queue.items()
+                if key != "oversized"
+            } | {"oversized_inputs": len(oversized_queue)},
         }, indent=2))
     else:
         if issues:
@@ -3298,6 +3334,12 @@ def cmd_embed(args):
             print(f"Indexed nodes: {result.get('indexed_nodes')}")
             print(f"Vector rows: {result.get('vector_rows')}")
             print(f"Queue pending: {result['queue_pending']}")
+            print(f"Quarantined: {result.get('quarantined', 0)}")
+            for group in result.get("quarantine_summary", []):
+                code = f" HTTP {group['http_status']}" if group.get("http_status") else ""
+                print(f"  {group['count']} × {group['kind']}{code} — {group['message']}")
+            print(f"Drain complete: {result.get('drain_complete', False)}")
+            print(f"Coverage complete: {result.get('coverage_complete', False)}")
         elif action == "calibrate":
             if result.get("status") == "uncalibrated":
                 print(f"No calibration record for "

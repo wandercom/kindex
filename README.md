@@ -958,6 +958,11 @@ overlapping chunk vectors and aggregates chunk hits back to the parent node. Use
 Unsupported providers/models keep the single-vector strategy unless they later
 gain explicit contextual support.
 
+Embedding drains retry transient provider failures. Deterministic input-size
+rejections are instead recorded in a local quarantine (`embed.quarantine.v1`),
+so `kin embed status` can distinguish a drained queue from incomplete vector
+coverage without silently discarding the operator diagnostic.
+
 ### Operational
 | Command | Description |
 |---------|-------------|

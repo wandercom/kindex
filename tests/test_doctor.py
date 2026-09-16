@@ -8,6 +8,7 @@ import pytest
 
 from kindex.config import Config
 from kindex.store import Store
+from kindex.vectors import EMBED_QUEUE_META, EMBED_QUARANTINE_META
 
 
 def run(*args, data_dir=None):
@@ -44,6 +45,43 @@ class TestDoctorBasic:
         assert "issues" in data
         assert "warnings" in data
         assert "stats" in data
+
+    def test_fix_quarantines_known_oversized_openai_queue_input(self, tmp_path):
+        """Doctor clears a known-impossible input without a provider call."""
+        data_dir = str(tmp_path / "data")
+        store = Store(Config(
+            data_dir=data_dir,
+            embedding={"provider": "openai", "model": "text-embedding-3-small"},
+        ))
+        node_id = store.add_node("Archived checkpoint", content="x" * 202_000)
+        store.close()
+        config = tmp_path / "kin.yaml"
+        config.write_text(
+            "embedding:\n  provider: openai\n  model: text-embedding-3-small\n"
+        )
+
+        before = run("doctor", "--json", "--config", str(config), data_dir=data_dir)
+        assert before.returncode == 0
+        assert json.loads(before.stdout)["embedding_queue"]["oversized_inputs"] == 1
+
+        repaired = run(
+            "doctor", "--fix", "--json", "--config", str(config), data_dir=data_dir
+        )
+        assert repaired.returncode == 0
+        report = json.loads(repaired.stdout)
+        assert report["fixes_applied"] == 1
+
+        store = Store(Config(
+            data_dir=data_dir,
+            embedding={"provider": "openai", "model": "text-embedding-3-small"},
+        ))
+        assert json.loads(store.get_meta(EMBED_QUEUE_META) or "[]") == []
+        quarantine = json.loads(store.get_meta(EMBED_QUARANTINE_META) or "{}")
+        record = quarantine["items"][node_id]
+        assert record["kind"] == "input_too_large"
+        assert record["attempts"] == 0
+        assert "8192-token" in record["message"]
+        store.close()
 
 
 class TestDoctorInvariants:

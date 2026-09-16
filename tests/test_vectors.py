@@ -294,7 +294,7 @@ class TestEmbedTextDispatch:
             )
             vectors._ensure_vector_meta_table(store)
             monkeypatch.setattr(vectors, "ensure_vec_table", lambda store: True)
-            monkeypatch.setattr(vectors, "embed_document_chunks", lambda text, config: [
+            monkeypatch.setattr(vectors, "_embed_document_chunks", lambda text, config, *, embed_one: [
                 {
                     "index": 0,
                     "text": "first",
