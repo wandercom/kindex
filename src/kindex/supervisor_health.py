@@ -187,7 +187,7 @@ def _details(kind, raw):
         raw = {**raw, "state": "quiet"}
     if kind == "activity":
         clean["active"] = raw.get("active", True) is True
-    choices = {"state": {"queued", "completed", "quiet", "failed", "unavailable", "budget_exhausted", "skipped", "disabled", "discarded"},
+    choices = {"state": {"queued", "completed", "quiet", "failed", "unavailable", "budget_exhausted", "skipped", "disabled", "discarded", "refused"},
                "verdict": {"useful", "dismissed", "acted_on"},
                "outcome": {"success", "failed", "observed"},
                "initiator": {"agent", "automatic"},
@@ -202,7 +202,7 @@ def _details(kind, raw):
     # Reasons are deliberately closed; unknown provider strings are not retained.
     reasons = {"llm_unavailable", "worker_unavailable", "transcript_unavailable", "review_failed",
                "budget_exhausted", "timeout", "invalid_response", "no_findings", "advisory",
-               "missing_credentials", "disabled", "provider_error", "stale", "superseded"}
+               "missing_credentials", "disabled", "provider_error", "stale", "superseded", "invalid_scope"}
     if raw.get("reason") in reasons:
         clean["reason"] = raw["reason"]
     return clean
@@ -268,7 +268,10 @@ def _summarize(scope, rows, now, cfg, *, reviewer=False):
                "activity_evidence": "native_observed" if any(e["details"].get("source") == "native" for e in activity) else "reported" if all_activity else "not_observed",
                "last": {k: _iso(v) for k, v in last.items()},
                "counts": {k: len(v) for k, v in by_kind.items()}, "value": value,
-               "use_evidence": "observed" if uses else "not_observed"}
+               "use_evidence": "observed" if uses else "not_observed",
+               # A refused or disabled receipt is a hook that ran and declined;
+               # it settles missing_hooks but is not a healthy hook.
+               "hook_state": (by_kind["hook"][-1]["details"].get("state", "ok") if by_kind["hook"] else None)}
     found = []
     def issue(code):
         found.append({"id": scope["id"] + ":" + code, "code": code, "reason": REASONS[code],
