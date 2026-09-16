@@ -122,6 +122,66 @@ class TestExportJSONL:
         lines = [l for l in r.stdout.strip().split("\n") if l.strip()]
         assert len(lines) >= 3
 
+    def test_export_uses_complete_stable_active_contract(self, tmp_path):
+        """JSONL rows retain their shape across stores with legacy omissions."""
+        d = str(tmp_path)
+        run("init", data_dir=d)
+        s = Store(Config(data_dir=d))
+        s.add_node("Legacy active", node_id="legacy", audience="private")
+        s.add_node("Missing status", node_id="missing", audience="private")
+        s.add_node("Replacement", node_id="replacement", audience="private")
+        s.add_node("Archived", node_id="archived", audience="private",
+                   status="archived")
+        # Simulate an older persisted row: no lifecycle value, but a successor
+        # marker that must still win when filtering the active projection.
+        s.conn.execute("UPDATE nodes SET status = '', extra = ? WHERE id = 'legacy'",
+                       (json.dumps({"superseded_by": "replacement"}),))
+        s.conn.execute("UPDATE nodes SET status = '' WHERE id = 'missing'")
+        s.add_edge("replacement", "archived", edge_type="relates_to", weight=0.75,
+                   bidirectional=False)
+        s.close()
+
+        r = run("export", "--audience", "private", "--format", "jsonl",
+                "--active-only", data_dir=d)
+        assert r.returncode == 0, r.stderr
+        rows = [json.loads(line) for line in r.stdout.splitlines() if line]
+        assert [row["id"] for row in rows] == ["missing", "replacement"]
+        assert tuple(rows[0]) == (
+            "id", "type", "title", "content", "intent", "status", "audience",
+            "prov_when", "prov_activity", "prov_why", "prov_source", "created_at",
+            "updated_at", "standing", "aka", "domains", "prov_who", "valid_at",
+            "invalid_at", "asserted_at", "true_of", "verified_at", "verified_by",
+            "prov_method", "weight", "referent", "extra", "edges",
+        )
+        for row in rows:
+            assert row["status"] == "active"
+            assert row["standing"] == "unruled"
+            assert row["referent"] is None
+            assert row["asserted_at"] is None
+            assert row["true_of"] is None
+
+    def test_export_inferrs_missing_reciprocal_edge_weight(self, tmp_path):
+        d = str(tmp_path)
+        run("init", data_dir=d)
+        s = Store(Config(data_dir=d))
+        s.add_node("A", node_id="a", audience="private")
+        s.add_node("B", node_id="b", audience="private")
+        s.add_edge("a", "b", edge_type="implements", weight=0.75,
+                   bidirectional=False)
+        s.close()
+
+        r = run("export", "--audience", "private", "--format", "json", data_dir=d)
+        assert r.returncode == 0, r.stderr
+        rows = {row["id"]: row for row in json.loads(r.stdout)}
+        assert rows["a"]["edges"] == [
+            {"to": "b", "type": "implements", "weight": 0.75,
+             "bidirectional": False, "provenance": ""},
+        ]
+        assert rows["b"]["edges"] == [
+            {"to": "a", "type": "implements", "weight": 0.75 * 0.8,
+             "bidirectional": False, "provenance": ""},
+        ]
+
 
 class TestImportJSON:
     def test_import_json(self, tmp_path):

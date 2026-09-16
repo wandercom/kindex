@@ -2009,17 +2009,51 @@ def cmd_export(args):
     # A snapshot must not silently truncate at the query helper's display limit.
     nodes = [n for audience in audiences for n in store.all_nodes(audience=audience, limit=-1)]
 
+    from .graph_transfer import canonical_status, export_record
+    superseded_ids = {
+        edge["to_id"]
+        for node in nodes
+        for edge in store.edges_from(node["id"])
+        if edge["type"] == "supersedes"
+    }
+    if getattr(args, "active_only", False):
+        # Status is canonicalized for old rows, while both the persisted marker
+        # and supersedes edge retire a predecessor.
+        nodes = [node for node in nodes if canonical_status(node) == "active"
+                 and node["id"] not in superseded_ids]
+
     # Apply PII stripping for public/org exports
     strip_pii = target_audience in ("public", "org")
 
-    # Strip edges that cross audience boundaries
+    # Canonicalize outgoing rows and infer only missing reciprocals at the same
+    # 0.8 ratio Store.add_edge has always used. This makes old one-sided graph
+    # rows and new bidirectional rows export identically.
     output = []
     node_ids = {n["id"] for n in nodes}
-    from .graph_transfer import export_record
-    for n in nodes:
+    edges_by_node = {node_id: [] for node_id in node_ids}
+    edge_keys = set()
+    for node_id in sorted(node_ids):
+        for edge in store.edges_from(node_id):
+            if edge["to_id"] not in node_ids:
+                continue
+            edge_keys.add((node_id, edge["to_id"], edge["type"]))
+            edges_by_node[node_id].append(edge)
+    for from_id, to_id, edge_type in sorted(edge_keys):
+        if (to_id, from_id, edge_type) not in edge_keys:
+            primary = next(edge for edge in edges_by_node[from_id]
+                           if edge["to_id"] == to_id and edge["type"] == edge_type)
+            edges_by_node[to_id].append({
+                "to_id": from_id,
+                "type": edge_type,
+                "weight": primary["weight"] * 0.8,
+                "provenance": primary.get("provenance", ""),
+            })
+    for edges in edges_by_node.values():
+        edges.sort(key=lambda edge: (edge["to_id"], edge["type"], edge["weight"]))
+    for n in sorted(nodes, key=lambda node: node["id"]):
         if strip_pii:
             n = _strip_pii(n)
-        output.append(export_record(n, store.edges_from(n["id"]), node_ids, public=strip_pii))
+        output.append(export_record(n, edges_by_node[n["id"]], node_ids, public=strip_pii))
 
     if args.format == "jsonl":
         for item in output:
@@ -7394,6 +7428,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Export graph (default) or a UA-compatible code map")
     s.add_argument("--audience", choices=["private", "team", "org", "public"], default="team")
     s.add_argument("--format", choices=["json", "jsonl", "understand-anything"], default="json")
+    s.add_argument("--active-only", action="store_true",
+                   help="Export only canonical active nodes, excluding superseded predecessors")
     s.add_argument("--directory", help="Repository root for code-map metadata")
     s.add_argument("--project-name", help="Project name for code-map export")
     s.add_argument("--output", help="Write export to this file instead of stdout")
