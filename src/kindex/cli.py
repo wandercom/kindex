@@ -1332,6 +1332,13 @@ def cmd_doctor(args):
     if stale and len(stale) > len(nodes) * 0.3:
         warnings.append(f"{len(stale)} nodes not accessed in 90+ days")
 
+    # ── Repository config keys that only the user config may set ──
+    ignored_keys = getattr(_config(args), "_ignored_project_keys", [])
+    if ignored_keys:
+        warnings.append(
+            f"This repository's .kin/config sets {', '.join(ignored_keys)}; these come only "
+            f"from ~/.config/kindex/kin.yaml and were ignored")
+
     # ── Degraded hook events (last 7 days) ──
     from .config import read_degraded_events
     degraded_events = read_degraded_events(

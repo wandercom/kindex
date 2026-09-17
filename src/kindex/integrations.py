@@ -70,7 +70,7 @@ def open_project_store(scope: dict):
     legacy profiles remain available through their existing explicit surfaces.
     """
     from .config import trusted_supervisor_config
-    from .project_store import project_data_path
+    from .project_store import ensure_local_ignored, project_data_path, refuse_tracked_store
     from .store import Store
     scoped = project_scope(scope)
     if scoped.get("profile") not in (None, "legacy"):
@@ -78,23 +78,14 @@ def open_project_store(scope: dict):
     root = Path(scoped["project_path"])
     kin = root / ".kin"
     local = kin / "local"
-    tracked = subprocess.run(["git", "-C", str(root), "ls-files", "--", ".kin/local"],
-                             capture_output=True, text=True, timeout=3, check=True)
-    if tracked.stdout.strip():
-        raise ValueError("Refusing tracked .kin/local storage; clone content is not a local trusted database")
+    refuse_tracked_store(local)
     if kin.is_symlink() or local.is_symlink() or (local / "kindex").is_symlink():
         raise ValueError("Refusing symlinked repo-local Kindex storage")
     for leaf in ("kindex.db", "conv.db", "kindex.db-wal", "kindex.db-shm", "conv.db-wal", "conv.db-shm"):
         target = local / "kindex" / leaf
         if target.is_symlink() or (target.exists() and target.stat().st_nlink > 1):
             raise ValueError("Refusing linked repo-local Kindex database")
-    kin.mkdir(exist_ok=True)
-    ignore = kin / ".gitignore"
-    if ignore.is_symlink():
-        raise ValueError("Refusing symlinked .kin/.gitignore")
-    existing = ignore.read_text() if ignore.exists() else ""
-    if "local/" not in existing.splitlines():
-        ignore.write_text(existing.rstrip("\n") + ("\n" if existing else "") + "local/\n")
+    ensure_local_ignored(local)
     config = trusted_supervisor_config(root, str(project_data_path(root)))
     config._project_path = root
     # The modern codebase lane is separate from legacy profile selection.

@@ -584,6 +584,9 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                 resolved_dir = Path(str(raw_dir)).expanduser()
                 if not resolved_dir.is_absolute():
                     resolved_dir = project_root / resolved_dir
+                # The reminder sweep runs shell actions from every registered
+                # graph; a store a clone delivered is never one of them (the
+                # registry write below applies that rule).
                 project_graphs[str(project_root)] = str(resolved_dir.resolve())
 
             existing = store.get_node(slug)
@@ -672,7 +675,11 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
     except Exception:
         previous = {}
     merged_graphs = {**previous, **project_graphs}
-    merged_graphs = {root: d for root, d in merged_graphs.items() if Path(d).exists()}
+    # A graph whose store has become tracked leaves the registry too: the sweep
+    # runs its reminders' shell actions.
+    from .project_store import tracked_store_refusal
+    merged_graphs = {root: d for root, d in merged_graphs.items()
+                     if Path(d).exists() and tracked_store_refusal(Path(d)) is None}
     store.set_meta("project_graph_dirs", json.dumps(merged_graphs))
 
     return count
