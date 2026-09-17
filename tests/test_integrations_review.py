@@ -506,3 +506,49 @@ def test_refused_non_supervisor_action_leaves_no_receipt(tmp_path, monkeypatch):
     result = integrations.dispatch({"protocol_version": 1, "scope": scope, "action": "capture", "text": "a" * 40})
     assert result["error"]["code"] == "invalid_scope"
     assert supervisor_health.status()["sessions"] == []
+
+
+def test_budget_exhaustion_is_not_a_review_failure(tmp_path, monkeypatch):
+    """A long session that exhausts its review allowance must not page as a
+    sustained failure: every later hook call re-records budget_exhausted, and
+    counting those as consecutive failures produced a review_failures alert
+    on a machine where nothing had failed."""
+    from kindex import supervisor_health, supervisor_health_activity
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(tmp_path / "health"))
+    monkeypatch.setattr(supervisor_health_activity, "observe_activity", lambda now: {})
+    scope = {"project_path": str(tmp_path), "session_id": "long-session", "agent": "claude"}
+    now = time.time()
+    supervisor_health.record(scope, "activity", {"source": "native", "active": True, "timestamp": now - 30})
+    supervisor_health.record(scope, "review", {"state": "quiet", "source": "worker", "timestamp": now - 25})
+    for offset in range(20, 0, -1):
+        supervisor_health.record(scope, "review", {"state": "budget_exhausted", "reason": "budget_exhausted",
+                                                   "source": "hook", "timestamp": now - offset})
+    result = supervisor_health.check_health(now=now)
+    assert not any(issue["code"] == "review_failures" for issue in result["issues"]), result["issues"]
+    session = next(s for s in result["sessions"] if s["session_id"] == "long-session")
+    assert session["budget_exhausted"] is True
+    assert session["consecutive_review_failures"] == 0
+    # Real failures after exhaustion still count.
+    for offset in range(3):
+        supervisor_health.record(scope, "review", {"state": "failed", "reason": "review_failed",
+                                                   "source": "worker", "timestamp": now + 1 + offset})
+    later = supervisor_health.check_health(now=now + 5)
+    assert any(issue["code"] == "review_failures" for issue in later["issues"])
+
+
+def test_budget_exhaustion_between_failures_is_skipped_not_counted(tmp_path, monkeypatch):
+    """Interleaved outcomes: only real failures after the last success count."""
+    from kindex import supervisor_health, supervisor_health_activity
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(tmp_path / "health"))
+    monkeypatch.setattr(supervisor_health_activity, "observe_activity", lambda now: {})
+    scope = {"project_path": str(tmp_path), "session_id": "interleaved", "agent": "claude"}
+    now = time.time()
+    supervisor_health.record(scope, "activity", {"source": "native", "active": True, "timestamp": now - 30})
+    for offset, state in enumerate(["completed", "budget_exhausted", "failed", "failed",
+                                    "budget_exhausted", "failed"]):
+        supervisor_health.record(scope, "review", {"state": state, "source": "worker",
+                                                   "timestamp": now - 20 + offset})
+    result = supervisor_health.check_health(now=now)
+    session = next(s for s in result["sessions"] if s["session_id"] == "interleaved")
+    assert session["consecutive_review_failures"] == 3
+    assert session["budget_exhausted"] is True

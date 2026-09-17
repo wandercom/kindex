@@ -302,11 +302,21 @@ def _summarize(scope, rows, now, cfg, *, reviewer=False):
             issue("missing_use")
     reviews = by_kind["review"]
     outcomes = [e for e in reviews if e["details"].get("state") in {"completed", "quiet", "failed", "unavailable", "budget_exhausted"}]
+    # An exhausted review allowance is a limit doing its job, not a failed
+    # review: it neither breaks nor extends a failure streak. Counting it
+    # paged an operator with "sustained error" after a long session hit its
+    # per-conversation allowance and every later hook call re-recorded it.
     failures = 0
+    budget_exhausted = False
     for event in reversed(outcomes):
-        if event["details"]["state"] in {"completed", "quiet"}:
+        state = event["details"]["state"]
+        if state in {"completed", "quiet"}:
             break
+        if state == "budget_exhausted":
+            budget_exhausted = True
+            continue
         failures += 1
+    summary["budget_exhausted"] = budget_exhausted
     if failures >= cfg["failure_threshold"] and active:
         issue("review_failures")
     deliveries = by_kind["delivery"]

@@ -4,6 +4,22 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- Hook surfaces (`prime`, `prompt-check`, `attention-hook`, `stop-guard`,
+  `compact-hook`, agent hooks, `cron`) degrade per R2.1 on a configuration or
+  scope refusal (such as "Ambiguous Kindex scope") instead of exiting 2 and
+  blocking the host on every tool call; the refusal is recorded in
+  `degraded.jsonl`. Commands still print the remedy and exit 2. Scripts that
+  keyed on a hook's exit 2 for a configuration error must read the ledger.
+- `attention-hook` records a failure in the degraded ledger instead of
+  swallowing it.
+- A refusal recorded before any configuration loaded goes to the global
+  configuration's `data_dir` (else `~/.kindex`), and `kin status` / `kin doctor`
+  read every ledger an event may have been written to.
+- The degraded ledger keeps mode 0600 when its size cap rewrites it.
+- A supervisor review allowance that runs out is no longer reported as a
+  sustained review failure.
+
 ## [0.39.2] - 2026-09-17
 
 ### Added

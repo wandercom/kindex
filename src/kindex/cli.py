@@ -57,6 +57,17 @@ def operation_now() -> str:
     )
 
 
+class ConfigResolutionError(ValueError):
+    """Configuration or scope could not be resolved for this invocation.
+
+    Raised by `_config`; only `main()` decides what it means: a command
+    prints the remedy and exits 2, a hook surface degrades and exits 0. It
+    used to be a SystemExit raised here, which is not an Exception, so it
+    slipped past the hook fail-open handler and the host reported "Blocked by
+    hook" on every tool call for a scope ambiguity.
+    """
+
+
 def _config(args):
     from .config import load_config
     try:
@@ -67,10 +78,8 @@ def _config(args):
             data_dir=getattr(args, "data_dir", None),
         )
     except ValueError as e:
-        # Unknown profile (or otherwise invalid config) — fail clearly
-        # instead of dumping a traceback or falling through to legacy.
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(2)
+        # Unknown profile, ambiguous scope, or otherwise invalid config.
+        raise ConfigResolutionError(str(e)) from e
     return cfg
 
 
@@ -5329,7 +5338,16 @@ def cmd_attention_hook(args):
         )
         if rendered:
             print(rendered)
-    except Exception:
+    except Exception as exc:
+        # Fail open, but never silently: a refused scope or a broken store
+        # used to vanish here (or, as SystemExit, block the host). The same
+        # degrade path as every other hook surface keeps the reason for
+        # `kin doctor`; recording can never stand between the host and the
+        # allow.
+        try:
+            _degrade_hook_failure(args, exc)
+        except Exception:
+            pass
         allow_if_needed()
     finally:
         if store is not None:
@@ -7772,12 +7790,14 @@ def main():
             try:
                 args.func(args)
             except (
+                ConfigResolutionError,
                 ProfileMismatchError,
                 SchemaMigrationError,
                 UnsupportedSchemaVersionError,
             ) as e:
-                # Storage safety refusals are expected operator actions, not
-                # programmer failures: print the remedy without a traceback.
+                # Storage safety and scope refusals are expected operator
+                # actions, not programmer failures: print the remedy without
+                # a traceback.
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(2)
     else:
