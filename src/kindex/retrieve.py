@@ -13,11 +13,14 @@ Auto-selects based on estimated available token budget when level is not specifi
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .agent_adapters import adapter_scoped_out
@@ -360,26 +363,34 @@ def hybrid_search(
     admission_time = _operation_time(evaluation_time) if trusted_only else None
     admission_today = admission_time.date().isoformat() if admission_time else None
 
-    def standing_candidate_eligible(node):
+    # Withheld by trust, whether inside the search window or after it, so the
+    # trusted-only note says what was left out.
+    trust_omissions: Counter[str] = Counter()
+
+    def candidate_eligible(node):
         extra = node.get("extra")
         imported = isinstance(extra, dict) and isinstance(extra.get("kinbase"), dict)
-        # Preserve the legacy unruled candidate-window contract. New explicit
-        # precedence must not let ineligible evidence consume that window.
-        if not imported and node.get("standing", "unruled") == "unruled":
+        # A legacy unruled node takes its place in the window as it always
+        # did. Under trusted_only nothing does: unverified rows filled the
+        # 3*top_k window and verified matches ranked below it were never seen.
+        if not trusted_only and not imported and node.get("standing", "unruled") == "unruled":
             return True
         if (trusted_only or not include_expired) and node_expired(node, today=admission_today):
+            if trusted_only:
+                trust_omissions["invalidated"] += 1
             return False
-        if trusted_only and not node_trust_decision(store, node, at=admission_time).eligible:
-            return False
+        if trusted_only:
+            decision = node_trust_decision(store, node, at=admission_time)
+            if not decision.eligible:
+                trust_omissions[decision.reason] += 1
+                return False
         return True
 
-    has_standing = store.conn.execute(
-        "SELECT 1 FROM nodes WHERE standing != 'unruled' "
-        "OR CASE WHEN json_valid(extra) THEN json_type(extra, '$.kinbase') END='object' LIMIT 1"
-    ).fetchone()
-    fts_options = {"candidate_filter": standing_candidate_eligible} if has_standing else {}
+    # The filter admits a legacy row at once, so installing it always keeps
+    # the legacy window and replaces a whole-table probe on every search.
     fts_results = store.fts_search(query, limit=top_k * 3,
-                                   include_archived=include_archived, **fts_options)
+                                   include_archived=include_archived,
+                                   candidate_filter=candidate_eligible)
     fts_ranked: list[tuple[str, float]] = []
     for r in fts_results:
         try:
@@ -519,12 +530,14 @@ def hybrid_search(
             ranked_lists.append(vec_ranked)
         merged = _rrf_merge(*ranked_lists, k=cfg_rrf_k) if len(ranked_lists) > 1 else fts_ranked
 
-    # Standing is an explicit precedence rule, ahead of recency/count/RRF.
-    # Legacy nodes all default to unruled, preserving their relative ordering.
-    from .schema import STANDINGS
-    standings = {row["id"]: STANDINGS.index(row["standing"]) if row["standing"] in STANDINGS else 0
-                 for row in store.conn.execute("SELECT id, standing FROM nodes WHERE standing != 'unruled'")}
-    merged.sort(key=lambda item: -standings.get(item[0], 0))
+    # Standing is precedence among the query's own matches: a ratified
+    # matching fact outranks any number of present matching observations.
+    # It reorders only the positions text matches hold; a graph neighbour
+    # or a vector hit that does not match the query keeps its place and
+    # never jumps ahead of a direct match on standing alone. Legacy nodes
+    # are all unruled, so their order is unchanged.
+    merged = _standing_first_among_matches(
+        store, merged, {nid for nid, _ in fts_ranked})
 
     # Fetch full nodes, drawing from the merged candidate list until top_k
     # results or exhaustion — drop-filtering used to happen after slicing
@@ -540,7 +553,6 @@ def hybrid_search(
     results = []
     seen: set[str] = set()
     fenced_nodes: dict[str, dict] = {}
-    trust_omissions: Counter[str] = Counter()
     trusted_at = admission_time
     trusted_today = admission_today
     for nid, score in merged:
@@ -595,9 +607,16 @@ def hybrid_search(
             seen.add(node["id"])
             node["confidence"] = round(score, 4)
             node["rrf_score"] = round(score, 6)  # backward compat
-            node["edges_out"] = store.edges_from(
-                node["id"], semantic_only=True
-            )[:5]
+            # Neighbour titles pass the same fences as results: an archived,
+            # expired or (under trusted_only) untrusted neighbour is not named.
+            node["edges_out"] = visible_neighbours(
+                store,
+                store.edges_from(node["id"], semantic_only=True),
+                include_archived=include_archived,
+                include_expired=include_expired and not trusted_only,
+                trusted_at=trusted_at if trusted_only else None,
+                trusted_today=trusted_today,
+            )
             from .kinbase import attach_unknowns
             attach_unknowns(store, node)
             results.append(node)
@@ -1365,14 +1384,136 @@ def format_tier2(
 
 
 def detect_domain_from_path(store: Store, cwd: str) -> list[str]:
-    """Given a working directory, find relevant domain nodes.
+    """The domains of the project a working directory belongs to.
 
-    Searches for nodes whose prov_source matches the path.
+    The project is named by its root directory and its git remote. Up to
+    five live nodes whose domains carry that name contribute their domains.
+    Every token of the absolute path used to be a search term, so nodes that
+    merely mentioned "users" or the account name decided the topic, and the
+    standing-first order let any five such nodes take it over.
     """
-    # Search for nodes referencing this path
-    results = store.fts_search(cwd, limit=5)
-    domains: set[str] = set()
-    for r in results:
-        for d in (r.get("domains") or []):
-            domains.add(d)
-    return sorted(domains)
+    matched: set[str] = set()
+    for name in _project_names(cwd):
+        tokens = re.findall(r"\w+", name.lower())
+        if not tokens:
+            continue
+        wanted = " ".join(tokens)
+        try:
+            rows = store.conn.execute(
+                "SELECT n.domains FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.id "
+                "WHERE nodes_fts MATCH ? AND n.status NOT IN ('archived', 'superseded') "
+                "ORDER BY rank LIMIT 20",
+                (f'domains : "{wanted}"',),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        contributors = 0
+        for row in rows:
+            try:
+                domains = json.loads(row[0] or "[]")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(domains, list):
+                continue
+            names = {" ".join(re.findall(r"\w+", str(d).lower())) for d in domains}
+            if wanted not in names:
+                continue
+            matched.update(str(d) for d in domains)
+            contributors += 1
+            if contributors >= 5:
+                break
+    return sorted(matched)
+
+
+def _project_names(cwd: str) -> list[str]:
+    """The root directory name and git remote repository name of ``cwd``."""
+    import subprocess
+
+    names: list[str] = []
+    root = Path(cwd)
+    try:
+        top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=3,
+                             stdin=subprocess.DEVNULL)
+        if top.returncode == 0 and top.stdout.strip():
+            root = Path(top.stdout.strip())
+        remote = subprocess.run(["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+                                capture_output=True, text=True, timeout=3,
+                                stdin=subprocess.DEVNULL)
+        if remote.returncode == 0 and remote.stdout.strip():
+            repo = remote.stdout.strip().rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+            names.append(repo[:-4] if repo.endswith(".git") else repo)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if root.name:
+        names.insert(0, root.name)
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _standing_first_among_matches(store: Store, merged: list, direct_ids: set[str]) -> list:
+    """``merged`` with the text matches, in the positions they already hold,
+    ordered by standing (stable, so equal standings keep their rank)."""
+    from .schema import STANDINGS
+
+    positions = [index for index, (nid, _) in enumerate(merged) if nid in direct_ids]
+    if len(positions) < 2:
+        return merged
+    ids = [merged[index][0] for index in positions]
+    standings: dict[str, int] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for row in store.conn.execute(
+            f"SELECT id, standing FROM nodes WHERE id IN ({placeholders})", chunk
+        ):
+            if row["standing"] in STANDINGS:
+                standings[row["id"]] = STANDINGS.index(row["standing"])
+    if not standings:
+        return merged
+    ordered = sorted((merged[index] for index in positions),
+                     key=lambda item: -standings.get(item[0], 0))
+    merged = list(merged)
+    for index, item in zip(positions, ordered):
+        merged[index] = item
+    return merged
+
+
+def visible_neighbours(
+    store: Store,
+    edges: list[dict],
+    *,
+    include_archived: bool = False,
+    include_expired: bool = False,
+    trusted_at=None,
+    trusted_today: str | None = None,
+    adapter: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """The first ``limit`` edges whose target a reader may be shown: live,
+    unexpired, in the client's scope, and trusted when trust is required.
+    Targets are read without touching their access time."""
+    from .agent_adapters import adapter_scoped_out
+    from .store import node_expired
+
+    visible: list[dict] = []
+    for edge in edges:
+        if len(visible) >= limit:
+            break
+        row = store.conn.execute(
+            "SELECT * FROM nodes WHERE id = ?", (edge.get("to_id"),)
+        ).fetchone()
+        if row is None:
+            continue
+        target = store._row_to_dict(row)
+        if not include_archived and target.get("status") in ("archived", "superseded"):
+            continue
+        if not include_expired and node_expired(target, today=trusted_today):
+            continue
+        if adapter and adapter_scoped_out(target.get("tags"), adapter):
+            continue
+        if trusted_at is not None:
+            from .trust import node_trust_decision
+            if not node_trust_decision(store, target, at=trusted_at).eligible:
+                continue
+        visible.append(edge)
+    return visible

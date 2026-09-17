@@ -22,6 +22,19 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - A queued attention review (from `attention-hook` or `prompt-check`) is
   judged with its client's and instance's `agents` overrides; one an instance
   enabled was dropped as disabled by the background drain.
+- Search names only neighbours a reader may see: an archived, expired,
+  other-client or (under `trusted_only`) untrusted neighbour's title no longer
+  appears beside a result, in the prime or in any context format.
+- Standing orders the query's own text matches; a graph neighbour or vector
+  hit that does not match the query no longer outranks the best match
+  because it has any standing. The whole-table standing probe on every
+  search is gone.
+- `trusted_only` recall filters every candidate before the result window,
+  so verified matches ranked below a page of unverified rows are found (the
+  matches are ranked once, however many are refused), and the withheld
+  count covers them, each node once.
+- The session prime's topic comes from the project (its root directory and
+  git remote) instead of every word of the absolute working directory.
 
 ## [0.40.0] - 2026-09-17
 
