@@ -45,11 +45,14 @@ def hermetic_scheduler(tmp_path, monkeypatch):
     Creating or completing a reminder repacks the schedule with the
     developer's own configuration, and a fresh test store has no pending
     reminders, so a test run unloaded (or rewrote) the real launchd job or
-    crontab. Every repack here records what it would apply instead; tests
-    of the platform writers call them directly with a faked subprocess.
+    crontab. Every repack here records what it would apply instead; CLI
+    subprocesses inherit KIN_NO_SCHEDULER_WRITES and the per-test state
+    directory. Tests of the platform writers call them directly with a
+    faked subprocess.
     """
     from kindex import scheduling
 
+    monkeypatch.setenv("KIN_NO_SCHEDULER_WRITES", "1")
     applied: list[int] = []
 
     def record(interval, config):

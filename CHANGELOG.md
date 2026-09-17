@@ -75,18 +75,20 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   messages were already read.
 - The scheduler interval is decided for the machine, not per store: the
   job runs at the shortest interval any store that reported in the last day
-  wants, and with no reminder pending anywhere it keeps an hourly
-  maintenance cadence. A profile (or the only graph) with no pending
+  wants (recorded in `$XDG_STATE_HOME/kindex/scheduler-state.json`), and with
+  no reminder pending anywhere it keeps an hourly maintenance cadence. A profile (or the only graph) with no pending
   reminder used to unload the single launchd job, and nothing reloaded it,
   so reminders, ingest, embedding, decay and dream all stopped.
 - `kin setup-codex-hooks` (and uninstall) change only handlers whose command
-  is exactly one Kindex installed, keep other handlers in the same entry,
-  back up `hooks.json` before rewriting it, and leave an unchanged file
-  alone. A handler that merely mentioned "kindex", or shared an entry with a
+  is exactly one Kindex installed (recorded in `kindex-hooks.json`, so a
+  moved `kin` executable still owns them), keep other handlers in the same
+  entry, back up `hooks.json` before rewriting it, and leave an unchanged
+  file alone. A handler that merely mentioned "kindex", or shared an entry with a
   Kindex handler, was replaced.
 - The test suite no longer touches the machine's scheduler: creating a
   reminder in a test repacked the developer's real launchd job or crontab
-  (and, with a fresh store, unloaded it).
+  (and, with a fresh store, unloaded it). `KIN_NO_SCHEDULER_WRITES=1`
+  leaves the scheduler untouched, including for child processes.
 
 ### Security
 - Collab text from peers (authors, lock holders, standing-message setters,

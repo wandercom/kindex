@@ -291,3 +291,29 @@ class TestScheduleTierConfig:
         assert len(cfg.schedule_tiers) == 2
         assert cfg.schedule_tiers[0].threshold == 7200
         assert cfg.schedule_tiers[1].interval == 120
+
+
+def test_the_scheduler_record_is_one_for_the_machine(tmp_path, monkeypatch):
+    from kindex import scheduling
+
+    monkeypatch.undo()  # the real path, under this test's state directory
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    home = Config(data_dir=str(tmp_path / "home-store"))
+    project = Config(data_dir=str(tmp_path / "repo" / ".kin" / "local" / "kindex"))
+    assert scheduling._scheduler_state_path(home) == scheduling._scheduler_state_path(project)
+    assert scheduling._scheduler_state_path(home) == tmp_path / "state" / "kindex" / "scheduler-state.json"
+
+
+def test_scheduler_writes_can_be_switched_off_for_child_processes(monkeypatch, tmp_path):
+    from kindex import scheduling
+
+    monkeypatch.undo()
+    monkeypatch.setenv("KIN_NO_SCHEDULER_WRITES", "1")
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the machine scheduler was written")
+
+    monkeypatch.setattr(scheduling, "_apply_launchd", must_not_run)
+    monkeypatch.setattr(scheduling, "_apply_crontab", must_not_run)
+    result = scheduling.apply_schedule(300, Config(data_dir=str(tmp_path)))
+    assert result == {"action": "skipped", "reason": "scheduler writes disabled"}

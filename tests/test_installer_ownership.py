@@ -74,3 +74,21 @@ def test_an_unchanged_install_does_not_rewrite(codex):
     actions = install_codex_hooks(cfg)
     assert all("already installed" in action for action in actions)
     assert (directory / "hooks.json").stat().st_mtime_ns == before
+
+
+def test_a_moved_kin_executable_still_owns_its_hooks(codex, monkeypatch):
+    from kindex import setup
+    from kindex.setup import install_codex_hooks, uninstall_codex_hooks
+    directory, cfg = codex
+    monkeypatch.setattr(setup, "_find_kin_path", lambda: "/home/u/.venvs/a/bin/kin")
+    install_codex_hooks(cfg)
+    monkeypatch.setattr(setup, "_find_kin_path", lambda: "/home/u/.local/bin/kin")
+    install_codex_hooks(cfg)
+    for event in ("SessionStart", "UserPromptSubmit", "PostToolUse"):
+        present = commands(directory, event)
+        assert len(present) == 1 and "/home/u/.local/bin/kin" in present[0], present
+    monkeypatch.setattr(setup, "_find_kin_path", lambda: "/opt/other/kin")
+    uninstall_codex_hooks(cfg)
+    data = json.loads((directory / "hooks.json").read_text())
+    assert data.get("hooks", {}) == {}
+    assert not (directory / "kindex-hooks.json").exists()

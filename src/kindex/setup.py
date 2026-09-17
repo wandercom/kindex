@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape
 
+from pydantic import BaseModel, Field
+
 
 def _binding_refused() -> list[str] | None:
     """Under an active config binding, refuse to touch the machine's real
@@ -56,16 +58,8 @@ def _kin_stop_hook_command(kin_path: str, args: list[str]) -> str:
     return f"/bin/bash -lc {shlex.quote(script)}"
 
 
-def _hook_needs_profile(entry: object) -> bool:
-    return "source ~/.profile" not in str(entry)
-
-
 def _hook_needs_stop_active_guard(entry: object) -> bool:
     return "stop_hook_active" not in str(entry)
-
-
-def _hook_needs_attention_deadline(entry: object) -> bool:
-    return "--deadline-ms" not in str(entry)
 
 
 def _hook_needs_envelope_capture(entry: object) -> bool:
@@ -93,8 +87,26 @@ _CODEX_HOOK_ARGS = [
 ]
 
 
-def _codex_owned_commands(kin_path: str) -> set[str]:
-    commands: set[str] = set()
+class CodexHookRecord(BaseModel):
+    """The exact commands Kindex installed into Codex hooks, kept beside
+    hooks.json so a later install or uninstall recognizes them after the
+    kin executable moved (pipx, uv, a virtualenv)."""
+    commands: list[str] = Field(default_factory=list)
+
+
+def _codex_record_path(config: "Config") -> Path:
+    return config.codex_path / "kindex-hooks.json"
+
+
+def _read_codex_record(config: "Config") -> CodexHookRecord:
+    try:
+        return CodexHookRecord.model_validate_json(_codex_record_path(config).read_text())
+    except (OSError, ValueError):
+        return CodexHookRecord()
+
+
+def _codex_owned_commands(kin_path: str, recorded: CodexHookRecord | None = None) -> set[str]:
+    commands: set[str] = set(recorded.commands if recorded else [])
     for args in _CODEX_HOOK_ARGS:
         for binary in dict.fromkeys(["kin", kin_path, "/opt/homebrew/bin/kin", "/usr/local/bin/kin"]):
             commands.add(f"{binary} {args}")
@@ -176,10 +188,13 @@ def install_codex_hooks(config: "Config", dry_run: bool = False) -> list[str]:
     data = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
     hooks = data.setdefault("hooks", {})
     kin_path = _find_kin_path()
-    owned = _codex_owned_commands(kin_path)
+    record = _read_codex_record(config)
+    owned = _codex_owned_commands(kin_path, record)
     changed = False
+    manifest = _codex_hook_manifest(kin_path)
+    installed = sorted({entry["hooks"][0]["command"] for entry in manifest.values()})
 
-    for event, wanted in _codex_hook_manifest(kin_path).items():
+    for event, wanted in manifest.items():
         entries = hooks.setdefault(event, [])
         command = wanted["hooks"][0]["command"]
         present = _handler_commands(entries)
@@ -200,6 +215,8 @@ def install_codex_hooks(config: "Config", dry_run: bool = False) -> list[str]:
         actions.append(f"Would write {hooks_path}")
         return actions
     _write_codex_hooks(hooks_path, data)
+    _codex_record_path(config).write_text(
+        CodexHookRecord(commands=sorted(set(record.commands) | set(installed))).model_dump_json())
     actions.append(f"Wrote {hooks_path}")
     return actions
 
@@ -214,7 +231,7 @@ def uninstall_codex_hooks(config: "Config", dry_run: bool = False) -> list[str]:
 
     data = json.loads(hooks_path.read_text())
     hooks = data.get("hooks", {})
-    owned = _codex_owned_commands(_find_kin_path())
+    owned = _codex_owned_commands(_find_kin_path(), _read_codex_record(config))
     scoped = {"hooks": {event: hooks.get(event, [])
                         for event in ("SessionStart", "UserPromptSubmit", "PostToolUse")
                         if event in hooks}}
@@ -232,6 +249,7 @@ def uninstall_codex_hooks(config: "Config", dry_run: bool = False) -> list[str]:
     else:
         data.pop("hooks", None)
     _write_codex_hooks(hooks_path, data)
+    _codex_record_path(config).unlink(missing_ok=True)
     return [f"Removed Codex Kindex hooks from {hooks_path}"]
 
 

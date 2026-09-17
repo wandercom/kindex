@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel, Field
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -65,7 +67,26 @@ def maintenance_interval(config: "Config") -> int:
 
 
 def _scheduler_state_path(config: "Config") -> Path:
-    return Path(config.scheduler_log_path) / "scheduler-state.json"
+    """One record for the machine's one scheduler, wherever the store that
+    reports lives: a path under a store's own data directory gave each
+    profile and project its own record, and an idle pass overrode a busy
+    one."""
+    import os
+    base = os.environ.get("XDG_STATE_HOME", "").strip()
+    root = Path(base) if base else Path.home() / ".local" / "state"
+    return root / "kindex" / "scheduler-state.json"
+
+
+class StoreReport(BaseModel):
+    interval: int = 0
+    at: float = 0.0
+
+
+class SchedulerState(BaseModel):
+    """What each store last asked of the machine scheduler, and what was
+    applied."""
+    stores: dict[str, StoreReport] = Field(default_factory=dict)
+    applied: int | None = None
 
 
 class _StateLock:
@@ -90,23 +111,20 @@ class _StateLock:
         return False
 
 
-def _read_state(path: Path) -> dict:
-    import json
+def _read_state(path: Path) -> SchedulerState:
     try:
-        state = json.loads(path.read_text())
+        return SchedulerState.model_validate_json(path.read_text())
     except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
+        return SchedulerState()
 
 
-def _write_state(path: Path, state: dict) -> None:
-    import json
+def _write_state(path: Path, state: SchedulerState) -> None:
     import os
     import tempfile
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as handle:
-            json.dump(state, handle, sort_keys=True)
+            handle.write(state.model_dump_json())
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -147,31 +165,35 @@ def repack_schedule(store: "Store", config: "Config") -> dict:
     with _StateLock(path):
         state = _read_state(path)
         now = time.time()
-        stores = {
-            key: entry for key, entry in (state.get("stores") or {}).items()
-            if isinstance(entry, dict) and now - float(entry.get("at") or 0) < _STORE_REPORT_TTL
-        }
-        stores[str(store.db_path)] = {"interval": wanted, "at": now}
-        live = [int(entry.get("interval") or 0) for entry in stores.values()]
-        live = [interval for interval in live if interval > 0]
+        stores = {key: report for key, report in state.stores.items()
+                  if now - report.at < _STORE_REPORT_TTL}
+        stores[str(store.db_path)] = StoreReport(interval=wanted, at=now)
+        live = [report.interval for report in stores.values() if report.interval > 0]
         interval = min(live) if live else maintenance_interval(config)
-        previous = state.get("applied")
+        previous = state.applied
         if previous == interval:
-            _write_state(path, {"stores": stores, "applied": previous})
+            _write_state(path, SchedulerState(stores=stores, applied=previous))
             return {"action": "unchanged", "interval": interval}
         result = apply_schedule(interval, config)
         applied = interval if result.get("action") in ("updated", "unchanged") else previous
-        _write_state(path, {"stores": stores, "applied": applied})
+        _write_state(path, SchedulerState(stores=stores, applied=applied))
     result["interval"] = interval
     result["previous"] = previous
     return result
 
 
 def apply_schedule(interval: int, config: "Config") -> dict:
-    """Apply a new cron interval to the system scheduler (launchd or crontab)."""
+    """Apply a new cron interval to the system scheduler (launchd or crontab).
+
+    ``KIN_NO_SCHEDULER_WRITES=1`` leaves the machine scheduler untouched
+    (test suites and sandboxes, whose child processes inherit it).
+    """
+    import os
     from .config import _bound_root
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
+    if os.environ.get("KIN_NO_SCHEDULER_WRITES", "").strip() in ("1", "true", "yes"):
+        return {"action": "skipped", "reason": "scheduler writes disabled"}
     if platform.system() == "Darwin":
         return _apply_launchd(interval, config)
     return _apply_crontab(interval, config)
