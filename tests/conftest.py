@@ -39,6 +39,30 @@ def hermetic_state_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def hermetic_scheduler(tmp_path, monkeypatch):
+    """Keep tests away from the machine's real scheduler.
+
+    Creating or completing a reminder repacks the schedule with the
+    developer's own configuration, and a fresh test store has no pending
+    reminders, so a test run unloaded (or rewrote) the real launchd job or
+    crontab. Every repack here records what it would apply instead; tests
+    of the platform writers call them directly with a faked subprocess.
+    """
+    from kindex import scheduling
+
+    applied: list[int] = []
+
+    def record(interval, config):
+        applied.append(interval)
+        return {"action": "updated"}
+
+    monkeypatch.setattr(scheduling, "apply_schedule", record)
+    monkeypatch.setattr(scheduling, "_scheduler_state_path",
+                        lambda config: tmp_path / "scheduler" / "scheduler-state.json")
+    return applied
+
+
+@pytest.fixture(autouse=True)
 def hermetic_provider_env(monkeypatch):
     """Keep the test suite hermetic.
 

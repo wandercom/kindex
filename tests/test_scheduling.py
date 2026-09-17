@@ -202,14 +202,63 @@ class TestRepackSchedule:
         result = repack_schedule(store, cfg)
         assert result["action"] == "skipped"
 
-    def test_unchanged_when_same_interval(self, store, config):
-        from kindex.scheduling import repack_schedule
+    def test_unchanged_when_same_interval(self, store, config, hermetic_scheduler):
+        from kindex.scheduling import maintenance_interval, repack_schedule
 
-        # Set meta to current expected interval (0 = no reminders)
-        store.set_meta("cron_interval", "0")
+        # No reminders anywhere: the maintenance cadence, applied once.
+        first = repack_schedule(store, config)
+        assert first["interval"] == maintenance_interval(config)
         result = repack_schedule(store, config)
         assert result["action"] == "unchanged"
-        assert result["interval"] == 0
+        assert hermetic_scheduler == [maintenance_interval(config)]
+        assert store.get_meta("cron_interval") == "0"
+
+    def test_no_pending_reminder_never_unloads(self, store, config, hermetic_scheduler):
+        from kindex.scheduling import repack_schedule
+
+        store.add_reminder("Soon", _future(1800))
+        assert repack_schedule(store, config)["interval"] == 300
+        rid = store.due_reminders(as_of=_future(3600))[0]["id"]
+        store.update_reminder(rid, status="fired")
+        result = repack_schedule(store, config)
+        assert result["interval"] == 3600
+        assert 0 not in hermetic_scheduler
+
+    def test_the_machine_interval_is_the_shortest_any_store_wants(
+            self, tmp_path, config, hermetic_scheduler):
+        from kindex.scheduling import repack_schedule
+
+        busy = Store(Config(data_dir=str(tmp_path / "busy")))
+        idle = Store(Config(data_dir=str(tmp_path / "idle")))
+        try:
+            busy.add_reminder("Soon", _future(1800))
+            assert repack_schedule(busy, config)["interval"] == 300
+            # The idle profile's pass neither unloads nor slows the job.
+            assert repack_schedule(idle, config)["action"] == "unchanged"
+            assert repack_schedule(busy, config)["action"] == "unchanged"
+            assert hermetic_scheduler == [300]
+        finally:
+            busy.close()
+            idle.close()
+
+    def test_a_store_that_stops_reporting_stops_holding_the_job_fast(
+            self, tmp_path, config, hermetic_scheduler, monkeypatch):
+        import time as _time
+
+        from kindex import scheduling
+
+        busy = Store(Config(data_dir=str(tmp_path / "busy")))
+        idle = Store(Config(data_dir=str(tmp_path / "idle")))
+        try:
+            busy.add_reminder("Soon", _future(1800))
+            scheduling.repack_schedule(busy, config)
+            later = _time.time() + scheduling._STORE_REPORT_TTL + 60
+            monkeypatch.setattr(_time, "time", lambda: later)
+            result = scheduling.repack_schedule(idle, config)
+            assert result["interval"] == scheduling.maintenance_interval(config)
+        finally:
+            busy.close()
+            idle.close()
 
     def test_tracks_interval_in_meta(self, store, config):
         from kindex.scheduling import repack_schedule

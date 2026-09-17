@@ -81,164 +81,157 @@ def install_claude_hooks(config: "Config", dry_run: bool = False, *,
     return install(config, mode=mode, dry_run=dry_run)
 
 
+# Every command line a Kindex Codex hook has been installed with. Ownership is
+# the exact command, never a word in it: a handler that merely mentions
+# "kindex" (or shares an entry with a Kindex handler) is someone else's.
+_CODEX_HOOK_ARGS = [
+    "prime --for hook", "prime --for hook --adapter codex", "prompt-check",
+    "attention-hook --adapter codex --event UserPromptSubmit",
+    "attention-hook --adapter codex --event UserPromptSubmit --deadline-ms 3500",
+    "attention-hook --adapter codex --event PostToolUse",
+    "attention-hook --adapter codex --event PostToolUse --deadline-ms 3500",
+]
+
+
+def _codex_owned_commands(kin_path: str) -> set[str]:
+    commands: set[str] = set()
+    for args in _CODEX_HOOK_ARGS:
+        for binary in dict.fromkeys(["kin", kin_path, "/opt/homebrew/bin/kin", "/usr/local/bin/kin"]):
+            commands.add(f"{binary} {args}")
+            commands.add(_kin_hook_command(binary, shlex.split(args)))
+    return commands
+
+
+def _codex_hook_manifest(kin_path: str) -> dict[str, dict]:
+    # SessionStart injects the Kindex prime block (auto-primed context + the
+    # "use kindex"/.kin directive) so Codex sessions start with the same
+    # context as Claude; prime --adapter codex emits that envelope.
+    return {
+        "SessionStart": {
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": _kin_hook_command(kin_path, ["prime", "--for", "hook", "--adapter", "codex"]),
+                "timeout": 5000,
+                "statusMessage": "Loading Kindex context",
+            }],
+        },
+        "UserPromptSubmit": {
+            "hooks": [{
+                "type": "command",
+                "command": _kin_hook_command(
+                    kin_path,
+                    ["attention-hook", "--adapter", "codex", "--event", "UserPromptSubmit",
+                     "--deadline-ms", "3500"],
+                ),
+                "timeout": 5,
+                "statusMessage": "Checking Kindex attention",
+            }],
+        },
+        "PostToolUse": {
+            "hooks": [{
+                "type": "command",
+                "command": _kin_hook_command(
+                    kin_path,
+                    ["attention-hook", "--adapter", "codex", "--event", "PostToolUse",
+                     "--deadline-ms", "3500"],
+                ),
+                "timeout": 5,
+                "statusMessage": "Checking Kindex attention",
+            }],
+        },
+    }
+
+
+def _handler_commands(entries: list) -> list[str]:
+    return [handler.get("command") for entry in entries if isinstance(entry, dict)
+            for handler in (entry.get("hooks") or []) if isinstance(handler, dict)]
+
+
+def _write_codex_hooks(hooks_path: Path, data: dict) -> None:
+    """Replace hooks.json, keeping the previous file beside it once per content."""
+    import hashlib
+    import shutil
+
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+    if hooks_path.exists():
+        digest = hashlib.sha256(hooks_path.read_bytes()).hexdigest()[:12]
+        backup = hooks_path.with_name(f"hooks.kindex-backup-{digest}.json")
+        if not backup.exists():
+            shutil.copy2(hooks_path, backup)
+    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+
+
 def install_codex_hooks(config: "Config", dry_run: bool = False) -> list[str]:
-    """Install Kindex prompt-time attention hook into ~/.codex/hooks.json."""
+    """Install Kindex hooks into ~/.codex/hooks.json.
+
+    Only handlers whose command is exactly one Kindex has installed are
+    replaced; other handlers, including ones sharing an entry with a Kindex
+    handler, are kept. The previous file is backed up before it is rewritten.
+    """
+    from .claude_install import remove_owned
+
     hooks_path = config.codex_path / "hooks.json"
     actions = []
-    if hooks_path.exists():
-        data = json.loads(hooks_path.read_text())
-    else:
-        data = {}
+    data = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
     hooks = data.setdefault("hooks", {})
     kin_path = _find_kin_path()
+    owned = _codex_owned_commands(kin_path)
+    changed = False
 
-    # SessionStart hook — inject the Kindex prime block (auto-primed context +
-    # the "use kindex"/.kin directive) so Codex sessions start with the same
-    # context as Claude. Codex SessionStart supports additionalContext injection
-    # (fires on startup/resume/clear); prime --adapter codex emits that envelope.
-    session_start = hooks.setdefault("SessionStart", [])
-    session_entry = {
-        "matcher": "*",
-        "hooks": [{
-            "type": "command",
-            "command": _kin_hook_command(kin_path, ["prime", "--for", "hook", "--adapter", "codex"]),
-            "timeout": 5000,
-            "statusMessage": "Loading Kindex context",
-        }]
-    }
-    existing_idx = next(
-        (i for i, h in enumerate(session_start)
-         if "kin prime" in str(h) or "kindex" in str(h).lower()),
-        None,
-    )
-    if existing_idx is None:
-        session_start.append(session_entry)
-        actions.append("Added Codex SessionStart hook: kin prime --for hook")
-    elif (
-        _hook_needs_profile(session_start[existing_idx])
-        or "--adapter" not in str(session_start[existing_idx])
-    ):
-        session_start[existing_idx] = session_entry
-        actions.append("Updated Codex SessionStart hook")
-    else:
-        actions.append("Codex SessionStart hook already installed")
+    for event, wanted in _codex_hook_manifest(kin_path).items():
+        entries = hooks.setdefault(event, [])
+        command = wanted["hooks"][0]["command"]
+        present = _handler_commands(entries)
+        stale = [c for c in present if c in owned and c != command]
+        if command in present and not stale:
+            actions.append(f"Codex {event} hook already installed")
+            continue
+        scoped = {"hooks": {event: entries}}
+        remove_owned(scoped, owned)
+        hooks[event] = scoped["hooks"][event] + [wanted]
+        changed = True
+        actions.append(f"{'Updated' if stale or command in present else 'Added'} "
+                       f"Codex {event} hook")
 
-    prompt_submit = hooks.setdefault("UserPromptSubmit", [])
-    entry = {
-        "hooks": [{
-            "type": "command",
-            "command": _kin_hook_command(
-                kin_path,
-                ["attention-hook", "--adapter", "codex", "--event", "UserPromptSubmit",
-                 "--deadline-ms", "3500"],
-            ),
-            "timeout": 5,
-            "statusMessage": "Checking Kindex attention",
-        }]
-    }
-
-    existing_idx = next(
-        (i for i, h in enumerate(prompt_submit)
-         if "prompt-check" in str(h) or "attention-hook" in str(h)),
-        None,
-    )
-    if existing_idx is None:
-        prompt_submit.append(entry)
-        actions.append("Added Codex UserPromptSubmit hook: kin attention-hook")
-    elif (
-        _hook_needs_profile(prompt_submit[existing_idx])
-        or "prompt-check" in str(prompt_submit[existing_idx])
-        or "--adapter" not in str(prompt_submit[existing_idx])
-        or _hook_needs_attention_deadline(prompt_submit[existing_idx])
-    ):
-        prompt_submit[existing_idx] = entry
-        actions.append("Updated Codex UserPromptSubmit hook to source ~/.profile")
-    else:
-        actions.append("Codex UserPromptSubmit hook already installed")
-
-    post_tool = hooks.setdefault("PostToolUse", [])
-    post_entry = {
-        "hooks": [{
-            "type": "command",
-            "command": _kin_hook_command(
-                kin_path,
-                ["attention-hook", "--adapter", "codex", "--event", "PostToolUse",
-                 "--deadline-ms", "3500"],
-            ),
-            "timeout": 5,
-            "statusMessage": "Checking Kindex attention",
-        }]
-    }
-    existing_idx = next((i for i, h in enumerate(post_tool) if "attention-hook" in str(h)), None)
-    if existing_idx is None:
-        post_tool.append(post_entry)
-        actions.append("Added Codex PostToolUse hook: kin attention-hook")
-    elif (
-        _hook_needs_profile(post_tool[existing_idx])
-        or _hook_needs_attention_deadline(post_tool[existing_idx])
-    ):
-        post_tool[existing_idx] = post_entry
-        actions.append("Updated Codex PostToolUse hook with internal deadline")
-    else:
-        actions.append("Codex PostToolUse attention hook already installed")
-
+    if not changed:
+        return actions
     if dry_run:
         actions.append(f"Would write {hooks_path}")
         return actions
-
-    hooks_path.parent.mkdir(parents=True, exist_ok=True)
-    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    _write_codex_hooks(hooks_path, data)
     actions.append(f"Wrote {hooks_path}")
     return actions
 
 
 def uninstall_codex_hooks(config: "Config", dry_run: bool = False) -> list[str]:
-    """Remove Kindex prompt-time attention hook from ~/.codex/hooks.json."""
+    """Remove Kindex hooks from ~/.codex/hooks.json, keeping every other handler."""
+    from .claude_install import remove_owned
+
     hooks_path = config.codex_path / "hooks.json"
     if not hooks_path.exists():
         return ["No Codex hooks.json found"]
 
     data = json.loads(hooks_path.read_text())
     hooks = data.get("hooks", {})
-    prompt_submit = hooks.get("UserPromptSubmit", [])
-    post_tool = hooks.get("PostToolUse", [])
-    session_start = hooks.get("SessionStart", [])
-    kept = [
-        h for h in prompt_submit
-        if "prompt-check" not in str(h) and "attention-hook" not in str(h)
-    ]
-    kept_post = [h for h in post_tool if "attention-hook" not in str(h)]
-    kept_session = [
-        h for h in session_start
-        if "kin prime" not in str(h) and "kindex" not in str(h).lower()
-    ]
-    if (
-        len(kept) == len(prompt_submit)
-        and len(kept_post) == len(post_tool)
-        and len(kept_session) == len(session_start)
-    ):
+    owned = _codex_owned_commands(_find_kin_path())
+    scoped = {"hooks": {event: hooks.get(event, [])
+                        for event in ("SessionStart", "UserPromptSubmit", "PostToolUse")
+                        if event in hooks}}
+    if not remove_owned(scoped, owned):
         return ["No Kindex Codex hooks found"]
-
     if dry_run:
         return [f"Would remove Codex Kindex hooks from {hooks_path}"]
-
-    if kept:
-        hooks["UserPromptSubmit"] = kept
-    else:
-        hooks.pop("UserPromptSubmit", None)
-    if kept_post:
-        hooks["PostToolUse"] = kept_post
-    else:
-        hooks.pop("PostToolUse", None)
-    if kept_session:
-        hooks["SessionStart"] = kept_session
-    else:
-        hooks.pop("SessionStart", None)
+    for event, entries in scoped["hooks"].items():
+        if entries:
+            hooks[event] = entries
+        else:
+            hooks.pop(event, None)
     if hooks:
         data["hooks"] = hooks
     else:
         data.pop("hooks", None)
-    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    _write_codex_hooks(hooks_path, data)
     return [f"Removed Codex Kindex hooks from {hooks_path}"]
 
 

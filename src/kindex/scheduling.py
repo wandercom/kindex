@@ -52,8 +52,81 @@ def compute_optimal_interval(store: "Store", config: "Config") -> int:
     return config.reminders.min_interval
 
 
+# A store that has not reported within this window no longer holds the
+# machine scheduler fast (a removed profile, a deleted project store).
+_STORE_REPORT_TTL = 24 * 3600
+# With no reminder pending anywhere, maintenance (ingest, embedding, decay,
+# dream, watch expiry) still runs on this cadence; the job is never unloaded.
+_MAINTENANCE_INTERVAL = 3600
+
+
+def maintenance_interval(config: "Config") -> int:
+    return max(config.reminders.min_interval, _MAINTENANCE_INTERVAL)
+
+
+def _scheduler_state_path(config: "Config") -> Path:
+    return Path(config.scheduler_log_path) / "scheduler-state.json"
+
+
+class _StateLock:
+    def __init__(self, path: Path):
+        self.path = path.with_name(path.name + ".lock")
+        self.fd = None
+
+    def __enter__(self):
+        import os
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        import os
+        os.close(self.fd)  # closing releases the lock
+        return False
+
+
+def _read_state(path: Path) -> dict:
+    import json
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _write_state(path: Path, state: dict) -> None:
+    import json
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(state, handle, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def repack_schedule(store: "Store", config: "Config") -> dict:
-    """Compute optimal interval and apply it if changed. Returns status dict."""
+    """Record this store's wanted interval and apply the machine's.
+
+    The scheduler is one machine-wide job serving every profile and project
+    store, so the interval applied is the shortest any live store wants, kept
+    in a machine-level record. Each pass used to apply its own store's
+    interval (and compare it with that store's own last value), so a profile
+    with no pending reminder unloaded the job every other profile relied on,
+    and nothing reloaded it. With no reminder pending anywhere the job keeps
+    a maintenance cadence instead of being unloaded.
+    """
     if not config.reminders.enabled:
         return {"action": "skipped", "reason": "reminders disabled"}
 
@@ -64,19 +137,33 @@ def repack_schedule(store: "Store", config: "Config") -> dict:
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
 
-    interval = compute_optimal_interval(store, config)
+    import time
 
-    # Check current interval from meta table
-    current = store.get_meta("cron_interval")
-    current_int = int(current) if current else None
+    wanted = compute_optimal_interval(store, config)
+    if store.get_meta("cron_interval") != str(wanted):
+        store.set_meta("cron_interval", str(wanted))  # this store's own want
 
-    if current_int == interval:
-        return {"action": "unchanged", "interval": interval}
-
-    result = apply_schedule(interval, config)
-    store.set_meta("cron_interval", str(interval))
+    path = _scheduler_state_path(config)
+    with _StateLock(path):
+        state = _read_state(path)
+        now = time.time()
+        stores = {
+            key: entry for key, entry in (state.get("stores") or {}).items()
+            if isinstance(entry, dict) and now - float(entry.get("at") or 0) < _STORE_REPORT_TTL
+        }
+        stores[str(store.db_path)] = {"interval": wanted, "at": now}
+        live = [int(entry.get("interval") or 0) for entry in stores.values()]
+        live = [interval for interval in live if interval > 0]
+        interval = min(live) if live else maintenance_interval(config)
+        previous = state.get("applied")
+        if previous == interval:
+            _write_state(path, {"stores": stores, "applied": previous})
+            return {"action": "unchanged", "interval": interval}
+        result = apply_schedule(interval, config)
+        applied = interval if result.get("action") in ("updated", "unchanged") else previous
+        _write_state(path, {"stores": stores, "applied": applied})
     result["interval"] = interval
-    result["previous"] = current_int
+    result["previous"] = previous
     return result
 
 
