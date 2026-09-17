@@ -304,13 +304,16 @@ def prime_context(
 
             collabs = redact(active_collabs_for_agent(store, resolve_agent_id(config)))
             if collabs:
+                from .coordination import render_field
                 lines.append("### Active collabs")
                 for c in collabs[:3]:
-                    name = c.get("name", "")
+                    name = render_field(c.get("name", ""))
+                    # The id is unambiguous; a name can be reused later.
+                    ref = render_field(c.get("node_id") or c.get("name", ""))
                     unread = int(c.get("unread_count", 0) or 0)
                     injects = c.get("inject_messages") or []
                     locked = c.get("locked_resources") or []
-                    focus = (c.get("focus") or "")[:80]
+                    focus = render_field(c.get("focus") or "")
 
                     if display == "minimal":
                         parts = [f"{unread} unread"]
@@ -319,7 +322,7 @@ def prime_context(
                         if locked:
                             parts.append(f"{len(locked)} locked")
                         lines.append(
-                            f"- {name}: {', '.join(parts)} — coord_read {name}"
+                            f"- {name}: {', '.join(parts)} — coord_read {ref}"
                         )
                         continue
 
@@ -328,16 +331,16 @@ def prime_context(
                         head += f" (focus: {focus})"
                     lines.append(head)
                     for m in injects[:3]:
-                        text = " ".join(str(m.get("text", "")).split())[:200]
-                        set_by = (m.get("set_by") or "").strip()
+                        text = render_field(m.get("text", ""), 200)
+                        set_by = render_field(m.get("set_by") or "")
                         who = f" (from {set_by})" if set_by else ""
                         lines.append(f"  COLLAB MSG: {text}{who}")
                     for r in locked[:3]:
                         lines.append(
-                            f"  Locked: {r.get('title') or r.get('node_id', '')} "
-                            f"(held by {r.get('holder', '')})"
+                            f"  Locked: {render_field(r.get('title') or r.get('node_id', ''))} "
+                            f"(held by {render_field(r.get('holder', ''))})"
                         )
-                    lines.append(f"  Check the collab: coord_read {name}")
+                    lines.append(f"  Check the collab: coord_read {ref}")
                 if len(collabs) > 3:
                     lines.append(f"- +{len(collabs) - 3} more")
                 lines.append("")

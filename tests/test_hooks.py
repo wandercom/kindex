@@ -2,6 +2,7 @@
 
 import datetime
 import os
+import re
 import sys
 
 import pytest
@@ -394,7 +395,7 @@ class TestPrimeCollabs:
         assert "1 unread" in output
         assert "COLLAB MSG: Use the staging DB only (from bob@test)" in output
         assert "Locked: Deploy Plan (held by bob@test)" in output
-        assert "Check the collab: coord_read ship-it" in output
+        assert re.search(r"Check the collab: coord_read [0-9a-f]{6,}", output)
 
     def test_check_line_unconditional_even_when_quiet_collab(self, store, collab_config):
         """A member collab with no unread/injects still gets the check line."""
@@ -403,7 +404,7 @@ class TestPrimeCollabs:
         _make_collab(store, name="idle-room")
         output = prime_context(store, topic="anything", config=collab_config)
         assert "### Active collabs" in output
-        assert "Check the collab: coord_read idle-room" in output
+        assert re.search(r"Check the collab: coord_read [0-9a-f]{6,}", output)
 
     def test_collab_section_absent_for_non_member(self, store, collab_config):
         from kindex.hooks import prime_context
@@ -442,7 +443,7 @@ class TestPrimeCollabs:
         assert "### Active collabs" in output
         line = next(l for l in output.splitlines() if l.startswith("- ship-it:"))
         assert "1 unread" in line
-        assert "coord_read ship-it" in line
+        assert re.search(r"coord_read [0-9a-f]{6,}", line)
         # Minimal mode compresses everything onto the one line
         assert "COLLAB MSG" not in output
         assert "Check the collab:" not in output
@@ -498,7 +499,7 @@ class TestPromptCheckCollabLines:
         assert "(to you)" in joined
         assert "for carol only" not in joined  # targeted at someone else
         assert "COLLAB MSG: standing instruction (from bob@test)" in joined
-        assert "Check the collab: coord_read ship-it" in joined
+        assert re.search(r"Check the collab: coord_read [0-9a-f]{6,}", joined)
 
     def test_cooldown_suppresses_then_expires(self, store, collab_config):
         from kindex.cli import _collab_prompt_lines
@@ -614,7 +615,7 @@ class TestPromptCheckCollabCLI:
         assert "COLLAB UPDATES" in r.stdout
         assert "broadcast note" in r.stdout
         assert "COLLAB MSG: standing instruction" in r.stdout
-        assert "coord_read ship-it" in r.stdout
+        assert re.search(r"coord_read [0-9a-f]{6,}", r.stdout)
 
     def test_prompt_check_codex_envelope_carries_collab_block(self, tmp_path):
         import json
@@ -628,7 +629,7 @@ class TestPromptCheckCollabCLI:
         assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
         assert "COLLAB UPDATES" in ctx
         assert "broadcast note" in ctx
-        assert "coord_read ship-it" in ctx
+        assert re.search(r"coord_read [0-9a-f]{6,}", ctx)
 
     def test_prompt_check_antigravity_quiet_uses_antigravity_envelope(self, tmp_path):
         import json
@@ -672,4 +673,4 @@ class TestPromptCheckCollabCLI:
         ctx = payload["hookSpecificOutput"]["additionalContext"]
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert "### Active collabs" in ctx
-        assert "Check the collab: coord_read ship-it" in ctx
+        assert re.search(r"Check the collab: coord_read [0-9a-f]{6,}", ctx)
