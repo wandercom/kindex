@@ -21,6 +21,9 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - `kin setup-cron` keeps the interval the adaptive repack last applied, as a
   crontab re-install already did, instead of writing `check_interval` over
   it.
+- A launchd plist already at the wanted interval is reported unchanged and
+  the interval recorded; it was reported as an unrecognized plist, so the
+  interval was never recorded.
 
 ## [0.43.1] - 2026-09-17
 

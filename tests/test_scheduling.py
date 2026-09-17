@@ -360,6 +360,28 @@ def test_a_repack_inside_the_job_reloads_it_only_once_it_is_idle(tmp_path, monke
     ]
 
 
+def test_a_plist_already_at_the_interval_is_unchanged_not_unrecognized(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from kindex import scheduling
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    spawned = []
+    monkeypatch.setattr(
+        scheduling.subprocess, "Popen", lambda argv, **k: spawned.append(argv)
+    )
+    config = Config(data_dir=str(tmp_path / "store"))
+    plist = _cron_plist(tmp_path, 300)
+
+    assert scheduling._apply_launchd(300, config) == {"action": "unchanged"}
+    assert spawned == [], "nothing to reload"
+
+    plist.write_text("<plist><dict><key>Label</key></dict></plist>\n")
+    assert scheduling._apply_launchd(300, config) == {
+        "action": "skipped", "reason": "plist format unrecognized",
+    }
+
+
 def _fake_launchctl(tmp_path, busy_lists=1, on_first_load=""):
     """A launchctl that logs each verb, reports the job running for the first
     ``busy_lists`` lists, and runs ``on_first_load`` on the first load."""
