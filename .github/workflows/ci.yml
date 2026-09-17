@@ -23,4 +23,4 @@ jobs:
         with:
           node-version: "24"
       - run: pip install -e ".[dev,mcp]"
-      - run: pytest
+      - run: pytest -n auto --dist loadfile

@@ -28,3 +28,14 @@ The next prepared package version is `0.36.2`. Keep pyproject, runtime version,
 both Claude plugin manifests, MCP registry metadata, server card, public badges,
 and changelog aligned. The failed `v0.36.1` tag contains `0.36.0` metadata and
 must not be reused or moved.
+
+## Package version rendering from release tags
+
+For PyPI artifact builds, the pushed release tag is the source of truth for the
+package version. `Publish to PyPI` accepts numeric three-part tags in the form
+`vX.Y.Z`; before `python -m build`, it runs
+`scripts/render-release-version.py "$GITHUB_REF_NAME" pyproject.toml`. The script
+strips the leading `v` and rewrites only the checked-out `pyproject.toml` used by
+that build, so `v0.1.2` produces `kindex-0.1.2-*` artifacts even if the committed
+development version is older. Do not retry an already-published tag: publish a
+new patch tag instead.
