@@ -3466,49 +3466,70 @@ class Store:
         safe_phrase = phrase.replace('"', '""')
         token_expr = " OR ".join(tokens)
         fts_query = f'"{safe_phrase}" OR {token_expr}'
-        admitted = []
-        offset = 0
-        while len(admitted) < limit:
-            try:
-                rows = self.conn.execute(
-                    f"""SELECT n.*, rank FROM nodes_fts
-                       JOIN nodes n ON n.id = nodes_fts.id
-                       WHERE nodes_fts MATCH ? AND {fts_fence}
-                       ORDER BY CASE n.standing WHEN 'authoritative' THEN 6
+        standing_order = """CASE {col} WHEN 'authoritative' THEN 6
                            WHEN 'ratified' THEN 5 WHEN 'enforced' THEN 4
                            WHEN 'exemplary' THEN 3 WHEN 'prevalent' THEN 2
-                           WHEN 'present' THEN 1 ELSE 0 END DESC, rank LIMIT ? OFFSET ?""",
-                    (fts_query, limit, offset),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                # Fallback: simple LIKE search if FTS query syntax fails.
-                # This is a degraded path — log it so a malformed fence or
-                # broken FTS index announces itself rather than silently
-                # returning plausible wrong results (R5.1/I4).
-                import sys
-                print(f"Warning: FTS search degraded to LIKE fallback for "
-                      f"query {fts_query!r} (fence: {fts_fence})",
-                      file=sys.stderr)
-                rows = self.conn.execute(
-                    f"""SELECT *, 0 as rank FROM nodes
+                           WHEN 'present' THEN 1 ELSE 0 END DESC"""
+        fts_sql = (f"""FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.id
+                       WHERE nodes_fts MATCH ? AND {fts_fence}
+                       ORDER BY {standing_order.format(col='n.standing')}, rank""")
+        like_sql = (f"""FROM nodes
                        WHERE (title LIKE ? OR content LIKE ?)
                          AND {like_fence}
-                       ORDER BY CASE standing WHEN 'authoritative' THEN 6
-                           WHEN 'ratified' THEN 5 WHEN 'enforced' THEN 4
-                           WHEN 'exemplary' THEN 3 WHEN 'prevalent' THEN 2
-                           WHEN 'present' THEN 1 ELSE 0 END DESC, weight DESC LIMIT ? OFFSET ?""",
-                    (f"%{phrase}%", f"%{phrase}%", limit, offset),
-                ).fetchall()
-            for row in rows:
+                       ORDER BY {standing_order.format(col='standing')}, weight DESC""")
+        like_params = (f"%{phrase}%", f"%{phrase}%")
+
+        def degraded() -> None:
+            # Fallback: simple LIKE search if FTS query syntax fails.
+            # This is a degraded path — log it so a malformed fence or
+            # broken FTS index announces itself rather than silently
+            # returning plausible wrong results (R5.1/I4).
+            import sys
+            print(f"Warning: FTS search degraded to LIKE fallback for "
+                  f"query {fts_query!r} (fence: {fts_fence})",
+                  file=sys.stderr)
+
+        if candidate_filter is None:
+            try:
+                rows = self.conn.execute(
+                    f"SELECT n.*, rank {fts_sql} LIMIT ?", (fts_query, limit)).fetchall()
+            except sqlite3.OperationalError:
+                degraded()
+                rows = self.conn.execute(
+                    f"SELECT *, 0 as rank {like_sql} LIMIT ?", (*like_params, limit)).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+        # With a filter, the matches are ranked once and read in pages until
+        # enough pass. Paging with OFFSET re-ranked every match per page:
+        # quadratic when most matches are refused.
+        try:
+            ranked = self.conn.execute(
+                f"SELECT n.id, rank {fts_sql}", (fts_query,)).fetchall()
+        except sqlite3.OperationalError:
+            degraded()
+            ranked = self.conn.execute(
+                f"SELECT id, 0 as rank {like_sql}", like_params).fetchall()
+        admitted: list[dict] = []
+        page = max(limit, 50)
+        for first in range(0, len(ranked), page):
+            chunk = ranked[first:first + page]
+            placeholders = ",".join("?" for _ in chunk)
+            by_id = {
+                row["id"]: row for row in self.conn.execute(
+                    f"SELECT * FROM nodes WHERE id IN ({placeholders})",
+                    [node_id for node_id, _ in chunk])
+            }
+            for node_id, rank in chunk:
+                row = by_id.get(node_id)
+                if row is None:
+                    continue
                 node = self._row_to_dict(row)
-                if candidate_filter is not None and not candidate_filter(node):
+                node["rank"] = rank
+                if not candidate_filter(node):
                     continue
                 admitted.append(node)
                 if len(admitted) >= limit:
-                    break
-            if len(rows) < limit or candidate_filter is None:
-                break
-            offset += len(rows)
+                    return admitted
         return admitted
 
     # ── Weight decay ───────────────────────────────────────────────────

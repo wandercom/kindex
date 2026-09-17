@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 
 import pytest
 
@@ -131,3 +132,48 @@ def test_a_project_nothing_names_has_no_detected_domains(store, tmp_path):
     project.mkdir(parents=True)
     store.add_node("preference", "users like code", node_id="pref", domains=["ui"])
     assert detect_domain_from_path(store, str(project)) == []
+
+
+def test_longer_domain_names_do_not_hide_the_projects_own(store, tmp_path):
+    project = tmp_path / "work" / "myproj"
+    project.mkdir(parents=True)
+    for n in range(25):
+        store.add_node(f"tools note {n}", "helpers", node_id=f"t{n}",
+                       domains=["myproj tools"])
+    # A longer domain list ranks below every shorter "myproj tools" match.
+    domains = ["myproj", "rust", "api", "backend", "billing", "queues", "storage", "web"]
+    store.add_node("myproj architecture", "layers", node_id="p", domains=domains)
+    assert detect_domain_from_path(store, str(project)) == sorted(domains)
+
+
+def test_a_node_withheld_at_two_stages_is_counted_once(store):
+    store.add_node("deploy fact", "deploy fact verified", node_id="v")
+    store.add_node("deploy draft", "deploy draft unverified", node_id="u")
+    store.add_edge("v", "u", edge_type="relates_to", weight=0.9)
+    verify(store, "v")
+    stats: dict = {}
+    hybrid_search(store, "deploy", top_k=5, use_vectors=False,
+                  trusted_only=True, fence_stats=stats)
+    assert stats["trusted_omissions"] == {"unverified": 1}, stats["trusted_omissions"]
+
+
+def test_trusted_recall_scales_with_the_matches_not_their_square(store):
+    rows = [(f"u{n}", f"deploy note {n}", "deploy pipeline") for n in range(10000)]
+    for node_id, title, content in rows[:1]:
+        store.add_node(title, content, node_id=node_id)
+    template = store.conn.execute("SELECT * FROM nodes WHERE id = 'u0'").fetchone()
+    columns = template.keys()
+    values = []
+    for node_id, title, content in rows[1:]:
+        row = dict(template)
+        row.update(id=node_id, title=title, content=content)
+        values.append([row[c] for c in columns])
+    store.conn.executemany(
+        f"INSERT INTO nodes ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+        values)
+    store.conn.commit()
+    started = time.monotonic()
+    results = hybrid_search(store, "deploy", top_k=5, use_vectors=False,
+                            expand_graph=False, trusted_only=True)
+    assert results == []
+    assert time.monotonic() - started < 5

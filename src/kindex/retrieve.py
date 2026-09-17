@@ -364,8 +364,12 @@ def hybrid_search(
     admission_today = admission_time.date().isoformat() if admission_time else None
 
     # Withheld by trust, whether inside the search window or after it, so the
-    # trusted-only note says what was left out.
-    trust_omissions: Counter[str] = Counter()
+    # trusted-only note says what was left out: each node once, however many
+    # stages (text match, graph expansion, vectors) surfaced it.
+    trust_omitted: dict[str, str] = {}
+
+    def omit(node, reason: str) -> None:
+        trust_omitted.setdefault(str(node.get("id")), reason)
 
     def candidate_eligible(node):
         extra = node.get("extra")
@@ -377,12 +381,12 @@ def hybrid_search(
             return True
         if (trusted_only or not include_expired) and node_expired(node, today=admission_today):
             if trusted_only:
-                trust_omissions["invalidated"] += 1
+                omit(node, "invalidated")
             return False
         if trusted_only:
             decision = node_trust_decision(store, node, at=admission_time)
             if not decision.eligible:
-                trust_omissions[decision.reason] += 1
+                omit(node, decision.reason)
                 return False
         return True
 
@@ -590,7 +594,7 @@ def hybrid_search(
                 node, today=trusted_today if trusted_only else None
             ):
                 if trusted_only:
-                    trust_omissions["invalidated"] += 1
+                    omit(node, "invalidated")
                 continue
             if not include_archived and node.get("status") == "archived":
                 fenced_nodes[node["id"]] = node
@@ -600,7 +604,7 @@ def hybrid_search(
 
                 decision = node_trust_decision(store, node, at=trusted_at)
                 if not decision.eligible:
-                    trust_omissions[decision.reason] += 1
+                    omit(node, decision.reason)
                     continue
             if node["id"] in seen:
                 continue
@@ -662,7 +666,7 @@ def hybrid_search(
         # because candidates were filtered/expired/fenced).
         fence_stats["candidate_count"] = len(candidate_ids)
         if trusted_only:
-            fence_stats["trusted_omissions"] = dict(sorted(trust_omissions.items()))
+            fence_stats["trusted_omissions"] = dict(sorted(Counter(trust_omitted.values()).items()))
 
     return results
 
@@ -1398,11 +1402,14 @@ def detect_domain_from_path(store: Store, cwd: str) -> list[str]:
         if not tokens:
             continue
         wanted = " ".join(tokens)
+        # The phrase also matches longer names ("myproj tools" for "myproj"),
+        # so the exact-name check below decides, over every match: a window
+        # taken first could be filled by the longer names alone.
         try:
             rows = store.conn.execute(
                 "SELECT n.domains FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.id "
                 "WHERE nodes_fts MATCH ? AND n.status NOT IN ('archived', 'superseded') "
-                "ORDER BY rank LIMIT 20",
+                "ORDER BY rank",
                 (f'domains : "{wanted}"',),
             ).fetchall()
         except sqlite3.OperationalError:
