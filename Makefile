@@ -52,12 +52,15 @@ verify-dist-install: build-dist ## Verify built wheel installs with MCP extra
 	$(PYTHON) -m pip install --quiet --no-cache-dir --target "$$TMP_DIR" "$(DIST_WHEEL)[mcp]"; \
 	PYTHONPATH="$$TMP_DIR" $(PYTHON) -S -c "import kindex, kindex.mcp_server; print('verified', kindex.__version__)"
 
-validate-mcp-registry: ## Validate server.json with mcp-publisher if installed
+validate-mcp-registry: ## Validate server.json with mcp-publisher (ALLOW_SKIP_REGISTRY=1 to skip when absent)
 	@if command -v mcp-publisher >/dev/null 2>&1; then \
 		mcp-publisher validate server.json; \
+	elif [ "$(ALLOW_SKIP_REGISTRY)" = "1" ]; then \
+		echo "SKIPPED MCP Registry validation (ALLOW_SKIP_REGISTRY=1): mcp-publisher is not installed"; \
 	else \
-		echo "Skipping MCP Registry validation: mcp-publisher is not installed"; \
-		echo "Install from https://github.com/modelcontextprotocol/registry/releases"; \
+		echo "MCP Registry validation did not run: mcp-publisher is not installed" >&2; \
+		echo "Install from https://github.com/modelcontextprotocol/registry/releases, or set ALLOW_SKIP_REGISTRY=1" >&2; \
+		exit 1; \
 	fi
 
 distribute: check verify-dist-install validate-mcp-registry ## Release preflight: tests, build, install, registry metadata validation

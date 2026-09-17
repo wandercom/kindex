@@ -20,6 +20,14 @@ from .privacy import safe_error
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         from .privacy import redact_text
+        words = self.prog.split()
+        command = words[1] if len(words) > 1 else (sys.argv[1] if len(sys.argv) > 1 else "")
+        if command in _HOOK_SURFACE_COMMANDS:
+            # argparse exits 2, which a host reads as "block this action";
+            # a malformed hook command is an error to show, not a veto.
+            self.print_usage(sys.stderr)
+            print(f"{self.prog}: error: {redact_text(message)}", file=sys.stderr)
+            raise SystemExit(1)
         super().error(redact_text(message))
 
 
@@ -2771,13 +2779,9 @@ def cmd_changelog(args):
         since_dt = datetime.datetime.now() - datetime.timedelta(days=days)
         since_iso = since_dt.isoformat(timespec="seconds")
 
-    # Fetch activity, optionally filtered by actor
-    if args.actor:
-        entries = store.activity_by_actor(args.actor)
-        # Further filter by timestamp
-        entries = [e for e in entries if (e.get("timestamp") or "") >= since_iso]
-    else:
-        entries = store.activity_since(since_iso)
+    # The store compares the bound in the log's own UTC form; a raw string
+    # comparison here dropped the boundary day and capped the actor's rows at 50.
+    entries = store.activity_since(since_iso, actor=args.actor or None)
 
     if not entries:
         if args.json:
@@ -4865,7 +4869,9 @@ def cmd_remind(args):
             print(f"Reminder {rid} has no action defined.", file=sys.stderr)
             store.close()
             return
+        from .reminders import settle_after_manual_action
         result = execute_action(store, r, cfg, manual=True)
+        settle_after_manual_action(store, r, result)
         if getattr(args, "json", False):
             print(_dumps(result))
         else:
@@ -4960,11 +4966,15 @@ def cmd_stop_guard(args):
     store.close()
 
     if pending:
-        titles = [r["title"] for r in pending[:5]]
+        from .retrieve import graph_text
+        titles = [f"{graph_text(r['title'], 120, single_line=True)} ({r['id']})"
+                  for r in pending[:5]]
+        # Reviewing is the ask; the text never tells an agent to run an action.
         msg = (
             f"BLOCKED: {len(pending)} actionable reminder(s) pending. "
             f"Handle before exiting: {', '.join(titles)}. "
-            f"Use `kin remind exec <id>` to run or `kin remind done <id>` to dismiss."
+            f"Review with `kin remind show --reminder-id <id>`; dismiss with "
+            f"`kin remind done --reminder-id <id>`."
         )
         result = {"decision": "block", "message": msg}
         print(_json.dumps(result))
@@ -7919,6 +7929,9 @@ def build_parser() -> argparse.ArgumentParser:
 _HOOK_SURFACE_COMMANDS = {
     "prime", "compact-hook", "prompt-check", "stop-guard",
     "attention-hook", "agent-prime-hook", "agent-stop-hook", "cron",
+    # Installed as a hook for Antigravity, Cursor and OpenCode: a bad
+    # payload degrades like any hook, never a traceback with exit 1.
+    "supervisor-hook",
 }
 
 
@@ -7980,6 +7993,7 @@ def _degraded_hook_output(args, exc: BaseException) -> str:
     event = {
         "attention-hook": getattr(args, "event", None) or "PreToolUse",
         "agent-stop-hook": "Stop",
+        "supervisor-hook": "PreInvocation",
     }.get(command)
     if event is None:
         return ""

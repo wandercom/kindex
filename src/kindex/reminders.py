@@ -441,6 +441,15 @@ def complete_reminder(store: Store, reminder_id: str) -> None:
     _try_repack(store)
 
 
+def settle_after_manual_action(store: Store, reminder: dict, result: dict) -> None:
+    """A one-shot reminder whose action a person ran to completion is done;
+    it stayed due and fired again on every sweep. A recurring one is left to
+    its schedule, which the sweep advances."""
+    if result.get("status") == "completed" and reminder.get("reminder_type") != "recurring":
+        store.settle_reminder(reminder["id"], "completed")
+        _try_repack(store)
+
+
 def cancel_reminder(store: Store, reminder_id: str) -> None:
     """Cancel a reminder."""
     r = store.get_reminder(reminder_id)

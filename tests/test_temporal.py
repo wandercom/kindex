@@ -143,6 +143,26 @@ class TestActivityByActor:
         assert len(activity) <= 3
 
 
+class TestActivityBound:
+    def test_a_local_bound_keeps_the_boundary_day_and_filters_by_actor(self, store):
+        """A local, T-separated bound is compared in the log's UTC form."""
+        store.conn  # create the schema
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        stamp = (utc_now - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        store.conn.executemany(
+            "INSERT INTO activity_log (timestamp, action, target_id, actor) VALUES (?, ?, ?, ?)",
+            [(stamp, "add_node", "n1", "alice"), (stamp, "add_node", "n2", "bob")],
+        )
+        store.conn.commit()
+        bound = (datetime.datetime.now() - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
+
+        ids = {row["target_id"] for row in store.activity_since(bound)}
+        assert {"n1", "n2"} <= ids
+        assert [row["target_id"] for row in store.activity_since(bound, actor="alice")] == ["n1"]
+        later = (datetime.datetime.now() + datetime.timedelta(minutes=5)).isoformat(timespec="seconds")
+        assert store.activity_since(later, actor="alice") == []
+
+
 class TestChangelogCLI:
     def test_changelog_cli(self, tmp_path):
         """Test changelog command via subprocess."""
@@ -195,8 +215,9 @@ class TestChangelogCLI:
         run("init", data_dir=d)
         run("add", "Actor Filtered Concept", data_dir=d)
 
-        r = run("changelog", "--days", "1", "--actor", "nonexistent", data_dir=d)
+        r = run("changelog", "--days", "1", "--actor", "nonexistent", "--json", data_dir=d)
         assert r.returncode == 0
+        assert json.loads(r.stdout)["total"] == 0
 
 
 class TestMetaTable:

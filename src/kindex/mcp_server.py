@@ -325,6 +325,14 @@ def _mcp_client() -> str | None:
     return normalize_adapter(raw) if raw else None
 
 
+def _mcp_project_path() -> str:
+    """The project this server speaks for: KIN_PROJECT_PATH, then KIN_PROJECT,
+    then the process directory. Tools derived it four ways (cwd, $PWD, the
+    health scope's variable, an explicit argument)."""
+    return (os.environ.get("KIN_PROJECT_PATH") or os.environ.get("KIN_PROJECT")
+            or os.getcwd())
+
+
 def _scope_results(results: list[dict], client: str | None) -> list[dict]:
     """Drop search hits scoped to a different client, mirroring prime's retrieval
     filter so context tools scope both search hits and operational nodes."""
@@ -513,6 +521,9 @@ def search(query: str, top_k: int = 10, tags: str = "",
         results = [r for r in results if _tag_match(r)]
         results = results[:top_k]
         fenced_nodes = [r for r in fenced_nodes if _tag_match(r)]
+    # Scoped like context, ask and prime: a node scoped to another client is
+    # not this client's hit.
+    results = _scope_results(results, _mcp_client())
 
     # The fence note is derived in a single place both surfaces call (R3.1).
     from .retrieve import build_fence_note
@@ -2020,11 +2031,10 @@ def tag_start(name: str, description: str = "", focus: str = "",
     """
     store, _ = _get_store()
     from .sessions import start_tag
-    import os
     remaining_list = [r.strip() for r in remaining.split(",") if r.strip()] if remaining else []
     try:
         nid = start_tag(store, name, description=description, focus=focus,
-                        remaining=remaining_list, project_path=os.getcwd())
+                        remaining=remaining_list, project_path=_mcp_project_path())
         return f"Started session tag: {name} ({nid})"
     except ValueError as e:
         return f"Error: {e}"
@@ -2093,11 +2103,10 @@ def tag_update(name: str = "", focus: str = "", description: str = "",
     store, config = _get_store()
     from .sessions import (update_tag, add_segment, pause_tag,
                            complete_tag, get_active_tag, get_tag)
-    import os
-    project_path = os.getcwd()
+    project_path = _mcp_project_path()
 
     if not name:
-        active = get_active_tag(store, project_path=os.getcwd())
+        active = get_active_tag(store, project_path=_mcp_project_path())
         if not active:
             return "No active session tag found. Start one with tag_start."
         name = (active.get("extra") or {}).get("tag", active["title"])
@@ -2153,9 +2162,8 @@ def tag_resume(name: str = "", tokens: int = 1500) -> str:
     """
     store, _ = _get_store()
     from .sessions import format_resume_context, list_tags, resume_tag
-    import os
 
-    project_path = os.getcwd()
+    project_path = _mcp_project_path()
 
     if not name:
         tags = list_tags(
@@ -2722,7 +2730,6 @@ def watch_add(text: str, owner: str = "", expires: str = "",
         link_to: Comma-separated node IDs/titles to link this watch to.
     """
     store, _ = _get_store()
-    import os
 
     extra = {"watch_status": "active"}
     if owner:
@@ -2731,7 +2738,7 @@ def watch_add(text: str, owner: str = "", expires: str = "",
         extra["expires"] = expires
 
     domains = []
-    project_path = os.environ.get("PWD", "")
+    project_path = _mcp_project_path()
     if project_path:
         extra["project_path"] = project_path
 
@@ -2965,7 +2972,14 @@ def remind_exec(id: str) -> str:
         return f"Error: Reminder not found: {id}"
     if not has_action(r):
         return f"Error: Reminder {id} has no action defined."
-    result = execute_action(store, r, config, manual=True)
+    from .reminders import settle_after_manual_action
+    # Not a person's invocation: a paused (stale) or exhausted action stays
+    # parked; only `kin remind exec` from a shell resumes it.
+    result = execute_action(store, r, config, manual=False)
+    settle_after_manual_action(store, r, result)
+    if result.get("status") == "skipped":
+        return (f"Action skipped: {result.get('output') or result.get('reason', '')} "
+                f"(resume a parked action from a shell: kin remind exec --reminder-id {id})")
     return f"Action {result['status']}: {result.get('output', '')[:500]}"
 
 

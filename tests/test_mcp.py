@@ -822,3 +822,28 @@ def test_resources_answer_memory_unavailable_and_status_shows_drift(patch_store,
 
     monkeypatch.setattr(mcp_mod, "_get_store", broken)
     assert mcp_mod.resource_orphans().startswith("Error: memory unavailable")
+
+
+def test_search_is_scoped_to_the_client(patch_store, monkeypatch):
+    import kindex.mcp_server as mcp_mod
+
+    store, _ = patch_store
+    store.add_node(title="Codex-only rollout note", content="rollout steps",
+                   node_id="codex-note", tags=["client:codex"])
+    monkeypatch.setenv("KIN_CLIENT", "claude")
+    assert "Codex-only rollout note" not in mcp_mod.search("rollout note")
+    monkeypatch.setenv("KIN_CLIENT", "codex")
+    assert "Codex-only rollout note" in mcp_mod.search("rollout note")
+
+
+def test_the_project_identity_prefers_the_declared_path(monkeypatch, tmp_path):
+    import kindex.mcp_server as mcp_mod
+
+    monkeypatch.delenv("KIN_PROJECT_PATH", raising=False)
+    monkeypatch.delenv("KIN_PROJECT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert mcp_mod._mcp_project_path() == str(tmp_path) or mcp_mod._mcp_project_path().endswith(tmp_path.name)
+    monkeypatch.setenv("KIN_PROJECT", "/srv/project")
+    assert mcp_mod._mcp_project_path() == "/srv/project"
+    monkeypatch.setenv("KIN_PROJECT_PATH", "/srv/declared")
+    assert mcp_mod._mcp_project_path() == "/srv/declared"

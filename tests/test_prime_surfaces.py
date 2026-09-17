@@ -438,3 +438,52 @@ def test_a_versionless_meta_store_is_migrated_not_stamped(tmp_path):
         assert graph.get_meta("schema_version") == str(SCHEMA_VERSION)
     finally:
         graph.close()
+
+
+def test_a_pair_is_suggested_once_and_old_activity_is_pruned(store):
+    first = store.add_suggestion("Alpha", "Beta", reason="r1", source="session-end-hook")
+    again = store.add_suggestion("Beta", "Alpha", reason="r2", source="mcp-learn")
+    assert again == first
+    assert store.conn.execute("SELECT COUNT(*) FROM suggestions").fetchone()[0] == 1
+
+    store.conn.execute(
+        "INSERT INTO activity_log (timestamp, action) VALUES ('2000-01-01 00:00:00', 'old')")
+    store.conn.commit()
+    assert store.prune_activity() == 1
+    assert store.activity_since("1970-01-01", action="old") == []
+
+
+def test_a_malformed_hook_command_does_not_exit_2(tmp_path):
+    env = dict(os.environ, HOME=str(tmp_path / "home"))
+    hook = subprocess.run([sys.executable, "-m", "kindex.cli", "prime", "--no-such-flag"],
+                          capture_output=True, text=True, env=env, timeout=60)
+    assert hook.returncode == 1, hook.stderr
+    assert "error" in hook.stderr
+    other = subprocess.run([sys.executable, "-m", "kindex.cli", "status", "--no-such-flag"],
+                           capture_output=True, text=True, env=env, timeout=60)
+    assert other.returncode == 2
+
+
+def test_a_bad_supervisor_hook_payload_degrades(tmp_path):
+    env = dict(os.environ, HOME=str(tmp_path / "home"))
+    result = subprocess.run(
+        [sys.executable, "-m", "kindex.cli", "supervisor-hook", "--adapter", "cursor",
+         "--data-dir", str(tmp_path / "graph")],
+        input=b"\xff\xfe not json", capture_output=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert b"Traceback" not in result.stderr
+
+
+def test_a_broken_read_is_not_an_empty_one(store, monkeypatch):
+    import sqlite3 as _sqlite3
+
+    store.conn.execute("DROP TABLE suggestions")
+    assert store.pending_suggestions() == []  # a store that predates the table
+
+    class _Broken:
+        def execute(self, *args, **kwargs):
+            raise _sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(type(store), "conn", property(lambda self: _Broken()))
+    with pytest.raises(_sqlite3.DatabaseError):
+        store.recent_activity()

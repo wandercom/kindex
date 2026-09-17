@@ -138,8 +138,16 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
     actions = [f"Removed {removed} exact Kindex legacy handlers (foreign handlers preserved)"]
     plugin = base / "skills" / PLUGIN_NAME
     staged_plugin = None
-    enabled = data.setdefault("enabledPlugins", {})
-    enabled[f"{PLUGIN_NAME}@skills-dir"] = not uninstall and mode == "modern"
+    plugin_key = f"{PLUGIN_NAME}@skills-dir"
+    if not uninstall and mode == "modern":
+        enabled = data.setdefault("enabledPlugins", {})
+        enabled[plugin_key] = True
+    else:
+        # Switch off an entry that exists; a user who never enabled the
+        # plugin gets no enabledPlugins key written into their settings.
+        enabled = data.get("enabledPlugins") if isinstance(data.get("enabledPlugins"), dict) else {}
+        if plugin_key in enabled:
+            enabled[plugin_key] = False
     # Known packaged legacy plugin identities only; do not disable unrelated
     # plugin names which happen to contain 'kindex'.
     if mode == "modern" and not uninstall:

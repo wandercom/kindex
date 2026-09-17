@@ -329,6 +329,9 @@ def node_retired(node: dict) -> bool:
     return (node.get("status") or "active") != "active"
 
 
+#: How long the activity log keeps an entry (days).
+ACTIVITY_RETENTION_DAYS = 365
+
 class Store:
     """SQLite-backed knowledge graph with FTS5 full-text search.
 
@@ -1508,7 +1511,11 @@ class Store:
                         pass
                 result.append(d)
             return result
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     # ── Temporal queries ───────────────────────────────────────────────
@@ -1534,18 +1541,25 @@ class Store:
                 "SELECT action, COUNT(*) FROM activity_log WHERE timestamp >= ? "
                 "GROUP BY action ORDER BY COUNT(*) DESC, action",
                 (self._activity_bound(since_iso),))}
-        except sqlite3.Error:
+        except sqlite3.Error as error:
+            if not _absent_schema(error):
+                raise
             return {}
 
     def activity_since(self, since_iso: str, action: str | None = None,
-                       limit: int | None = None) -> list[dict]:
-        """Get activity log entries since a timestamp, optionally filtered by action type."""
+                       limit: int | None = None,
+                       actor: str | None = None) -> list[dict]:
+        """Get activity log entries since a timestamp, optionally filtered by
+        action type and actor."""
         try:
             q = "SELECT * FROM activity_log WHERE timestamp >= ? "
             params: list = [self._activity_bound(since_iso)]
             if action:
                 q += "AND action = ? "
                 params.append(action)
+            if actor:
+                q += "AND actor = ? "
+                params.append(actor)
             q += "ORDER BY timestamp DESC"
             if limit is not None:
                 q += " LIMIT ?"
@@ -1561,7 +1575,11 @@ class Store:
                         pass
                 result.append(d)
             return result
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     def nodes_changed_since(self, since_iso: str) -> list[dict]:
@@ -1589,7 +1607,11 @@ class Store:
                         pass
                 result.append(d)
             return result
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     # ── Suggestions ───────────────────────────────────────────────────
@@ -1623,6 +1645,16 @@ class Store:
         concept_a, concept_b, reason, source = (
             redact_text(value) for value in (concept_a, concept_b, reason, source)
         )
+        # One row per pair: a pending or rejected pair (either order) is not
+        # raised again. Three producers skipped this check and the table grew
+        # without bound.
+        existing = self.conn.execute(
+            "SELECT id FROM suggestions WHERE kind = 'bridge' AND identity_kind = ? "
+            "AND status IN ('pending', 'rejected') AND ((concept_a = ? AND concept_b = ?) "
+            "OR (concept_a = ? AND concept_b = ?)) ORDER BY id LIMIT 1",
+            (identity_kind, concept_a, concept_b, concept_b, concept_a)).fetchone()
+        if existing is not None:
+            return existing["id"]
         cur = self.conn.execute(
             """INSERT INTO suggestions
                (concept_a, concept_b, reason, source, identity_kind, kind)
@@ -1633,6 +1665,15 @@ class Store:
         self._log("add_suggestion", f"{concept_a}->{concept_b}", "",
                   details={"reason": reason, "source": source})
         return cur.lastrowid
+
+    def prune_activity(self, *, older_than_days: int = ACTIVITY_RETENTION_DAYS) -> int:
+        """Delete activity entries older than the retention window; the log
+        otherwise grew with every write for the life of the graph."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.execute("DELETE FROM activity_log WHERE timestamp < ?", (cutoff,))
+        self.conn.commit()
+        return cursor.rowcount
 
     def prune_suggestions(self, *, accepted_after_days: int = 90) -> int:
         """Delete accepted suggestions older than ``accepted_after_days``:
@@ -1655,7 +1696,11 @@ class Store:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     def resolve_suggestion_node(
@@ -3944,7 +3989,11 @@ class Store:
                       AND context = ? AND events >= ?""",
                 params,
             ).fetchall()
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
         totals: dict[str, float] = {}
@@ -4794,3 +4843,10 @@ def _column_definitions(schema_sql: str) -> dict[str, dict[str, str]]:
                 columns[name] = text
         definitions[table] = columns
     return definitions
+
+
+def _absent_schema(error: sqlite3.Error) -> bool:
+    """A read of an optional table or column that this store predates."""
+    text = str(error)
+    return isinstance(error, sqlite3.OperationalError) and (
+        "no such table" in text or "no such column" in text)

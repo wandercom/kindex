@@ -173,6 +173,11 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
     except Exception as error:
         _step_failed(results, "suggestions", error)
         results["suggestions_pruned"] = 0
+    try:
+        results["activity_pruned"] = store.prune_activity()
+    except Exception as error:
+        _step_failed(results, "activity", error)
+        results["activity_pruned"] = 0
     results["link_suggestions"] = suggestion_count
 
     # 7. Graph hygiene — archive stale orphans, auto-link viable ones

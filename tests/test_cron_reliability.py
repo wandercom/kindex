@@ -1499,3 +1499,31 @@ class TestSchedulerLogLocation:
         work_pass = next(c for c in seen if c.active_profile == "work")
         assert work_pass.data_path == prof.resolve()
         assert work_pass.scheduler_log_path == (base / "logs").resolve()
+
+
+class TestManualExecSettles:
+    def test_a_manual_one_shot_run_completes_the_reminder(self, config, store, monkeypatch, tmp_path):
+        import argparse
+
+        from kindex import actions, cli
+
+        monkeypatch.setattr(actions, "_run_shell", lambda cmd, **kw: {"ok": True, "output": "ok"})
+        rid = store.add_reminder("one shot", _past(), extra={"action_command": "echo hi"})
+        monkeypatch.setattr(cli, "_store", lambda args: store)
+        monkeypatch.setattr(cli, "_config", lambda args: config)
+        monkeypatch.setattr(store, "close", lambda: None)
+        cli.cmd_remind(argparse.Namespace(remind_action="exec", reminder_id=rid, json=True))
+        assert store.get_reminder(rid)["status"] == "completed"
+
+    def test_mcp_exec_does_not_resume_a_paused_action(self, config, store, monkeypatch):
+        import kindex.mcp_server as mcp_mod
+        from kindex import actions
+
+        ran = []
+        monkeypatch.setattr(actions, "_run_shell", lambda cmd, **kw: ran.append(cmd) or {"ok": True, "output": ""})
+        monkeypatch.setattr(mcp_mod, "_get_store", lambda: (store, config))
+        rid = store.add_reminder("parked", _past(),
+                                 extra={"action_command": "echo hi", "action_status": "paused"})
+        message = mcp_mod.remind_exec(rid)
+        assert message.startswith("Action skipped"), message
+        assert ran == []

@@ -246,7 +246,7 @@ def record_mcp(tool, outcome="success"):
         return
     sid = os.environ.get("KIN_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_SESSION_ID")
     agent = os.environ.get("KIN_CLIENT") or os.environ.get("KINDEX_CLIENT") or "unknown"
-    project = os.environ.get("KIN_PROJECT_PATH") or os.getcwd()
+    project = os.environ.get("KIN_PROJECT_PATH") or os.environ.get("KIN_PROJECT") or os.getcwd()
     record_automatic({"project_path": project, "agent": agent, "session_id": sid or "unattributed"},
            "use", {"tool": tool, "outcome": outcome, "source": "mcp", "initiator": "agent"})
 

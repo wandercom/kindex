@@ -98,8 +98,8 @@ def execute_action(
     """Execute a reminder's action.  Returns ``{"status": ..., "output": ...}``.
 
     Updates the reminder's ``extra`` with ``action_status`` and ``action_result``.
-    ``manual=True`` marks a deliberate user invocation (``kin remind exec`` /
-    MCP ``remind_exec``): it may resume a ``paused`` or ``exhausted`` action,
+    ``manual=True`` marks a deliberate user invocation (``kin remind exec``;
+    the MCP tool is not one): it may resume a ``paused`` or ``exhausted`` action,
     which automated sweeps must skip.
 
     The action is claimed from the stored row, not from ``reminder``: a sweep
