@@ -89,6 +89,18 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   reminder in a test repacked the developer's real launchd job or crontab
   (and, with a fresh store, unloaded it). `KIN_NO_SCHEDULER_WRITES=1`
   leaves the scheduler untouched, including for child processes.
+- The claude-web adapter writes its concept and project edges (every one
+  failed on an unknown keyword and was swallowed), and re-ingesting a grown
+  conversation updates only its content, domains and metadata, keeping the
+  weight, audience, aka, intent, standing and a title renamed by hand.
+- The code adapter retires modules and classes whose file or definition is
+  gone (and restores them if they return), so deleted and renamed files no
+  longer live on in the graph or in `.kin/index.json`. A run cut short by
+  `--limit` retires nothing, and a node archived by hand stays archived.
+- `kin watch` ingests current Claude Code transcripts (its reader knew only
+  the old top-level shape), and session scans skip subagent and workflow
+  transcripts, which were titled after their directory and crowded real
+  sessions out of every scan.
 
 ### Security
 - Collab text from peers (authors, lock holders, standing-message setters,
