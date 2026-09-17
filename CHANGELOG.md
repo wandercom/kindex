@@ -17,6 +17,21 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   named the previous release.
 
 ### Fixed
+- Host hooks (`prime --for hook`, `compact-hook`, `prompt-check`,
+  `stop-guard`, `attention-hook`) never run a schema migration: a pending
+  one is reported on the degraded line with its remedy (`kin doctor --fix`)
+  instead of copying the whole database inside the host's timeout. A
+  migration snapshot is written under a `.partial` name and renamed when it
+  validates, and a partial left by a killed process is removed by the next
+  snapshot.
+- The prime's recent activity names only nodes that still exist, are
+  active and unexpired, under their current title; a deleted node, an
+  archived one or a reminder is counted without its title. Only the scan
+  for titles is capped; the per-action totals count every entry.
+- The prime summarises a reminder's action (mode, the size of its command
+  and instructions, a digest over both and a preview marked when cut)
+  instead of showing a truncated command beside a call to run it, and names
+  the real commands (`--reminder-id`).
 - `task_execute` answers scope, store and policy refusals, database
   errors and Git timeouts as `{ok: false, error}` instead of raising them as
   tool errors.
@@ -34,6 +49,13 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   edge: a suppressed row's snapshot is created once and kept until the row is
   written, and snapshots of deleted rows are removed. A row written since its
   snapshot decays from the last run.
+
+### Security
+- Stored graph text in the prime and in context blocks is marked as data,
+  and cannot open or close a tag, start or underline a heading, or open or
+  close a code fence (backtick or tilde), so a node cannot pose as Kindex's
+  own directives. This covers every rendered field: titles, content,
+  aliases, domains, tags, provenance, edge types and a rule's fields.
 
 ## [0.41.1] - 2026-09-17
 

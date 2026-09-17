@@ -91,7 +91,14 @@ def _store(args):
 def _hook_store(args, cfg=None):
     """Open the graph with a short SQLite busy timeout for hook hot paths."""
     from .store import Store
-    return Store(cfg or _config(args), sqlite_timeout=0.25)
+    return Store(cfg or _config(args), sqlite_timeout=0.25, migrate=False)
+
+
+def _hook_graph(args):
+    """The graph as a host hook opens it: a pending schema migration is
+    refused (and reported) rather than run inside the host's timeout."""
+    from .store import Store
+    return Store(_config(args), migrate=False)
 
 
 def _task_actor(args) -> str:
@@ -2119,7 +2126,7 @@ def cmd_compact_hook(args):
     """
     if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
         return
-    store = _store(args)
+    store = _hook_graph(args)
     ledger, cfg = _ledger(args)
 
     # A Claude Code hook pipes a JSON envelope ({session_id,
@@ -2372,7 +2379,8 @@ def cmd_prime(args):
     """
     if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
         return
-    store = _store(args)
+    hook = (getattr(args, "output_for", "stdout") or "stdout") == "hook"
+    store = _hook_graph(args) if hook else _store(args)
     cfg = _config(args)
 
     if getattr(args, "codebook", False):
@@ -4906,7 +4914,7 @@ def cmd_stop_guard(args):
             if isinstance(payload, dict) and payload.get("stop_hook_active"):
                 return
 
-    store = _store(args)
+    store = _hook_graph(args)
     cfg = _config(args)
 
     if (
@@ -5113,7 +5121,7 @@ def cmd_prompt_check(args):
     # Measured from process start: the host's two seconds include the shell
     # and the imports that ran before this line.
     deadline = time.monotonic() + max(0, int(getattr(args, "deadline_ms", 1000) or 0)) / 1000.0
-    store = _store(args)
+    store = _hook_graph(args)
     cfg = _config(args)
 
     from .agent_adapters import normalize_adapter, scope_adapter
@@ -7948,8 +7956,10 @@ def _degraded_hook_output(args, exc: BaseException) -> str:
     from .agent_adapters import normalize_adapter, render_hook_context
 
     command = getattr(args, "command", None)
+    remedy = getattr(exc, "remedy", "")
     line = (f"# kindex degraded: {type(exc).__name__} — "
-            "session starting without memory context")
+            + (f"{remedy}; " if remedy else "")
+            + "session starting without memory context")
     if command == "prime":
         return line + "\n"
     adapter = normalize_adapter(getattr(args, "adapter", None) or "plain")
