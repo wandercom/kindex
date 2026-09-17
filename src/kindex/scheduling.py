@@ -287,15 +287,19 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
 
     # Read current plist, update the interval
     content = plist_path.read_text()
-    new_content = re.sub(
+    new_content, found = re.subn(
         r"(<key>StartInterval</key>\s*<integer>)\d+(</integer>)",
         rf"\g<1>{interval}\g<2>",
         content,
     )
 
-    if new_content == content:
-        # Pattern not found — malformed plist
+    if not found:
         return {"action": "skipped", "reason": "plist format unrecognized"}
+    if new_content == content:
+        # Already this interval (a fresh setup-cron installs the configured
+        # one). Reported as an unrecognized plist, the interval was never
+        # recorded and every run tried again.
+        return {"action": "unchanged"}
 
     plist_path.write_text(new_content)
     _reload_when_idle(plist_path, config)
