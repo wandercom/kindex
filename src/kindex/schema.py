@@ -165,7 +165,7 @@ CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
     VALUES ('delete', old.rowid, old.id, old.title, old.content, old.aka, old.intent, old.domains);
 END;
 
-CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE OF title, content, aka, intent, domains ON nodes BEGIN
     INSERT INTO nodes_fts(nodes_fts, rowid, id, title, content, aka, intent, domains)
     VALUES ('delete', old.rowid, old.id, old.title, old.content, old.aka, old.intent, old.domains);
     INSERT INTO nodes_fts(rowid, id, title, content, aka, intent, domains)

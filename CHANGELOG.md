@@ -4,6 +4,27 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- An empty project store (any read creates one) no longer makes every
+  unscoped call in the repository ambiguous while the home store holds work;
+  the home store is used until the project store has work of its own. The
+  ambiguity refusal names the kin-mcp remedy (`KIN_PROJECT`, or `data_dir` in
+  the user config).
+- An absolute or trailing-slash spelling of `~/.kindex` no longer turns
+  `--project-path` and `KIN_PROJECT` into no-ops.
+- `kin config set` (without `--global`) writes only the project's own
+  `.kin/config`, `kin.yaml` or `conv.yaml`; it wrote into the first ancestor
+  `.kin/config` it found, reconfiguring every sibling repository.
+- A new store is created and version-stamped in one transaction. A store an
+  earlier build left half-created (tables but no version) is finished on
+  open; it was migrated from v1 on every open and never opened.
+- The full-text index is updated only when a node's text changes (title,
+  content, aka, intent, domains); every weight and access-time write rewrote
+  the node's indexed text. Existing stores get the narrower trigger on open,
+  with no migration or snapshot.
+- Reading a node records its access at most once every ten minutes instead of
+  taking the write lock on every read.
+
 ## [0.40.0] - 2026-09-17
 
 ### Fixed

@@ -6688,8 +6688,12 @@ def _config_write(key: str, value: str, config_path: str | None = None,
         root = resolve_project_root(project_path)
         _maybe_upgrade_kin_file((root / ".kin").expanduser().resolve())
         path = None
+        # Only this project's own files. The read path also inherits from
+        # ancestor directories; writing to the first ancestor found silently
+        # reconfigured every sibling repository under it.
+        own = {root / ".kin" / "config", root / "kin.yaml", root / "conv.yaml"}
         for p in _project_config_paths(root):
-            if p.exists():
+            if p in own and p.exists():
                 path = p
                 break
         if path is None:

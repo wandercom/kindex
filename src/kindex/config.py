@@ -1000,8 +1000,17 @@ def load_config(
         explicit_project = bool(project_path or os.environ.get("KIN_PROJECT")) and _bound_root is None and _git_root(project_root) is not None
         existing_repo = any((d / n).exists() for d in (local, local / "kindex")
                             for n in ("kindex.db", "conv.db"))
+        if existing_repo and not any(durable_store_paths(d) for d in (local, local / "kindex")):
+            # A project store with nothing in it (any read creates one)
+            # decides nothing while the home store holds work; it used to
+            # make every unscoped call in the repository ambiguous.
+            existing_repo = not durable_store_paths(selected)
         implicit_repo = existing_repo and "data_dir" not in merged
-        if repo_selected or ((explicit_project or implicit_repo) and cfg.data_dir == "~/.kindex"):
+        # The home default, however it is spelled: an absolute or
+        # trailing-slash spelling of ~/.kindex made --project-path and
+        # KIN_PROJECT no-ops.
+        home_default = _same_path(cfg.data_dir, "~/.kindex")
+        if repo_selected or ((explicit_project or implicit_repo) and home_default):
             project_store = project_data_path(project_root)
             if implicit_repo and not explicit_project and not repo_selected:
                 home_stores = durable_store_paths(selected)
@@ -1010,7 +1019,9 @@ def load_config(
                         f"Ambiguous Kindex scope: default home store {', '.join(str(p) for p in home_stores)} "
                         f"contains durable work and a project store exists at {project_store}. "
                         f"Both are preserved. Select --project-path {project_root} for project work "
-                        f"or --data-dir {selected} for the home store; no data was merged or moved.")
+                        f"or --data-dir {selected} for the home store (kin-mcp: set KIN_PROJECT in "
+                        f"its environment, or data_dir in ~/.config/kindex/kin.yaml); no data was "
+                        f"merged or moved.")
             cfg.data_dir = str(project_store)
     cfg = _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
     if project_data_dir and _same_path(cfg.data_dir, project_data_dir):

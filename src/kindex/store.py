@@ -79,6 +79,13 @@ def _now() -> str:
     return datetime.now(tz=None).isoformat(timespec="seconds")
 
 
+_ACCESS_WRITE_MINUTES = 10
+
+
+def _minutes_ago(minutes: int) -> str:
+    return (datetime.now(tz=None) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -428,8 +435,9 @@ class Store:
                 if current < SCHEMA_VERSION:
                     with self._schema_migration_lock():
                         self._migrate_versioned_schema_after_lock()
-                # An already-current store performs no DDL on reopen. An
-                # upgraded store was fully verified inside its transaction.
+                # An already-current store performs no schema migration on
+                # reopen; only a definition-level trigger repair (below).
+                self._narrow_fts_update_trigger()
                 return
         elif self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
@@ -444,6 +452,14 @@ class Store:
                 ).fetchone()
                 if locked_has_meta is not None:
                     self._migrate_versioned_schema_after_lock()
+                    return
+                if self._has_current_node_shape():
+                    # Not an ancient store (those predate `standing`): a
+                    # fresh create an earlier build left half-done, having
+                    # created tables one statement at a time and stopped
+                    # before `meta`. Finish it; migrating it from v1 failed
+                    # on every open.
+                    self._create_fresh_schema()
                     return
 
                 snapshot, reason = self._snapshot_schema_migration(1)
@@ -466,18 +482,21 @@ class Store:
                 self._record_schema_migration_snapshot(snapshot, reason)
             return
 
-        # Now safe to apply full schema (IF NOT EXISTS is idempotent
-        # once columns are up to date).
-        self._conn.executescript(CREATE_TABLES)
-
-        # Ensure schema version is set for fresh databases.
-        cur = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'")
-        if cur.fetchone() is None:
-            self._conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-            self._conn.commit()
+        # A fresh store: created and stamped in one transaction, under the
+        # migration lock, so no process ever sees tables without a version.
+        with self._schema_migration_lock():
+            stamped = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+            ).fetchone() is not None and self._conn.execute(
+                "SELECT 1 FROM meta WHERE key = 'schema_version'"
+            ).fetchone() is not None
+            if stamped:
+                # Created by another process while this one waited.
+                self._conn.rollback()
+                return self._init_schema()
+            # Otherwise new, or an earlier build's create that stopped before
+            # its version stamp (every statement is idempotent).
+            self._create_fresh_schema()
 
     def _parse_schema_version(self, value: object) -> int:
         """Parse a schema stamp with operator-facing recovery guidance."""
@@ -488,6 +507,51 @@ class Store:
                 f"Database {self.db_path} has an invalid schema_version "
                 f"value ({value!r}); restore a validated database snapshot"
             ) from exc
+
+    def _has_current_node_shape(self) -> bool:
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(nodes)")}
+        return "standing" in columns
+
+    def _create_fresh_schema(self) -> None:
+        """Every table, index and trigger plus the version stamp, as one
+        transaction (idempotent: an interrupted create is finished)."""
+        try:
+            self._conn.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + CREATE_TABLES
+                + "\nINSERT OR REPLACE INTO meta (key, value) "
+                + f"VALUES ('schema_version', '{int(SCHEMA_VERSION)}');\nCOMMIT;"
+            )
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def _narrow_fts_update_trigger(self) -> None:
+        """Re-index full text only when text changes.
+
+        The update trigger once fired on every UPDATE, so each last_accessed
+        or weight write deleted and re-inserted the node's whole text in the
+        FTS index (8x the WAL of the write itself; the daily decay rewrote
+        the index). A trigger holds no data and either definition works with
+        either build, so it is replaced in place rather than by a versioned
+        migration and its full-database snapshot.
+        """
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'nodes_au'"
+        ).fetchone()
+        if row is None or "UPDATE OF" in (row["sql"] or "").upper():
+            return
+        start = CREATE_TABLES.index("CREATE TRIGGER IF NOT EXISTS nodes_au")
+        end = CREATE_TABLES.index("END;", start) + len("END;")
+        try:
+            self._conn.executescript(
+                "BEGIN IMMEDIATE;\nDROP TRIGGER IF EXISTS nodes_au;\n"
+                + CREATE_TABLES[start:end] + "\nCOMMIT;"
+            )
+        except sqlite3.OperationalError:
+            # Busy or read-only: the wide trigger is only slower. Try again
+            # on a later open.
+            self._conn.rollback()
 
     def _migrate_versioned_schema_after_lock(self) -> None:
         """Recheck and, if still needed, migrate while exclusion is held."""
@@ -1747,9 +1811,13 @@ class Store:
         row = self.conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
         if row is None:
             return None
-        self.conn.execute(
-            "UPDATE nodes SET last_accessed = ? WHERE id = ?", (_now(), node_id))
-        self.conn.commit()
+        # A read writes at most once per interval: every read used to take
+        # the write lock (and hooks wait only 0.25 s for it).
+        now = _now()
+        if (row["last_accessed"] or "") < _minutes_ago(_ACCESS_WRITE_MINUTES):
+            self.conn.execute(
+                "UPDATE nodes SET last_accessed = ? WHERE id = ?", (now, node_id))
+            self.conn.commit()
         return self._row_to_dict(row)
 
     def get_node_domains(self, node_id: str) -> list[str]:
