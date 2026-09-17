@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-09-17
+
 ### Changed
 - Coordination belongs to its participants: only a conversation's creator or
   members may end it while it is live, or set or clear its standing
