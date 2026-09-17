@@ -98,8 +98,8 @@ def execute_action(
     """Execute a reminder's action.  Returns ``{"status": ..., "output": ...}``.
 
     Updates the reminder's ``extra`` with ``action_status`` and ``action_result``.
-    ``manual=True`` marks a deliberate user invocation (``kin remind exec`` /
-    MCP ``remind_exec``): it may resume a ``paused`` or ``exhausted`` action,
+    ``manual=True`` marks a deliberate user invocation (``kin remind exec``;
+    the MCP tool is not one): it may resume a ``paused`` or ``exhausted`` action,
     which automated sweeps must skip.
 
     The action is claimed from the stored row, not from ``reminder``: a sweep
@@ -220,12 +220,47 @@ def _running_is_stale(reminder: dict, timeout: int) -> bool:
     return age > (2 * timeout + 60)
 
 
+#: How much of an action's output a result keeps.
+RESULT_LIMIT = 4000
+
+
+def _clip(text: str, limit: int = RESULT_LIMIT) -> str:
+    """Keep both ends of a long output: a run's summary is at the start and a
+    failure's cause is usually at the end, which a head-only cut dropped."""
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    tail = limit - head
+    return f"{text[:head]}\n[... {len(text) - limit} characters omitted ...]\n{text[-tail:]}"
+
+
+def _wake_argv_problem(fields: dict) -> str:
+    """Why a stored wake value cannot be passed to an agent's argv, or ''.
+
+    Creation validates these; rows written before that check are refused
+    here rather than handed to the agent as options.
+    """
+    from .reminders import LAST_SESSION, WAKE_TOKEN
+
+    session = str(fields.get("wake_session_id") or "").strip()
+    if session and session.lower() not in LAST_SESSION and not WAKE_TOKEN.fullmatch(session):
+        return f"invalid wake session id {session!r}"
+    for name in ("wake_model", "wake_agent"):
+        value = str(fields.get(name) or "").strip()
+        if value and not WAKE_TOKEN.fullmatch(value):
+            return f"invalid {name.replace('_', ' ')} {value!r}"
+    cwd = str(fields.get("wake_cwd") or "").strip()
+    if cwd and not Path(cwd).is_absolute():
+        return f"wake directory is not absolute: {cwd!r}"
+    return ""
+
+
 def _update_action_status(
     store: Store, rid: str, reminder: dict, status: str, result: str,
 ) -> None:
     """Write ``action_status`` and ``action_result`` into the reminder's extra."""
     store.update_reminder_action(
-        rid, status=status, result=redact_text(result)[:4000],
+        rid, status=status, result=_clip(redact_text(result)),
         executed_at=datetime.datetime.now().isoformat(timespec="seconds"),
     )
 
@@ -237,6 +272,7 @@ def _run_process(
     input_text: str | None = None,
     timeout: int = 300,
     grace: float = 2.0,
+    max_bytes: int | None = None,
 ) -> tuple[int | None, str, str]:
     """Run ``cmd`` and return ``(returncode, stdout, stderr)``; the return
     code is None when the run timed out and its process group was killed.
@@ -245,6 +281,8 @@ def _run_process(
     The run ends when the command exits, not when every descendant has
     closed its pipes, so a command that starts a background service
     finishes; output that follows within ``grace`` seconds is kept.
+    With ``max_bytes`` each stream keeps only its first ``max_bytes`` (the
+    rest is still drained, so the child never blocks on a full pipe).
     """
     import selectors
     import signal
@@ -262,6 +300,7 @@ def _run_process(
             pass
 
     chunks: dict = {proc.stdout: [], proc.stderr: []}
+    held: dict = {proc.stdout: 0, proc.stderr: 0}
     deadline = time.monotonic() + timeout
     timed_out = False
     try:
@@ -303,7 +342,11 @@ def _run_process(
                 except BlockingIOError:
                     continue
                 if data:
-                    chunks[key.fileobj].append(data)
+                    room = None if max_bytes is None else max_bytes - held[key.fileobj]
+                    if room is None or room > 0:
+                        kept = data if room is None else data[:room]
+                        chunks[key.fileobj].append(kept)
+                        held[key.fileobj] += len(kept)
                 else:
                     selector.unregister(key.fileobj)
         selector.close()
@@ -364,10 +407,7 @@ def _run_shell(command: str, *, timeout: int = 300) -> dict:
     returncode, stdout, stderr = _run_process(command, shell=True, timeout=timeout)
     if returncode is None:
         return {"ok": False, "output": f"Timed out after {timeout}s"}
-    output = stdout
-    if stderr:
-        output += "\n[stderr]\n" + stderr
-    return {"ok": returncode == 0, "output": redact_text(output.strip())}
+    return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}
 
 
 def _build_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
@@ -433,14 +473,22 @@ def _run_claude(
     except ValueError:
         report = None
     if not isinstance(report, dict):
-        return {"ok": returncode == 0, "output": redact_text((stdout or stderr).strip())[:4000]}
+        return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}
     text = str(report.get("result") or "")
     subtype = str(report.get("subtype") or "")
     if report.get("is_error") or returncode != 0:
-        detail = text or subtype or stderr.strip() or f"exit {returncode}"
+        detail = text or subtype or f"exit {returncode}"
+        # claude's stderr carries the cause (auth, network, a crashed hook).
         return {"ok": False, "terminal": subtype.startswith("error_max"),
-                "output": redact_text(detail)[:4000]}
-    return {"ok": True, "output": redact_text(text.strip())[:4000]}
+                "output": _combined_output(detail, stderr)}
+    return {"ok": True, "output": _clip(redact_text(text.strip()))}
+
+
+def _combined_output(stdout: str, stderr: str) -> str:
+    output = stdout
+    if stderr.strip():
+        output += "\n[stderr]\n" + stderr
+    return _clip(redact_text(output.strip()))
 
 
 def _run_codex(
@@ -451,6 +499,9 @@ def _run_codex(
     timeout: int = 300,
 ) -> dict:
     """Launch a headless Codex wake via ``codex exec``."""
+    problem = _wake_argv_problem(fields)
+    if problem:
+        return {"ok": False, "terminal": True, "output": f"Refused: {problem}"}
     prompt = _build_agent_prompt(reminder, fields, store)
     codex = _resolve_cli("codex")
     if codex is None:
@@ -476,10 +527,7 @@ def _run_codex(
     returncode, stdout, stderr = _run_process(cmd, input_text=prompt, timeout=timeout)
     if returncode is None:
         return {"ok": False, "output": f"codex exec timed out after {timeout}s"}
-    output = stdout
-    if stderr:
-        output += "\n[stderr]\n" + stderr
-    return {"ok": returncode == 0, "output": redact_text(output.strip())[:4000]}
+    return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}
 
 
 def _run_opencode(
@@ -490,6 +538,9 @@ def _run_opencode(
     timeout: int = 300,
 ) -> dict:
     """Launch a headless OpenCode wake via ``opencode run``."""
+    problem = _wake_argv_problem(fields)
+    if problem:
+        return {"ok": False, "terminal": True, "output": f"Refused: {problem}"}
     prompt = _build_agent_prompt(reminder, fields, store)
     opencode = _resolve_cli("opencode")
     if opencode is None:
@@ -514,7 +565,4 @@ def _run_opencode(
     returncode, stdout, stderr = _run_process(cmd, timeout=timeout)
     if returncode is None:
         return {"ok": False, "output": f"opencode run timed out after {timeout}s"}
-    output = stdout
-    if stderr:
-        output += "\n[stderr]\n" + stderr
-    return {"ok": returncode == 0, "output": redact_text(output.strip())[:4000]}
+    return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}

@@ -701,3 +701,34 @@ class TestBuiltinAdapters:
         from kindex.adapters.sessions import adapter
         assert isinstance(adapter, Adapter)
         assert adapter.meta.name == "sessions"
+
+
+def test_linear_key_travels_in_a_header_not_argv(monkeypatch):
+    import io
+    import subprocess
+    import urllib.request
+
+    from kindex.adapters import linear as klinear
+
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_example")
+    seen = {}
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        seen["authorization"] = request.get_header("Authorization")
+        seen["timeout"] = timeout
+        return _Response(b'{"data": {}}')
+
+    def no_subprocess(*args, **kwargs):
+        raise AssertionError("the key must not reach a command line")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(subprocess, "run", no_subprocess)
+    assert klinear._linear_query("query { viewer { id } }") == {"data": {}}
+    assert seen == {"authorization": "lin_api_example", "timeout": 30}

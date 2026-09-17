@@ -560,3 +560,169 @@ def test_an_explicit_read_names_the_next_page(store):
     empty = read_messages(store, "review", agent="me")
     assert "pass --since-id 0 to read them again" in format_messages(
         empty, since_flag="--since-id ")
+
+
+# ── Authority, expiry and bounded scans ───────────────────────────────
+
+
+def test_only_participants_end_a_live_conversation_and_ending_is_idempotent(store):
+    from kindex.coordination import (
+        create_conversation, end_conversation, join_conversation, post_message)
+
+    conv = create_conversation(store, "Crew", created_by="agent-a")
+    join_conversation(store, "crew", "agent-b")
+    post_message(store, "crew", "agent-a", "one")
+    post_message(store, "crew", "agent-b", "two")
+
+    with pytest.raises(ValueError, match="creator or members may end"):
+        end_conversation(store, "crew", actor="mallory")
+    assert store.peek_node(conv)["extra"]["coord_status"] == "active"
+
+    ended = end_conversation(store, "crew", actor="agent-b", summary="done")
+    assert ended["extra"]["message_count"] == 2
+    assert ended["extra"]["ended_by"] == "agent-b"
+    again = end_conversation(store, conv, actor="mallory", summary="overwrite")
+    assert again["extra"]["message_count"] == 2
+    assert again["content"] == "done"
+
+
+def test_anyone_may_end_an_expired_conversation(store):
+    from kindex.coordination import create_conversation, end_conversation
+
+    conv = create_conversation(store, "Stale", ttl_minutes=-1, created_by="agent-a")
+    assert end_conversation(store, conv, actor="passer-by")["status"] == "archived"
+
+
+def test_standing_messages_belong_to_whoever_set_them(store):
+    from kindex.coordination import (
+        clear_inject_messages, create_conversation, join_conversation,
+        list_inject_messages, set_inject_message)
+
+    create_conversation(store, "Crew", created_by="lead")
+    join_conversation(store, "crew", "agent-b")
+    join_conversation(store, "crew", "agent-c")
+    set_inject_message(store, "crew", "from lead", "lead", authorize=True)
+    set_inject_message(store, "crew", "from b", "agent-b", authorize=True)
+    set_inject_message(store, "crew", "from c", "agent-c", authorize=True)
+
+    with pytest.raises(ValueError, match="creator or members"):
+        set_inject_message(store, "crew", "hi", "mallory", authorize=True)
+    with pytest.raises(ValueError, match="creator or members"):
+        clear_inject_messages(store, "crew", actor="mallory")
+    with pytest.raises(ValueError, match="set by another agent"):
+        clear_inject_messages(store, "crew", message_id=1, actor="agent-b")
+
+    # "Clear all" as a member clears only that member's own message.
+    assert clear_inject_messages(store, "crew", actor="agent-b") == 1
+    assert [m["text"] for m in list_inject_messages(store, "crew")] == ["from lead", "from c"]
+    # The creator may clear anyone's.
+    assert clear_inject_messages(store, "crew", message_id=3, actor="lead") == 1
+    assert [m["text"] for m in list_inject_messages(store, "crew")] == ["from lead"]
+
+
+def test_standing_messages_expire(store, monkeypatch):
+    from kindex import coordination
+    from kindex.coordination import (
+        active_collabs_for_agent, create_conversation, list_inject_messages,
+        post_message, set_inject_message)
+
+    now = datetime.datetime(2026, 5, 29, 12, 0, 0)
+    monkeypatch.setattr(coordination, "_now_dt", lambda: now)
+    create_conversation(store, "Crew", created_by="agent-a", ttl_minutes=600)
+    entry = set_inject_message(store, "crew", "short", "agent-a", ttl_minutes=30)
+    assert entry["expires_at"] == "2026-05-29T12:30:00"
+    set_inject_message(store, "crew", "default", "agent-a")
+
+    now = datetime.datetime(2026, 5, 29, 12, 31, 0)
+    monkeypatch.setattr(coordination, "_now_dt", lambda: now)
+    post_message(store, "crew", "agent-a", "keeps the room alive")
+    assert [m["text"] for m in list_inject_messages(store, "crew")] == ["default"]
+    [collab] = active_collabs_for_agent(store, "agent-a")
+    assert [m["text"] for m in collab["inject_messages"]] == ["default"]
+
+    # The next write drops the expired entry for good.
+    set_inject_message(store, "crew", "later", "agent-a")
+    stored = store.peek_node(collab["node_id"])["extra"]["inject_messages"]
+    assert [m["text"] for m in stored] == ["default", "later"]
+
+
+def test_ttl_has_a_ceiling(store):
+    from kindex.coordination import (
+        MAX_TTL_MINUTES, create_conversation, post_message, set_inject_message)
+
+    with pytest.raises(ValueError, match="cannot exceed"):
+        create_conversation(store, "Forever", ttl_minutes=MAX_TTL_MINUTES + 1)
+    create_conversation(store, "Crew", created_by="agent-a", ttl_minutes=MAX_TTL_MINUTES)
+    with pytest.raises(ValueError, match="cannot exceed"):
+        post_message(store, "crew", "agent-a", "stay", ttl_minutes=10 ** 9)
+    with pytest.raises(ValueError, match="cannot exceed"):
+        set_inject_message(store, "crew", "stay", "agent-a", ttl_minutes=10 ** 9)
+
+
+def test_starting_a_conversation_archives_expired_ones(store):
+    from kindex.coordination import create_conversation
+
+    stale = create_conversation(store, "Stale", ttl_minutes=-1)
+    create_conversation(store, "Fresh")
+    node = store.peek_node(stale)
+    assert node["status"] == "archived"
+    assert node["extra"]["coord_status"] == "ended"
+
+
+def test_membership_is_found_beyond_any_row_window(store):
+    from kindex.coordination import (
+        active_collabs_for_agent, create_conversation, list_conversations)
+
+    mine = create_conversation(store, "Mine", created_by="agent-a")
+    for n in range(505):
+        store.add_node(f"other-{n}", node_type="coordination", weight=0.9,
+                       prov_activity="coordination", extra={
+                           "coord_kind": "conversation", "coord_status": "active",
+                           "name": f"other-{n}", "members": [{"agent": "someone"}],
+                           "expires_at": "2999-01-01T00:00:00"})
+    store.conn.execute("UPDATE nodes SET updated_at = '1999-01-01' WHERE id = ?", (mine,))
+    store.conn.commit()
+
+    assert [c["node_id"] for c in active_collabs_for_agent(store, "agent-a")] == [mine]
+    listed = list_conversations(store, limit=1000)
+    assert len(listed) == 506 and listed[-1]["id"] == mine
+
+
+def test_collab_hook_reads_do_not_touch_nodes(store):
+    from kindex.coordination import (
+        active_collabs_for_agent, attach_resource, create_conversation)
+    from kindex.tasks import create_task
+
+    task_id = create_task(store, "Ship it")
+    resource = store.add_node("Parser", node_type="concept", prov_activity="test")
+    create_conversation(store, "Crew", task_id=task_id, created_by="agent-a")
+    attach_resource(store, "crew", resource)
+    store.conn.execute("UPDATE nodes SET last_accessed = '2000-01-01T00:00:00'")
+    store.conn.commit()
+
+    assert active_collabs_for_agent(store, "agent-a")[0]["focus"] == "Ship it"
+    touched = store.conn.execute(
+        "SELECT id FROM nodes WHERE last_accessed != '2000-01-01T00:00:00'").fetchall()
+    assert touched == []
+
+
+def test_a_malformed_conversation_is_recorded(store, monkeypatch):
+    from kindex import config as config_mod
+    from kindex.coordination import active_collabs_for_agent
+
+    recorded = []
+    monkeypatch.setattr(config_mod, "record_degraded",
+                        lambda cmd, error, **kw: recorded.append((cmd, str(error))))
+    bad = store.add_node("broken", node_type="coordination", prov_activity="test",
+                         extra={"coord_kind": "conversation", "coord_status": "active",
+                                "members": [{"agent": "agent-b"}],
+                                "messages": [{"id": "not-a-number"}]})
+    assert active_collabs_for_agent(store, "agent-b") == []
+    assert [cmd for cmd, _ in recorded] == ["collab"]
+    assert bad in recorded[0][1]
+
+    # A hook collects them instead, to record once it has answered.
+    skipped = []
+    assert active_collabs_for_agent(store, "agent-b", skipped=skipped) == []
+    assert [cid for cid, _ in skipped] == [bad]
+    assert len(recorded) == 1

@@ -578,6 +578,31 @@ class TestSweepLock:
         assert sorted(statuses.values()) == ["active", "fired"]
 
 
+    def test_the_lock_outlives_a_full_action(self, config, store, monkeypatch):
+        """While a reminder's action runs, the lock stays held past the action's
+        whole budget, so no contender can reclaim it mid-action."""
+        from kindex import reminders
+
+        _quiet_notify(monkeypatch)
+        store.add_reminder("due", _past(), extra={"action_command": "true"})
+        seen = {}
+
+        def slow_action(st, reminder, cfg, *, timeout=300, manual=False):
+            value = st.get_meta(reminders._CHECK_LOCK_KEY)
+            seen["expires"] = datetime.datetime.fromisoformat(value.split("|", 1)[1])
+            seen["timeout"] = timeout
+            # A contender arriving now finds the lock held.
+            seen["contender"] = reminders._acquire_check_lock(st)
+            return {"status": "completed", "output": ""}
+
+        monkeypatch.setattr("kindex.actions.execute_action", slow_action)
+        config.reminders.action_enabled = True
+        assert len(reminders.check_and_fire(store, config)) == 1
+        remaining = (seen["expires"] - datetime.datetime.now()).total_seconds()
+        assert remaining > seen["timeout"] + 60
+        assert seen["contender"] is None
+
+
 class TestConcurrencyGuards:
     def test_advance_recurring_preserves_running(self, store):
         """A live running marker survives advance — no overlapping executions;
@@ -1499,3 +1524,31 @@ class TestSchedulerLogLocation:
         work_pass = next(c for c in seen if c.active_profile == "work")
         assert work_pass.data_path == prof.resolve()
         assert work_pass.scheduler_log_path == (base / "logs").resolve()
+
+
+class TestManualExecSettles:
+    def test_a_manual_one_shot_run_completes_the_reminder(self, config, store, monkeypatch, tmp_path):
+        import argparse
+
+        from kindex import actions, cli
+
+        monkeypatch.setattr(actions, "_run_shell", lambda cmd, **kw: {"ok": True, "output": "ok"})
+        rid = store.add_reminder("one shot", _past(), extra={"action_command": "echo hi"})
+        monkeypatch.setattr(cli, "_store", lambda args: store)
+        monkeypatch.setattr(cli, "_config", lambda args: config)
+        monkeypatch.setattr(store, "close", lambda: None)
+        cli.cmd_remind(argparse.Namespace(remind_action="exec", reminder_id=rid, json=True))
+        assert store.get_reminder(rid)["status"] == "completed"
+
+    def test_mcp_exec_does_not_resume_a_paused_action(self, config, store, monkeypatch):
+        import kindex.mcp_server as mcp_mod
+        from kindex import actions
+
+        ran = []
+        monkeypatch.setattr(actions, "_run_shell", lambda cmd, **kw: ran.append(cmd) or {"ok": True, "output": ""})
+        monkeypatch.setattr(mcp_mod, "_get_store", lambda: (store, config))
+        rid = store.add_reminder("parked", _past(),
+                                 extra={"action_command": "echo hi", "action_status": "paused"})
+        message = mcp_mod.remind_exec(rid)
+        assert message.startswith("Action skipped"), message
+        assert ran == []

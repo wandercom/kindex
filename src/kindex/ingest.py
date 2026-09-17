@@ -540,7 +540,6 @@ def find_parent_kin(start_path: Path | None = None, max_depth: int = 10) -> list
     Auto-upgrades old .kin files to .kin/config on discovery.
     Stops at filesystem root or after max_depth levels.
     """
-    from .config import _maybe_upgrade_kin_file
 
     if start_path is None:
         start_path = Path.cwd()
@@ -555,9 +554,8 @@ def find_parent_kin(start_path: Path | None = None, max_depth: int = 10) -> list
             if config_file.is_file():
                 found.append(config_file)
         elif kin_entry.is_file():
-            upgraded = _maybe_upgrade_kin_file(kin_entry)
-            if upgraded and upgraded.is_file():
-                found.append(upgraded)
+            # A legacy .kin file is read in place (see config._project_config_paths).
+            found.append(kin_entry)
         parent = current.parent
         if parent == current:  # filesystem root
             break
@@ -582,7 +580,6 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
     Returns count of updated nodes.
     """
     import yaml
-    from .config import _maybe_upgrade_kin_file
 
     count = 0
     all_pending: list[tuple[str, str]] = []  # (source_slug, target_name)
@@ -606,10 +603,7 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                     continue
                 project_root = kin_entry.parent
             elif kin_entry.is_file():
-                upgraded = _maybe_upgrade_kin_file(kin_entry)
-                if not upgraded or not upgraded.is_file():
-                    continue
-                config_file = upgraded
+                config_file = kin_entry
                 project_root = kin_entry.parent
             else:
                 continue
@@ -954,22 +948,36 @@ def load_synonym_rings(config: "Config", store: "Store", verbose: bool = False) 
 
 
 def _link_session_to_project(store: Store, session_slug: str, project_context: str) -> None:
-    """Try to link a session to its corresponding project node."""
-    # project_context is like "-Users-jmcentire-Code-Conv"
-    # Try to match to a project node
-    parts = project_context.strip("-").split("-")
-    # Try from the end, building longer matches
-    for i in range(len(parts), max(0, len(parts) - 3), -1):
-        candidate = "-".join(parts[-2:]).lower() if len(parts) >= 2 else parts[-1].lower()
-        slug = f"proj-{candidate}"
-        if store.get_node(slug):
-            store.add_edge(
-                session_slug, slug,
-                edge_type="spawned_from",
-                weight=0.5,
-                provenance="session in project dir",
-            )
-            return
+    """Link a session to the project node whose directory it ran in.
+
+    `project_context` is the host's directory name for the project: the path
+    with every non-alphanumeric character turned into `-`, so a hyphen in a
+    repository name is indistinguishable from a separator. A project slug is
+    its parent and name (`proj-code-my-repo`); every suffix of the parts is a
+    candidate, and one links only when its recorded path encodes to exactly
+    this context. Only the last two parts were ever tried.
+    """
+    import re
+
+    def encoded(path: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+    parts = [part for part in project_context.strip("-").split("-") if part]
+    for size in range(2, len(parts) + 1):
+        slug = f"proj-{'-'.join(parts[-size:])}".lower()
+        node = store.get_node(slug)
+        if not node:
+            continue
+        path = (node.get("extra") or {}).get("path")
+        if path and encoded(str(path)) != project_context:
+            continue
+        store.add_edge(
+            session_slug, slug,
+            edge_type="spawned_from",
+            weight=0.5,
+            provenance="session in project dir",
+        )
+        return
 
 
 # ── Person expertise auto-detection ───────────────────────────────────

@@ -242,8 +242,13 @@ coordination:
 - `coord_attach`: attach a graph node as a shared resource so members see who
   holds what when it is locked.
 - `coord_inject`: set, clear, or list standing messages that are pushed into
-  member agents' context by the session hooks until cleared. Use for
-  "don't touch X until Y lands" style coordination.
+  member agents' context by the session hooks until cleared or expired (the
+  conversation's TTL by default, never more than 7 days). Use for
+  "don't touch X until Y lands" style coordination. Only the creator or a
+  member may set or clear them, and only the creator may clear another
+  agent's message.
+- `coord_end`: only the creator or a member may end a live conversation.
+  Ending one that has already ended changes nothing.
 - `lock_acquire` / `lock_release`: advisory locks on nodes. A lock signals
   "I am working on this" — `edit` refuses foreign locks, and locked attached
   resources surface to collab members. Locks expire by TTL; an expired lock

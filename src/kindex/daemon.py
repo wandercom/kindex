@@ -23,6 +23,18 @@ if TYPE_CHECKING:
     from .store import Store
 
 
+def _step_failed(results: dict, step: str, error: BaseException) -> None:
+    """A maintenance step that failed is reported in `errors` and the degraded
+    ledger. It used to report 0 with no signal, so a failing drain looked like
+    an empty queue."""
+    results.setdefault("errors", {})[step] = safe_error(error)
+    try:
+        from .config import record_degraded
+        record_degraded("cron", error)
+    except Exception:
+        pass
+
+
 def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
     """One-shot run of all maintenance tasks. Designed for crontab.
 
@@ -87,7 +99,8 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         results["pheromone_weight"] = ramp.get("weight")
         if verbose and ramp.get("ramped"):
             print(f"Pheromone ranking weight -> {ramp.get('weight')} ({ramp.get('reason')})")
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "reinforce", error)
         results["pheromone_pruned"] = 0
 
     # Drain queued Sim supervisory reviews (opt-in; the LLM/Sim spend, kept off
@@ -101,7 +114,8 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
             results["sim_reviewed"] = sim_drained.get("reviewed", 0)
             results["sim_flagged"] = sim_drained.get("flagged", 0)
             results["sim_pending"] = sim_drained.get("pending", 0)
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "sim", error)
         results["sim_reviewed"] = 0
 
     # Drain queued attention reviews. Hook-time attention only waits for a fast
@@ -112,7 +126,8 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         results["attention_reviewed"] = attention_drained.get("reviewed", 0)
         results["attention_flagged"] = attention_drained.get("flagged", 0)
         results["attention_pending"] = attention_drained.get("pending", 0)
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "attention", error)
         results["attention_reviewed"] = 0
 
     # Drain queued node embeddings. Enqueued cheaply on the add/edit/supersede
@@ -130,16 +145,17 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         # Contextual chunk indexes need a one-time rebuild when the model or
         # strategy changes. Trickle stale nodes into the normal queue so large
         # graphs converge over cron cycles instead of blocking one run.
-        status = embedding_status(store)
+        status = embedding_status(store, coverage=False)
         if (contextual_embeddings_supported(config)
                 and int(status.get("queue_pending") or 0) == 0):
             limit = max(1, int(getattr(config.embedding, "reindex_max_jobs", 200) or 200))
             queued = enqueue_reindex(store, stale=True, status="active", limit=limit)
             results["embed_enqueued_stale"] = queued.get("enqueued", 0)
-        embed_drained = drain_embedding_queue(store, config)
+        embed_drained = drain_embedding_queue(store, config, report_coverage=False)
         results["embedded"] = embed_drained.get("embedded", 0)
         results["embed_pending"] = embed_drained.get("pending", 0)
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "embedding", error)
         results["embedded"] = 0
 
     # 5. Run doctor checks
@@ -154,8 +170,14 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
     suggestion_count = _suggest_links(store, verbose=verbose)
     try:
         results["suggestions_pruned"] = store.prune_suggestions()
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "suggestions", error)
         results["suggestions_pruned"] = 0
+    try:
+        results["activity_pruned"] = store.prune_activity()
+    except Exception as error:
+        _step_failed(results, "activity", error)
+        results["activity_pruned"] = 0
     results["link_suggestions"] = suggestion_count
 
     # 7. Graph hygiene — archive stale orphans, auto-link viable ones
@@ -193,8 +215,9 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         results["locks_cleared"] = cleanup_expired_locks(store)
         results["conversations_expired"] = cleanup_expired_conversations(store)
         results["claims_released"] = cleanup_expired_claims(store)
-    except Exception:
+    except Exception as error:
         # Best-effort hygiene — a malformed collab row must not break cron
+        _step_failed(results, "collab_hygiene", error)
         results.setdefault("locks_cleared", 0)
         results.setdefault("conversations_expired", 0)
         results.setdefault("claims_released", 0)
@@ -204,7 +227,8 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         if verbose:
             print("Pruning expired capture candidates...")
         results["capture_candidates_pruned"] = store.prune_capture_candidates()
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "capture_candidates", error)
         results["capture_candidates_pruned"] = 0
 
     # 10. Re-check reminders — anything that came due while maintenance ran.
@@ -227,7 +251,8 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
             results["dream_merged"] = 0
             results["dream_suggestions_applied"] = 0
             results["dream_skipped"] = decision.get("skipped", "not_due")
-    except Exception:
+    except Exception as error:
+        _step_failed(results, "dream", error)
         results["dream_merged"] = 0
         results["dream_suggestions_applied"] = 0
 
@@ -239,8 +264,9 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         from .scheduling import repack_schedule
         repack = repack_schedule(store, config)
         results["repack"] = repack
-    except Exception:
-        pass  # don't let scheduling errors break cron
+    except Exception as error:
+        # A scheduling error must not break cron; it is still reported.
+        _step_failed(results, "repack", error)
 
     return results
 
@@ -359,7 +385,57 @@ def _project_housekeeping(store: "Store") -> None:
             continue
 
 
+def _cron_lock_path(base_config: "Config"):
+    """Beside the scheduler state, keyed by the base graph; creating it must
+    not create a data directory no pass would otherwise touch."""
+    import hashlib
+
+    from .project_store import project_graph_registry_path
+
+    key = hashlib.sha256(str(base_config.data_path).encode()).hexdigest()[:16]
+    return project_graph_registry_path().parent / f"cron-{key}.lock"
+
+
+def _try_cron_lock(base_config: "Config"):
+    """A non-blocking whole-run lock, None when the platform has no flock,
+    or False when another run holds it. Overlapping crontab runs raced on
+    session ingest and every unlocked queue."""
+    import os
+
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    try:
+        path = _cron_lock_path(base_config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    return fd
+
+
 def cron_run_all(base_config: "Config", verbose: bool = False) -> list[dict]:
+    """Run the cron maintenance cycle unless another run is already going."""
+    import os
+
+    lock = _try_cron_lock(base_config)
+    if lock is False:
+        return [{"profile": None, "source": "cron",
+                 "results": {"skipped": "cron_already_running"}}]
+    try:
+        return _cron_run_all(base_config, verbose=verbose)
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+def _cron_run_all(base_config: "Config", verbose: bool = False) -> list[dict]:
     """Run the cron maintenance cycle across all configured profiles.
 
     Every run starts with a reminders-first sweep (``remind_check_all``) so

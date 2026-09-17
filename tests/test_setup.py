@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 import pytest
 from kindex.config import Config
 
@@ -288,6 +289,13 @@ class TestSetupCodex:
         for sub in ("prime", "attention-hook", "agent-prime-hook", "agent-stop-hook"):
             args = parser.parse_args([sub, "--adapter", "opencode"])
             assert args.adapter == "opencode", sub
+
+    def test_codex_hook_timeouts_are_seconds(self):
+        from kindex.setup import _codex_hook_manifest
+
+        timeouts = [handler["timeout"] for entry in _codex_hook_manifest("kin").values()
+                    for handler in entry["hooks"]]
+        assert timeouts and all(1 <= timeout <= 30 for timeout in timeouts), timeouts
 
     def test_setup_codex_hooks_idempotent(self, tmp_path):
         """Installing twice should not duplicate Codex prompt hook."""
@@ -688,13 +696,30 @@ class TestSetupCron:
 
         assert any("Would add crontab" in a for a in actions)
 
-    def test_uninstall_launchd_dry_run(self, tmp_path):
-        """uninstall_launchd with dry_run should not delete plist."""
+    def test_uninstall_launchd_dry_run_keeps_the_plist(self, tmp_path, monkeypatch):
+        """uninstall_launchd with dry_run names the plist and neither unloads nor deletes it."""
         from kindex.setup import uninstall_launchd
         from unittest.mock import patch
 
-        # The function checks Path.home() / "Library/LaunchAgents/com.kindex.cron.plist"
-        # In dry run mode with no plist, it should say "No launchd plist found"
-        actions = uninstall_launchd(dry_run=True)
-        # It either finds the plist and says "Would remove" or doesn't find it
-        assert len(actions) > 0
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        plist = tmp_path / "Library" / "LaunchAgents" / "com.kindex.cron.plist"
+        plist.parent.mkdir(parents=True)
+        plist.write_text("<plist/>")
+
+        with patch("subprocess.run") as run:
+            actions = uninstall_launchd(dry_run=True)
+
+        assert actions == [f"Would remove: {plist}"]
+        assert plist.exists()
+        run.assert_not_called()
+
+    def test_uninstall_launchd_without_a_plist(self, tmp_path, monkeypatch):
+        from kindex.setup import uninstall_launchd
+        from unittest.mock import patch
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        with patch("subprocess.run") as run:
+            actions = uninstall_launchd(dry_run=True)
+
+        assert actions == ["No launchd plist found"]
+        run.assert_not_called()

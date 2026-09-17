@@ -100,7 +100,13 @@ def test_p5_1_p5_4_explicit_false_is_additive_and_shape_compatible(store):
         store, TOKEN, top_k=10, expand_graph=False, trusted_only=False,
         evaluation_time=AT,
     )
-    assert explicit == omitted
+    # The first search records each hit's access; when a second boundary
+    # falls between the two calls, last_accessed alone differs.
+    def comparable(rows):
+        return [{k: v for k, v in row.items() if k != "last_accessed"} for row in rows]
+
+    assert comparable(explicit) == comparable(omitted)
+    assert [set(row) for row in explicit] == [set(row) for row in omitted]
     signature = inspect.signature(hybrid_search)
     assert signature.parameters["trusted_only"].default is False
     assert signature.parameters["evaluation_time"].default is None

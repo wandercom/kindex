@@ -28,8 +28,11 @@ def test_pr_and_release_share_the_full_test_job():
     assert "if" not in test
     assert "continue-on-error" not in test
     assert test["runs-on"] == "ubuntu-latest"
+    # A hung test fails the job instead of holding the runner.
+    assert str(test["timeout-minutes"]) == "30"
     assert [step["run"] for step in test["steps"] if "run" in step] == [
-        'pip install -e ".[dev,mcp]"', "pytest -n auto --dist loadfile",
+        "sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux universal-ctags",
+        'pip install -e ".[dev,mcp]"', "pytest -n auto --dist loadfile --timeout 300",
     ]
     assert all("continue-on-error" not in step and "if" not in step
                for step in test["steps"])

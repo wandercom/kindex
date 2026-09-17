@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![v0.42.0](https://img.shields.io/badge/version-0.42.0-purple.svg)](https://github.com/wandercom/kindex/releases)
+[![v0.43.0](https://img.shields.io/badge/version-0.43.0-purple.svg)](https://github.com/wandercom/kindex/releases)
 [![PyPI](https://img.shields.io/pypi/v/kindex.svg)](https://pypi.org/project/kindex/)
 [![MCP Market](https://img.shields.io/badge/MCP%20Market-kindex-blue.svg)](https://mcpmarket.com/server/kindex)
 [![Tests](https://github.com/wandercom/kindex/actions/workflows/ci.yml/badge.svg)](https://github.com/wandercom/kindex/actions/workflows/ci.yml)
@@ -722,10 +722,15 @@ kin unlock invoice-schema
 # Targeted message — only alice sees it as unread-for-her
 kin coord post payments-refactor "schema branch is yours" --to alice@mbp
 
-# Standing inject message — pushed into members' context until cleared
+# Standing inject message — pushed into members' context until cleared or expired
 kin coord inject payments-refactor set "Don't touch the invoice schema until migration lands"
 kin coord inject payments-refactor clear
+
+# Only the creator or a member may end it; --force acts as the operator
+kin coord end payments-refactor --summary "migration landed"
 ```
+
+Standing messages expire with the conversation's TTL, and no TTL exceeds 7 days. A member clears only their own standing messages; the creator may clear any.
 
 **Agent identity** resolves as `KIN_AGENT_ID` env > `agent_id` in config > `user@shorthost`. `kin whoami` shows both the user and the resolved agent id. Locks, claims, cursors, and message targeting all key off this identity.
 

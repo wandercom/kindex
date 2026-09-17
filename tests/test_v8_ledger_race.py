@@ -12,6 +12,7 @@ import json
 import multiprocessing as mp
 import os
 import re
+import threading
 import time
 import fcntl
 from pathlib import Path
@@ -30,6 +31,28 @@ def _touches_ledger(src, dst, ledger: Path) -> bool:
         except (TypeError, ValueError):
             continue
     return any(path == target or path.name.startswith(target.name) for path in candidates)
+
+
+def _returns_within(seconds: float, fn, *args, **kwargs) -> None:
+    """Run ``fn`` on a daemon thread and fail if it has not returned in time.
+
+    A caller that blocks is exactly the regression these oracles guard, so a
+    block must fail the test rather than hang the run.
+    """
+    errors: list[BaseException] = []
+
+    def target():
+        try:
+            fn(*args, **kwargs)
+        except BaseException as exc:  # re-raised on the test thread
+            errors.append(exc)
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"{fn.__name__} did not return within {seconds}s"
+    if errors:
+        raise errors[0]
 
 
 def _cap_worker(data_dir: str, ready, release) -> None:
@@ -233,8 +256,9 @@ def test_r4_1_record_degraded_is_lossless_while_lock_is_held(tmp_path):
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         started = time.monotonic()
-        config_mod.record_degraded(
-            "v8-lock-held", RuntimeError("lock contention"), override_dir=str(data_dir)
+        _returns_within(
+            10, config_mod.record_degraded,
+            "v8-lock-held", RuntimeError("lock contention"), override_dir=str(data_dir),
         )
         assert time.monotonic() - started < 2.0, "degraded recording blocked on its lock"
     finally:
@@ -251,7 +275,12 @@ def test_r4_2_uncreatable_lock_file_remains_fail_open(tmp_path):
     data_dir = tmp_path / "ledger"
     data_dir.mkdir()
     (data_dir / "degraded.lock").mkdir()
-    config_mod.record_degraded(
+    _returns_within(
+        10, config_mod.record_degraded,
         "v8-lock-path-blocked", RuntimeError("lock path is a directory"),
         override_dir=str(data_dir),
+    )
+    events = _events(data_dir)
+    assert any(event.get("cmd") == "v8-lock-path-blocked" for event in events), (
+        "degraded event was lost when the lock file could not be opened"
     )

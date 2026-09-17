@@ -128,3 +128,47 @@ def test_missing_nodes_do_not_count_as_refusals(store):
     target = store.add_node("Real", content="body")
     assert merge_nodes(store, "does-not-exist", target) is False
     assert store.get_meta(MERGE_REFUSAL_COUNTER) is None
+
+
+def test_a_refusable_pair_takes_no_snapshot_and_counts_once(store, monkeypatch):
+    from kindex import snapshots
+    from kindex.config import Config
+    from kindex.dream import dream_lightweight
+
+    snapshots_taken = []
+    monkeypatch.setattr(snapshots, "snapshot_db", lambda *a, **k: snapshots_taken.append(a))
+    words = "alpha beta gamma delta "
+    store.add_node("Bundle symbol table", content=words * (MAX_MERGE_RESULT_CHARS // len(words)),
+                   node_id="big")
+    store.add_node("Bundle symbol table", content=words * 30, node_id="small")
+    cfg = Config(data_dir=str(store.config.data_path))
+    for _ in range(2):
+        results = dream_lightweight(cfg, store)
+        assert results["merged"] == 0
+    assert snapshots_taken == []
+    assert store.get_meta(MERGE_REFUSAL_COUNTER) == "1"
+
+
+def test_a_deep_cluster_prompt_is_bounded_and_sent_on_stdin(monkeypatch):
+    import subprocess
+
+    from kindex import dream_deep
+
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"], seen["input"] = args, kwargs.get("input")
+        return subprocess.CompletedProcess(args, 0, "TITLE: Summary\nCONTENT: c", "")
+
+    monkeypatch.setattr(dream_deep.subprocess, "run", fake_run)
+    cluster = [{"id": f"n{i}", "title": "t" * 500, "content": "c" * 500} for i in range(500)]
+    assert dream_deep._llm_summarise_cluster(cluster) == {"title": "Summary", "content": "c"}
+    assert seen["args"] == ["claude", "-p"]
+    assert len(seen["input"]) <= dream_deep.MAX_PROMPT_CHARS + 500
+    assert "more related nodes" in seen["input"]
+
+
+def test_the_mcp_dream_tool_refuses_deep(monkeypatch):
+    from kindex import mcp_server
+
+    assert mcp_server.dream(mode="deep").startswith("Error")

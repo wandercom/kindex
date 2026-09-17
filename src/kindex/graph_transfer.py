@@ -344,6 +344,11 @@ def import_records(store, items: list[dict], *, replace: bool = False, dry_run: 
                     raise ValueError(f"Import conflict for {node_id}: lifecycle metadata")
                 if incoming_extra:
                     fields["extra"] = {**old_extra, **incoming_extra}
+                if not replace:
+                    # Weight is this graph's own attention state, and it decays
+                    # here: a merge keeps it rather than calling every node
+                    # that decayed since the last sync a conflict.
+                    fields.pop("weight", None)
                 fields = {k: v for k, v in fields.items() if v != existing.get(k)}
                 if not replace and any(existing.get(k) not in (None, "", [], {}) for k in fields if k != "extra"):
                     raise ValueError(f"Import conflict for {node_id}; inspect evidence before using --mode replace")

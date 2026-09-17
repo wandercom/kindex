@@ -308,3 +308,25 @@ def test_v14_migration_passes_a_table_that_already_has_the_column(tmp_path):
         "SELECT identity_kind FROM suggestions WHERE source = 'dream-cycle'").fetchone()
     assert row["identity_kind"] == "node_id"
     store.close()
+
+
+def test_v15_migration_indexes_kinbase_rows_on_an_existing_store(tmp_path):
+    """The repository index joined the schema after v14 shipped; a v14 store
+    gets it from v15 rather than scanning nodes on every sync."""
+    store = Store(Config(data_dir=str(tmp_path)))
+    store.conn.execute("DROP INDEX idx_nodes_kinbase_repo")
+    store.conn.execute("UPDATE meta SET value = '14' WHERE key = 'schema_version'")
+    store.conn.commit()
+    store.close()
+    store = Store(Config(data_dir=str(tmp_path)))
+    try:
+        assert store.get_meta("schema_version") == "15"
+        assert store.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_nodes_kinbase_repo'").fetchone()
+        plan = " ".join(row[3] for row in store.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM nodes WHERE json_valid(extra) "
+            "AND json_extract(extra, '$.kinbase.repo') = 'x'"))
+        assert "idx_nodes_kinbase_repo" in plan
+    finally:
+        store.close()

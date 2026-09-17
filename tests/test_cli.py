@@ -368,6 +368,16 @@ class TestCoordCLI:
         r = run_as("alpha", "coord", "inject", "crew", "list", "--data-dir", data_dir)
         assert "No inject messages" in r.stdout
 
+    def test_end_needs_membership_unless_forced(self, data_dir):
+        run_as("alpha", "coord", "start", "crew", "--data-dir", data_dir)
+        r = run_as("gamma", "coord", "end", "crew", "--data-dir", data_dir)
+        assert r.returncode == 1
+        assert "creator or members may end" in r.stderr
+
+        r = run_as("gamma", "coord", "end", "crew", "--force", "--data-dir", data_dir)
+        assert r.returncode == 0, r.stderr
+        assert "Ended coordination conversation" in r.stdout
+
     def test_post_defaults_agent_and_targets(self, data_dir):
         run_as("alpha", "coord", "start", "room", "--data-dir", data_dir)
         r = run_as("alpha", "coord", "post", "room", "hello", "team",

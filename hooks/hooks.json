@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/bin/bash -lc 'source ~/.profile >/dev/null 2>&1 || true; exec kin compact-hook --emit-context'",
+            "command": "/bin/bash -lc 'source ~/.profile >/dev/null 2>&1 || true; exec kin compact-hook'",
             "timeout": 10
           }
         ]

@@ -605,7 +605,7 @@ def _race(root, setup, left_op, right_op):
     def invoke(operation):
         local = Store(Config(data_dir=str(root)))
         try:
-            barrier.wait()
+            barrier.wait(timeout=10)
             try:
                 value = operation(local, candidate_id, token)
                 return ("value", value)

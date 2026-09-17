@@ -456,10 +456,11 @@ class TestCronCollabHygiene:
         nid_live = s.add_node("Live thing", node_type="concept", prov_activity="test")
         lock_node(s, nid_live, "agent-a", ttl_minutes=60)
 
+        # Live conversation survives. Started first: starting a conversation
+        # archives expired ones itself.
+        create_conversation(s, "fresh", ttl_minutes=240)
         # Expired conversation
         create_conversation(s, "stale", ttl_minutes=-1)
-        # Live conversation survives
-        create_conversation(s, "fresh", ttl_minutes=240)
 
         # Expired task claim
         task_id = create_task(s, "Sweep me")

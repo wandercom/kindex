@@ -148,7 +148,7 @@ durable distributed test fixtures. Signet qualification is recorded in its own
 
 Homebrew now supplies `claude-code@latest` **2.1.263**. The updated local
 signet-eval binary embeds its plugin and was installed at
-`/Users/jmcentire/.cargo/bin/signet-eval`; the prior binary is retained under
+`~/.cargo/bin/signet-eval`; the prior binary is retained under
 `signet-eval-backups/signet-eval-before-hooks-2-20260906-9c4852eb` beside it.
 The installed binary SHA256 is
 `e4bab003039b0d4d7baadf277fa62b8ca322a3a398fb99d158f91cf54ba464d9`.

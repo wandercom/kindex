@@ -1079,7 +1079,8 @@ def quarantine_oversized_queue_items(
 
 def drain_embedding_queue(store: Store, config: Config | None = None, *,
                           max_jobs: int | None = None,
-                          time_budget: float | None = None) -> dict:
+                          time_budget: float | None = None,
+                          report_coverage: bool = True) -> dict:
     """Embed queued nodes. This is where the (possibly networked) embedding cost
     lives — runs in cron, off the agent's path. Idempotent per node.
 
@@ -1104,7 +1105,8 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
     if not queue:
         return {"status": "empty", "embedded": 0, "pending": 0,
                 "quarantined": len(quarantine), "drain_complete": True,
-                "coverage_complete": embedding_status(store)["coverage_complete"]}
+                "coverage_complete": (embedding_status(store)["coverage_complete"]
+                                      if report_coverage else None)}
     if not is_available():
         # Backend not installed/usable; leave the (bounded) queue intact in case
         # it becomes available later.
@@ -1192,7 +1194,9 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
     return {"status": "ok", "embedded": embedded, "pending": len(remaining),
             "quarantined": len(quarantine), "quarantined_this_drain": quarantined,
             "drain_complete": drain_complete,
-            "coverage_complete": embedding_status(store)["coverage_complete"]}
+            "coverage_complete": (embedding_status(store)["coverage_complete"]
+                                  if report_coverage and drain_complete else
+                                  None if not report_coverage else False)}
 
 
 def _node_embedding_fresh(store: Store, node: dict, fingerprint: str) -> bool:
@@ -1376,8 +1380,12 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
     return plan
 
 
-def embedding_status(store: Store) -> dict:
-    """Return current embedding configuration and queue/index status."""
+def embedding_status(store: Store, *, coverage: bool = True) -> dict:
+    """Return current embedding configuration and queue/index status.
+
+    `coverage=False` skips the per-node freshness scan (the whole graph, one
+    query per node); `coverage_complete` is then None. The cron pass needs
+    only the queue length and ran the scan two or three times per pass."""
     provider, model, dims, api_key_env = _resolve_embedding_config(store.config)
     quarantine = _load_embedding_quarantine(store)
     groups: dict[tuple[str, int | None, str], int] = {}
@@ -1404,6 +1412,8 @@ def embedding_status(store: Store) -> dict:
         "coverage_complete": False,
     }
     status["drain_complete"] = not status["queue_pending"]
+    if not coverage:
+        status["coverage_complete"] = None
     try:
         status["vector_rows"] = store.conn.execute(
             "SELECT COUNT(*) FROM node_vector_meta"
@@ -1411,6 +1421,8 @@ def embedding_status(store: Store) -> dict:
         status["indexed_nodes"] = store.conn.execute(
             "SELECT COUNT(DISTINCT node_id) FROM node_vector_meta"
         ).fetchone()[0]
+        if not coverage:
+            return status
         eligible = [node for node in select_reindex_nodes(store) if _embedding_text_for_node(node)]
         fingerprint = status["fingerprint"]
         status["coverage_complete"] = (
@@ -1419,7 +1431,7 @@ def embedding_status(store: Store) -> dict:
             and all(_node_embedding_fresh(store, node, fingerprint) for node in eligible)
         )
     except Exception:
-        status["coverage_complete"] = False
+        status["coverage_complete"] = False if coverage else None
     return status
 
 

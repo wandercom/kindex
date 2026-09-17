@@ -459,12 +459,29 @@ class TestAutoSnooze:
 # ── CLI ─────────────────────────────────────────────────────────────
 
 
-def _run_cli(*args, tmp_path=None, input_text=None):
+def _run_cli(*args, tmp_path=None, input_text=None, env=None):
     """Run kin CLI as subprocess."""
+    import os
     cmd = [sys.executable, "-m", "kindex.cli"] + list(args)
     if tmp_path:
         cmd.extend(["--data-dir", str(tmp_path)])
-    return subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=30)
+    return subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=30,
+                          env=None if env is None else {**os.environ, **env})
+
+
+def _codex_home(root, *sessions):
+    """A CODEX_HOME whose rollouts hold ``sessions`` (oldest first)."""
+    import os
+    import time
+    day = root / "codex-home" / "sessions" / "2026" / "09" / "17"
+    day.mkdir(parents=True)
+    for n, session in enumerate(sessions):
+        rollout = day / f"rollout-{n}.jsonl"
+        rollout.write_text(json.dumps(
+            {"type": "session_meta", "payload": {"id": session, "cwd": "/w"}}) + "\n")
+        stamp = time.time() - 100 + n
+        os.utime(rollout, (stamp, stamp))
+    return root / "codex-home"
 
 
 class TestReminderCLI:
@@ -521,6 +538,7 @@ class TestReminderCLI:
         assert "Legacy reminder" not in result.stdout
 
     def test_remind_create_with_codex_wake_json(self, tmp_path):
+        home = _codex_home(tmp_path, "older-thread", "newest-thread")
         result = _run_cli(
             "remind", "create", "Continue build",
             "--at", "in 30 minutes",
@@ -531,14 +549,16 @@ class TestReminderCLI:
             "--instructions", "Continue the outstanding build work.",
             "--json",
             tmp_path=tmp_path,
+            env={"CODEX_HOME": str(home), "CODEX_THREAD_ID": ""},
         )
 
-        assert result.returncode == 0
+        assert result.returncode == 0, result.stderr
         reminder = json.loads(result.stdout)
         extra = reminder["extra"]
         assert extra["wake_client"] == "codex"
-        assert extra["wake_session_id"] == "last"
-        assert extra["wake_cwd"] == str(tmp_path)
+        # "last" names the session that was newest when the reminder was made.
+        assert extra["wake_session_id"] == "newest-thread"
+        assert extra["wake_cwd"] == str(tmp_path.resolve())
         assert extra["wake_model"] == "gpt-5"
         assert extra["action_mode"] == "codex"
         assert extra["action_status"] == "pending"
@@ -778,8 +798,9 @@ class TestCreateReminderWithAction:
         assert r["extra"]["reminder_scope"] == "chat"
         assert r["extra"]["attention_triggers"] == ["deploy"]
 
-    def test_create_with_codex_wake(self, store, tmp_path):
+    def test_create_with_codex_wake(self, store, tmp_path, monkeypatch):
         from kindex.reminders import create_reminder
+        monkeypatch.setenv("CODEX_THREAD_ID", "thread-in-use")
         rid = create_reminder(
             store,
             "Wake Codex",
@@ -792,8 +813,9 @@ class TestCreateReminderWithAction:
         )
         r = store.get_reminder(rid)
         assert r["extra"]["wake_client"] == "codex"
-        assert r["extra"]["wake_session_id"] == "last"
-        assert r["extra"]["wake_cwd"] == str(tmp_path)
+        # Created from inside a Codex session, "last" is that session.
+        assert r["extra"]["wake_session_id"] == "thread-in-use"
+        assert r["extra"]["wake_cwd"] == str(tmp_path.resolve())
         assert r["extra"]["wake_model"] == "gpt-5"
         assert r["extra"]["action_mode"] == "codex"
 
@@ -801,6 +823,47 @@ class TestCreateReminderWithAction:
         from kindex.reminders import create_reminder
         with pytest.raises(ValueError, match="Invalid wake client"):
             create_reminder(store, "Bad wake", "in 1 hour", wake_client="cursor")
+
+    def test_wake_options_need_a_wake_client(self, store):
+        from kindex.reminders import create_reminder
+        with pytest.raises(ValueError, match="need a wake client"):
+            create_reminder(store, "Dropped", "in 1 hour", action_command="true",
+                            wake_session_id="abc")
+
+    @pytest.mark.parametrize("field,value,message", [
+        ("wake_session_id", "--dangerously-bypass-approvals-and-sandbox", "Invalid wake session"),
+        ("wake_model", "-c sandbox=none", "Invalid wake model"),
+        ("wake_model", "gpt 5", "Invalid wake model"),
+        ("wake_agent", "build", "applies only to OpenCode"),
+        ("wake_cwd", "/definitely/not/a/dir", "does not exist"),
+    ])
+    def test_wake_values_that_cannot_reach_argv(self, store, field, value, message):
+        from kindex.reminders import create_reminder
+        with pytest.raises(ValueError, match=message):
+            create_reminder(store, "Bad wake", "in 1 hour", action_instructions="go",
+                            wake_client="codex", **{field: value})
+
+    def test_wake_cwd_defaults_to_the_creator(self, store, tmp_path, monkeypatch):
+        from kindex.reminders import create_reminder
+        monkeypatch.chdir(tmp_path)
+        rid = create_reminder(store, "Here", "in 1 hour", action_instructions="go",
+                              wake_client="opencode", wake_session_id="ses_1")
+        assert store.get_reminder(rid)["extra"]["wake_cwd"] == str(tmp_path.resolve())
+
+    def test_last_without_a_resolvable_session_is_refused(self, store, tmp_path, monkeypatch):
+        from kindex.reminders import create_reminder
+        monkeypatch.delenv("OPENCODE_SESSION_ID", raising=False)
+        with pytest.raises(ValueError, match="Cannot resolve the latest opencode session"):
+            create_reminder(store, "Later", "in 1 hour", action_instructions="go",
+                            wake_client="opencode", wake_session_id="last",
+                            wake_cwd=str(tmp_path))
+        for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_CONVERSATION_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex"))
+        with pytest.raises(ValueError, match="Cannot resolve the latest codex session"):
+            create_reminder(store, "Later", "in 1 hour", action_instructions="go",
+                            wake_client="codex", wake_session_id="last",
+                            wake_cwd=str(tmp_path))
 
 
 class TestCheckAndFireWithActions:
@@ -1010,4 +1073,8 @@ class TestPromptCheckCLI:
         result = _run_cli("prompt-check", tmp_path=tmp_path)
         assert result.returncode == 0
         assert "Action reminder" in result.stdout
-        assert "echo hello" in result.stdout
+        # Summarised as the prime does: mode, sizes, digest and a preview of
+        # what an agent would act on (the instructions), never a call to run it.
+        assert "Action (claude, instructions" in result.stdout
+        assert "Run the echo command" in result.stdout
+        assert "kin remind exec" not in result.stdout

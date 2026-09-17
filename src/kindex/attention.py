@@ -120,14 +120,21 @@ def _acquire_attention_lock(config: Config) -> int | None:
     """Acquire the short-lived queue lock, or return None if another worker holds it."""
     try:
         import fcntl
-
+    except ImportError:  # no flock on this platform: no worker holds it
+        return None
+    try:
         path = _attention_lock_path(config)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
     except OSError:
         return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Contended: the descriptor was leaked on every such attempt.
+        os.close(fd)
+        return None
+    return fd
 
 
 def _release_attention_lock(fd: int | None) -> None:
@@ -137,9 +144,13 @@ def _release_attention_lock(fd: int | None) -> None:
         import fcntl
 
         fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-    except OSError:
+    except (ImportError, OSError):
         pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _read_meta_list(store: "Store", key: str) -> list[dict]:

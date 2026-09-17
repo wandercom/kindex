@@ -19,11 +19,34 @@ import yaml
 
 
 def run(*args):
-    """Run the kin CLI as a subprocess (same pattern as test_cli.py)."""
+    """Run the kin CLI as a subprocess (same pattern as test_cli.py).
+
+    The child inherits the per-test HOME and working directory that
+    ``isolated_cli_process`` sets, never the developer's own.
+    """
     return subprocess.run(
         [sys.executable, "-m", "kindex.cli", *args],
         capture_output=True, text=True, timeout=30,
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_process(tmp_path_factory, monkeypatch):
+    """Give every CLI child an empty HOME and a working directory outside the repo.
+
+    Without this, `kin analytics` opened the developer's ~/.claude archive,
+    and a child started in the repo read its own .kin store.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("KIN_PROJECT", "KIN_PROJECT_PATH", "KIN_CONFIG", "KIN_PROFILE",
+                 "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    src = Path(__file__).resolve().parents[1] / "src"
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+        p for p in (str(src), os.environ.get("PYTHONPATH", "")) if p))
+    monkeypatch.chdir(home)
+    return home
 
 
 @pytest.fixture
@@ -255,8 +278,8 @@ class TestParentKinWalk:
         # Leaf should come first (most specific)
         assert paths[0] == (deep / ".kin" / "config").resolve()
 
-    def test_auto_upgrades_old_kin_file(self, tmp_path):
-        """Old-style .kin file is auto-upgraded during walk."""
+    def test_reads_old_kin_file_in_place(self, tmp_path):
+        """Old-style .kin file is found during the walk without being rewritten."""
         deep = tmp_path / "child"
         deep.mkdir()
 
@@ -271,10 +294,9 @@ class TestParentKinWalk:
 
         # Both should be found
         assert (deep / ".kin" / "config").resolve() in paths
-        assert (tmp_path / ".kin" / "config").resolve() in paths
-        # Old file should have been upgraded
-        assert (tmp_path / ".kin").is_dir()
-        assert (tmp_path / ".kin" / "config").is_file()
+        assert (tmp_path / ".kin").resolve() in paths
+        # A walk is a read: the old file is untouched
+        assert (tmp_path / ".kin").is_file()
 
     def test_no_kin_files(self, tmp_path):
         subdir = tmp_path / "empty"
@@ -474,28 +496,38 @@ class TestLinearAdapter:
 class TestCLIAnalytics:
     """Test the `kin analytics` CLI command end-to-end."""
 
-    def test_analytics_runs_without_crash(self, data_dir):
-        """analytics completes without crashing.
-
-        When a real ~/.claude/archive/index.db exists on the machine, the
-        command succeeds and prints stats.  When no archive exists, it
-        exits with an error message.  Either outcome is acceptable.
-        """
+    def test_analytics_reports_a_missing_archive(self, data_dir):
+        """With no archive anywhere, analytics exits 1 and names where it looked."""
         r = run("analytics", "--data-dir", data_dir)
-        if r.returncode == 0:
-            # Found an archive -- output should contain session info
-            assert "session" in r.stdout.lower() or "total" in r.stdout.lower()
-        else:
-            # No archive -- should report a helpful error
-            assert "error" in r.stderr.lower() or "not found" in r.stderr.lower()
+        assert r.returncode == 1
+        assert "Archive database not found" in r.stderr
+        assert "Searched:" in r.stderr
 
-    def test_analytics_json_flag(self, data_dir):
-        """analytics --json produces JSON output or a graceful error."""
+    def test_analytics_json_reports_a_missing_archive(self, data_dir):
         r = run("analytics", "--json", "--data-dir", data_dir)
-        # Should not crash regardless of archive presence
-        combined = r.stdout + r.stderr
-        assert len(combined) > 0
-        if r.returncode == 0 and r.stdout.strip():
-            # If it succeeded, stdout should be valid JSON
-            data = json.loads(r.stdout)
-            assert isinstance(data, dict)
+        assert r.returncode == 1
+        assert r.stdout == ""
+        assert "Archive database not found" in r.stderr
+
+    def test_analytics_reads_the_archive_under_home(self, data_dir, isolated_cli_process):
+        """An archive at ~/.claude/archive/index.db is found and summarised."""
+        import sqlite3
+
+        archive = isolated_cli_process / ".claude" / "archive"
+        archive.mkdir(parents=True)
+        conn = sqlite3.connect(archive / "index.db")
+        conn.execute("CREATE TABLE sessions (id TEXT, created_at TEXT, project TEXT)")
+        conn.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [
+            ("a", "2026-08-01T10:00:00", "/work/alpha"),
+            ("b", "2026-08-02T11:00:00", "/work/alpha"),
+            ("c", "2026-09-01T12:00:00", "/work/beta"),
+        ])
+        conn.commit()
+        conn.close()
+
+        r = run("analytics", "--json", "--data-dir", data_dir)
+        assert r.returncode == 0, r.stderr
+        data = json.loads(r.stdout)
+        assert data["total_sessions"] == 3
+        assert data["sessions_by_month"] == {"2026-08": 2, "2026-09": 1}
+        assert data["top_projects"] == {"alpha": 2, "beta": 1}

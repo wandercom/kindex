@@ -147,6 +147,12 @@ def ensure_local_ignored(data_path: Path) -> None:
         return
     if kin.is_symlink():
         return
+    if kin.is_file():
+        # A legacy .kin file is read in place, but a store cannot be created
+        # beneath it: opening the store is the write that upgrades it to
+        # .kin/config.
+        from .config import _maybe_upgrade_kin_file
+        _maybe_upgrade_kin_file(kin)
     ignore = kin / ".gitignore"
     if ignore.is_symlink():
         raise ValueError("Refusing symlinked .kin/.gitignore")

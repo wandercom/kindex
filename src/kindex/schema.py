@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 STANDINGS = ("unruled", "present", "prevalent", "exemplary", "enforced", "ratified", "authoritative")
 
@@ -24,6 +24,14 @@ OPERATIONAL_TYPES = (
 )
 
 ALL_NODE_TYPES = NODE_TYPES + OPERATIONAL_TYPES
+
+# What a generic add may create. Tasks, sessions and projects have their own
+# tools, which own their lifecycle; an unknown type would fall to the
+# editable class and bypass the additive edit policy.
+ADDABLE_NODE_TYPES = (
+    "concept", "document", "decision", "question", "skill", "artifact", "person",
+    "constraint", "directive", "checkpoint", "watch",
+)
 
 # Session nodes record agent-run lifecycle. They remain queryable history, but
 # they are not knowledge-topology vertices and do not need semantic edges.
@@ -180,6 +188,12 @@ CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_nodes_updated ON nodes(updated_at);
 CREATE INDEX IF NOT EXISTS idx_nodes_weight ON nodes(weight DESC);
 CREATE INDEX IF NOT EXISTS idx_nodes_audience ON nodes(audience);
+-- Kinbase sync reads one repository's rows under its write lock. Partial on
+-- json_valid so a row with malformed extra cannot fail the index build; a
+-- query uses it only when it repeats that guard.
+CREATE INDEX IF NOT EXISTS idx_nodes_kinbase_repo
+    ON nodes (json_extract(extra, '$.kinbase.repo'))
+    WHERE json_valid(extra);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_session_active_tag_project
     ON nodes (
         json_extract(extra, '$.tag'),

@@ -103,7 +103,7 @@ def test_concurrent_retries_commit_one_task_and_receipt(store, scope, linked):
         other = Store(store.config)
         try:
             other.conn
-            barrier.wait()
+            barrier.wait(timeout=10)
             return execute(other, "create", {"operation_id": "same-op", "title": "Concurrent",
                            "link_to": [target] if linked else []}, scope)
         finally:
@@ -147,7 +147,7 @@ def test_concurrent_cas_has_exactly_one_winner(store, scope):
         other = Store(store.config)
         try:
             other.conn
-            barrier.wait()
+            barrier.wait(timeout=10)
             return execute(other, "update", {"operation_id": f"update-{index}", "id": original["id"],
                            "expected_version": original["version"], "title": f"Winner {index}"}, scope)
         finally:
