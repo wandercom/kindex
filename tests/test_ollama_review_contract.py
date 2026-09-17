@@ -218,7 +218,12 @@ class _OllamaHandler(BaseHTTPRequestHandler):
                 self._send(payload)
 
     def _send_trickled_response(self):
-        """Keep every socket interval below one second but exceed total timeout."""
+        """Keep every socket interval below one second but exceed total timeout.
+
+        About 30 slices at 0.18 s make the whole response take over five
+        seconds, so a total bound of one second stays distinguishable from a
+        per-read timeout with room for a loaded runner.
+        """
         body = json.dumps({
             "model": LATEST,
             "done": True,
@@ -233,7 +238,7 @@ class _OllamaHandler(BaseHTTPRequestHandler):
             b"Connection: close\r\n",
             b"\r\n",
         ]
-        width = max(1, len(body) // 8)
+        width = max(1, len(body) // 30)
         parts.extend(body[index:index + width] for index in range(0, len(body), width))
         try:
             for part in parts:
@@ -370,8 +375,17 @@ def test_o2_rejects_path_query_and_fragment_before_any_http(tmp_path, loopback_s
     "http://2130706433:11434",
     "http://[::ffff:127.0.0.1]:11434",
 ])
-def test_o2_rejects_nonliteral_nonhttp_or_credentialed_endpoints_without_dispatch(tmp_path, url):
-    started = time.monotonic()
+def test_o2_rejects_nonliteral_nonhttp_or_credentialed_endpoints_without_dispatch(
+        tmp_path, monkeypatch, url):
+    attempts = []
+
+    def no_network(*args, **kwargs):
+        attempts.append(args)
+        raise AssertionError("Invalid endpoints must be denied before network I/O")
+
+    # Checked structurally rather than by elapsed time, which measured runner load.
+    monkeypatch.setattr(ollama_review, "_connect", no_network)
+    monkeypatch.setattr(ollama_review.socket, "getaddrinfo", no_network)
     try:
         cfg = _config(tmp_path / "data", url)
     except (TypeError, ValueError):
@@ -379,7 +393,7 @@ def test_o2_rejects_nonliteral_nonhttp_or_credentialed_endpoints_without_dispatc
     state = ollama_review.preflight(cfg, "bad-endpoint")
     assert state is not None
     _assert_failed(ollama_review.run_review(cfg, "bad-endpoint", WORK))
-    assert time.monotonic() - started < 0.75, "Invalid endpoints must be denied before network I/O"
+    assert attempts == []
 
 
 def test_o2_redirect_is_not_followed_and_prompt_is_never_disclosed(tmp_path, loopback_servers):
@@ -550,7 +564,7 @@ def test_o3_o4_failures_retain_attempt_never_fallback_and_total_timeout_is_bound
     _assert_failed(ollama_review.run_review(cfg, "failure", WORK))
     assert len(server.requests) == before, "Exhaustion after a retained failure must suppress HTTP"
     if mode == "trickle":
-        assert elapsed < 1.75, "agent_timeout is a total wall-time bound, not a per-read timeout"
+        assert elapsed < 4.0, "agent_timeout is a total wall-time bound, not a per-read timeout"
 
 
 def test_o3_legacy_shared_allowance_counts_block_ollama_before_http(tmp_path, loopback_servers):

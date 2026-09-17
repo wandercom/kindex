@@ -88,3 +88,16 @@ def test_custom_kin_location_is_not_implicitly_owned(unknown_path):
     command = _kin_stop_hook_command(unknown_path, ["compact-hook", "--text", "Session ended"])
     assert command not in _known_commands(Config(), "/current/bin/kin")
     assert command in _known_commands(Config(), unknown_path)
+
+
+def test_a_legacy_install_writes_no_plugin_key(tmp_path, monkeypatch):
+    import kindex.claude_install as installer
+    import kindex.setup as setup
+    monkeypatch.setattr(setup, "_find_kin_path", lambda: "/usr/bin/kin")
+    cfg = Config(claude_dir=str(tmp_path / "claude"))
+    cfg.claude_path.mkdir()
+    (cfg.claude_path / "settings.json").write_text(json.dumps({"model": "opus"}))
+    installer.install(cfg, mode="legacy")
+    written = json.loads((cfg.claude_path / "settings.json").read_text())
+    assert "enabledPlugins" not in written
+    assert written["model"] == "opus"

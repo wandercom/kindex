@@ -11,12 +11,12 @@ mcp = pytest.importorskip("mcp", reason="mcp not installed")
 @pytest.fixture
 def mcp_store(tmp_path):
     """Set up a Store + Config for MCP tool testing."""
-    from kindex.config import load_config
+    from kindex.config import Config
     from kindex.store import Store
 
-    d = str(tmp_path)
-    cfg = load_config()
-    cfg.data_dir = d
+    # An explicit config: load_config() read the developer's global config
+    # and the repository's own .kin from the test's working directory.
+    cfg = Config(data_dir=str(tmp_path))
     store = Store(cfg)
 
     # Add test data
@@ -307,7 +307,12 @@ class TestMCPCoordLegacy:
         result = coord_list()
         assert "build-plan" in result
 
+        # The resolved agent (mcp-agent) did not start or join it.
         result = coord_end("build-plan", summary="done")
+        assert "Could not end coordination conversation" in result
+        assert "build-plan" in coord_list()
+
+        result = coord_end("build-plan", summary="done", agent="agent-a")
         assert "Ended coordination conversation" in result
         assert "build-plan" not in coord_list()
 
@@ -403,6 +408,11 @@ class TestMCPCoordCollab:
         assert "Cleared 1" in coord_inject("crew", action="clear", message_id=1)
         assert "Cleared 1" in coord_inject("crew", action="clear")
         assert "No inject messages" in coord_inject("crew", action="list")
+
+        # A non-member neither sets nor clears.
+        result = coord_inject("crew", action="set", text="hi", agent="outsider")
+        assert "Could not manage inject messages" in result
+        assert "creator or members" in result
 
     def test_inject_unknown_action(self, patch_store, agent_env):
         from kindex.mcp_server import coord_inject, coord_start
@@ -618,6 +628,28 @@ class TestMCPInstructions:
 # ── graph_merge policy/lock/extra/pheromone (idx 27) ──────────────────
 
 
+class TestMCPGraphMergeSelf:
+    def test_a_node_cannot_be_merged_into_itself(self, patch_store):
+        from kindex.mcp_server import graph_merge
+
+        store, _ = patch_store
+        node = store.add_node(title="Solo", content="x", node_id="solo")
+        result = graph_merge(node, node)
+        assert result.startswith("Error"), result
+        assert store.get_node("solo")["status"] == "active"
+
+
+class TestMCPPrimeHeader:
+    def test_the_header_counts_the_graph(self, patch_store):
+        from kindex.mcp_server import prime
+
+        store, _ = patch_store
+        header = prime("Stigmergy").split("\n\n", 2)[1]
+        stats = store.stats()
+        assert header == f"Graph: {stats['nodes']} nodes, {stats['edges']} edges"
+        assert stats["nodes"] > 0
+
+
 class TestMCPGraphMergePolicy:
     def test_refuses_managed_types_and_preserves_collab_state(
             self, patch_store, agent_env):
@@ -727,3 +759,101 @@ class TestMCPSupersedeLockMessage:
         result = edit(nid, content="new content")
         assert result.startswith("Error")
         assert "pass force to override" in result
+
+
+class TestMCPAddTypes:
+    def test_add_refuses_a_type_it_does_not_own(self, patch_store):
+        from kindex.mcp_server import add
+
+        store, _ = patch_store
+        before = store.stats()["stored_nodes"]
+        for node_type in ("task", "session", "made-up"):
+            result = add(f"Typed as {node_type}", node_type=node_type)
+            assert result.startswith("Error"), result
+        assert store.stats()["stored_nodes"] == before
+        assert not add("Never skip the migration review", node_type="constraint").startswith("Error")
+
+
+def test_health_outcome_recognises_every_refusal_form():
+    from kindex.mcp_server import _health_outcome
+
+    for failed in ("Error: bad", "Node not found: x", "Task not found: t",
+                   "Unknown action: y", '{"ok": false, "error": {}}',
+                   {"ok": False}, {"error": {"code": "x"}}):
+        assert _health_outcome(failed) == "failed", failed
+    for fine in ("Added node x", '{"imported": 1}', {"ok": True}, "", None):
+        assert _health_outcome(fine) == "success", fine
+
+
+def test_caller_limits_are_clamped(patch_store, monkeypatch):
+    import kindex.mcp_server as mcp_mod
+
+    store, _ = patch_store
+    monkeypatch.setattr(mcp_mod, "MAX_TOOL_ROWS", 2)
+    for n in range(5):
+        store.add_node(title=f"Orphan {n}", content="alone", node_id=f"orphan-{n}")
+    listed = mcp_mod.list_nodes(limit=1000)
+    assert listed.startswith("2 node(s)"), listed
+    orphans = mcp_mod.resource_orphans()
+    assert "more (use graph_heal or list_nodes)" in orphans
+    assert mcp_mod._bounded(-5) == 1 and mcp_mod._bounded("x") == 2
+
+
+def test_invalidate_honours_locks_and_names_the_server_actor(patch_store, monkeypatch):
+    import json as _json
+
+    import kindex.mcp_server as mcp_mod
+    from kindex.locks import lock_node
+
+    store, _ = patch_store
+    monkeypatch.setattr(mcp_mod, "_default_agent", lambda agent="": "agent-self")
+    node = store.add_node(title="Retry budget", content="three", node_id="budget")
+    lock_node(store, node, "agent-other")
+    refused = mcp_mod.invalidate(node, invalidated_by="agent-other", disposition_code="stale")
+    assert isinstance(refused, str) and refused.startswith("Error"), refused
+    assert store.get_node(node).get("invalid_at") in (None, "")
+
+    mcp_mod.invalidate(node, invalidated_by="agent-other", disposition_code="stale", force=True)
+    entry = store.activity_since("1970-01-01", action="invalidate_node")[0]
+    details = entry["details"] if isinstance(entry["details"], dict) else _json.loads(entry["details"])
+    assert entry["actor"] == "agent-self"
+    assert details["asserted_by"] == "agent-other"
+
+
+def test_resources_answer_memory_unavailable_and_status_shows_drift(patch_store, monkeypatch):
+    import kindex.mcp_server as mcp_mod
+
+    store, _ = patch_store
+    store.set_meta("schema_version", "99")
+    assert "Schema drift: the database is v99" in mcp_mod.status()
+
+    def broken():
+        raise mcp_mod.MemoryUnavailableError(RuntimeError("locked"))
+
+    monkeypatch.setattr(mcp_mod, "_get_store", broken)
+    assert mcp_mod.resource_orphans().startswith("Error: memory unavailable")
+
+
+def test_search_is_scoped_to_the_client(patch_store, monkeypatch):
+    import kindex.mcp_server as mcp_mod
+
+    store, _ = patch_store
+    store.add_node(title="Codex-only rollout note", content="rollout steps",
+                   node_id="codex-note", tags=["client:codex"])
+    monkeypatch.setenv("KIN_CLIENT", "claude")
+    assert "Codex-only rollout note" not in mcp_mod.search("rollout note")
+    monkeypatch.setenv("KIN_CLIENT", "codex")
+    assert "Codex-only rollout note" in mcp_mod.search("rollout note")
+
+
+def test_the_project_identity_prefers_the_declared_path(monkeypatch, tmp_path):
+    import kindex.mcp_server as mcp_mod
+
+    monkeypatch.delenv("KIN_PROJECT_PATH", raising=False)
+    monkeypatch.delenv("KIN_PROJECT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert mcp_mod._mcp_project_path() == str(tmp_path) or mcp_mod._mcp_project_path().endswith(tmp_path.name)
+    monkeypatch.setenv("KIN_PROJECT", "/srv/project")
+    assert mcp_mod._mcp_project_path() == "/srv/project"
+    monkeypatch.setenv("KIN_PROJECT_PATH", "/srv/declared")
+    assert mcp_mod._mcp_project_path() == "/srv/declared"

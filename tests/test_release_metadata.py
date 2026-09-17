@@ -94,3 +94,14 @@ def test_documented_migration_snapshots_are_outside_merge_rotation():
         text = (ROOT / relative_path).read_text()
         assert "migrations/" in text
         assert "ten-file" in text
+
+
+def test_published_pages_leave_out_internal_reviews_and_home_paths():
+    workflow = (ROOT / ".github" / "workflows" / "pages.yml").read_text()
+    assert 'rm -rf "$RUNNER_TEMP/site/reviews"' in workflow
+    assert "path: docs\n" not in workflow
+    # Examples name a made-up user; no tracked doc carries a real home path.
+    for path in (ROOT / "docs").rglob("*"):
+        if path.is_file() and path.suffix in {".md", ".html", ".json", ".txt"}:
+            homes = set(re.findall(r"/Users/([A-Za-z0-9._-]+)/", path.read_text(errors="replace")))
+            assert homes <= {"alice"}, (path, homes)

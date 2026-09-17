@@ -449,3 +449,21 @@ def test_installed_console_script_transfers_and_reopens_for_recall(tmp_path):
     assert trusted.returncode == 0, trusted.stderr
     assert not trusted.stdout.strip()
     assert "No results." in trusted.stderr
+
+
+def test_a_merge_resync_survives_local_decay(tmp_path):
+    from kindex.config import Config
+    from kindex.graph_transfer import import_records as import_graph
+    from kindex.store import Store
+
+    store = Store(Config(data_dir=str(tmp_path / "graph")))
+    try:
+        record = [{"id": "n1", "title": "Retry budget", "content": "three", "weight": 0.8}]
+        import_graph(store, record, replace=False)
+        store.conn.execute("UPDATE nodes SET weight = 0.61 WHERE id = 'n1'")
+        store.conn.commit()
+        result = import_graph(store, record, replace=False)
+        assert result["skipped"] == 1
+        assert store.get_node("n1")["weight"] == 0.61
+    finally:
+        store.close()

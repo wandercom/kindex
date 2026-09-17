@@ -65,6 +65,8 @@ class AlertEvidence(_PersistentModel):
     sources: NativeSources | None = None
     reason: Literal["scan_limit"] | None = None
     omitted: Literal["payload_limit"] | None = None
+    # Why the reviews in a failure streak failed (review outcome codes).
+    failure_reasons: dict[str, int] | None = None
 
     @field_validator("last")
     @classmethod
@@ -103,7 +105,13 @@ def _read_payload(encoded):
     if not isinstance(encoded, str) or len(encoded.encode()) > MAX_PAYLOAD_BYTES:
         raise ValueError("Invalid persisted notification payload")
     try:
-        return AlertPayload.model_validate_json(encoded)
+        raw = json.loads(encoded)
+        # A stored alert's wording is its code's, not the row's: a copy edit
+        # to REASONS made every earlier alert fail validation and broke
+        # check_health and status.
+        if isinstance(raw, dict) and raw.get("code") in REASONS:
+            raw["reason"] = REASONS[raw["code"]]
+        return AlertPayload.model_validate_json(json.dumps(raw))
     except ValueError:
         # Do not echo malformed persisted content through validation diagnostics.
         raise ValueError("Invalid persisted notification payload") from None
@@ -218,6 +226,12 @@ def _projection(issue):
             safe_evidence["reason"] = "scan_limit"
         if isinstance(evidence.get("source_present"), bool):
             safe_evidence["source_present"] = evidence["source_present"]
+        reasons = evidence.get("failure_reasons")
+        if isinstance(reasons, dict):
+            kept = {str(reason)[:64]: count for reason, count in list(reasons.items())[:8]
+                    if isinstance(count, int) and count >= 0}
+            if kept:
+                safe_evidence["failure_reasons"] = kept
         sources = evidence.get("sources")
         if isinstance(sources, dict):
             safe_evidence["sources"] = {key: value for key, value in sources.items()

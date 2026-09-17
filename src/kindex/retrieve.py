@@ -147,13 +147,23 @@ def _rrf_merge(*ranked_lists: list[tuple[str, float]], k: int = _RRF_K_DEFAULT) 
 
 
 def _normalize_scores(ranked: list[tuple[str, float]]) -> list[tuple[str, float]]:
-    """Min-max normalize scores to [0, 1]. Preserves ordering."""
+    """Scale scores to [0, 1] by the best one. Preserves ordering.
+
+    Every source scores a match non-negatively, so the best match is 1.0 and
+    the rest keep their proportion to it. Min-max scaling gave the only match,
+    tied matches and the weakest match a confidence of 0.0, which search
+    reported as score=0.000 for a real hit. A negative score (none today)
+    shifts the scale so the lowest is 0.
+    """
     if not ranked:
         return []
     scores = [s for _, s in ranked]
     lo, hi = min(scores), max(scores)
-    span = hi - lo if hi != lo else 1.0
-    return [(nid, (s - lo) / span) for nid, s in ranked]
+    if lo < 0:
+        return [(nid, (s - lo) / (hi - lo) if hi != lo else 1.0) for nid, s in ranked]
+    if hi <= 0:
+        return [(nid, 0.0) for nid, _ in ranked]
+    return [(nid, s / hi) for nid, s in ranked]
 
 
 # Fallback ensemble weights — overridden by config.ranking when store is available.
@@ -674,16 +684,20 @@ def hybrid_search(
 def build_trust_note(omissions: dict[str, int] | None) -> str:
     """Human-only disclosure for admission-controlled recall."""
     omissions = omissions or {}
-    labels = (
-        ("legacy/unverified", "unverified"),
-        ("not-yet-valid", "not_yet_valid"),
-        ("invalidated/expired", "invalidated"),
-        ("mutual contradiction", "mutual_contradiction"),
-        ("inactive", "inactive"),
-    )
+    labels = {
+        "unverified": "legacy/unverified",
+        "not_yet_valid": "not-yet-valid",
+        "invalidated": "invalidated/expired",
+        "mutual_contradiction": "mutual contradiction",
+        "stale_referent": "stale referent",
+        "inactive": "inactive",
+    }
+    # Every reason counts, including one without a label here: an unlabelled
+    # reason used to be dropped, and the note then said nothing was omitted.
+    reasons = list(labels) + sorted(set(omissions) - set(labels))
     parts = [
-        f"{label}={omissions.get(reason, 0)}"
-        for label, reason in labels
+        f"{labels.get(reason, str(reason).replace('_', ' '))}={omissions[reason]}"
+        for reason in reasons
         if omissions.get(reason, 0)
     ]
     if not parts:
@@ -747,14 +761,15 @@ def _estimate_tokens(text: str) -> int:
     """Estimate token count without external dependencies.
 
     Uses word-based heuristic: ~1.3 tokens per whitespace-delimited word
-    for English prose, which is more accurate than fixed char ratios
-    across mixed content (code, structured data, natural language).
-    Falls back to char/4 for very short text.
+    for English prose, but never fewer than one token per four characters:
+    text with few spaces (paths, URLs, hashes, CJK) has few "words" and was
+    counted at a fraction of its size.
     """
     words = text.split()
+    by_chars = max(1, len(text) // 4)
     if len(words) < 5:
-        return max(1, len(text) // 4)
-    return int(len(words) * 1.3)
+        return by_chars
+    return max(int(len(words) * 1.3), by_chars)
 
 
 #: Heads every block of retrieved graph text, so a reader can tell the
@@ -926,10 +941,16 @@ def format_context_block(
 
     def annotated(count):
         selected = display_results[:count]
-        annotations = "\n\n".join(
-            graph_text(note) for node in results[:count] if (note := evidence_note(node))
-        )
         body = formatter(display_store, selected, query)
+        # Each note names its row, and only rows the tier rendered are
+        # annotated: a tier showing fewer rows than it was given (a budget,
+        # the executive top five) left notes about nothing on the page.
+        annotations = "\n\n".join(
+            graph_text(f"Evidence for {node.get('title') or node['id']} [{node['id']}]:",
+                       240, single_line=True) + "\n" + graph_text(note)
+            for node, shown in zip(results[:count], selected)
+            if (note := evidence_note(node)) and str(shown.get("title") or shown["id"]) in body
+        )
         # Caveats precede the body so budget truncation cannot erase an unknown
         # while retaining the apparently uncontested fact it qualifies.
         return annotations + "\n\n" + body if annotations else body

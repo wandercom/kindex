@@ -13,15 +13,25 @@ import sys
 from .privacy import redact, redact_text, safe_error
 
 
-def record_health(scope, kind: str, **details):
-    """Health telemetry is evidence only and may never break host execution."""
+def record_health(scope, kind: str, **details) -> bool:
+    """Health telemetry is evidence only and may never break host execution.
+
+    Returns whether the event is settled (recorded, or recording is off). A
+    failure is left in the degraded ledger: it used to vanish, and a broken
+    health store silently zeroed every hook, use and review record."""
     if not isinstance(scope, dict):
-        return
+        return True
     try:
         from .supervisor_health import record_automatic
         record_automatic(scope, kind, details)
-    except Exception:
-        pass
+        return True
+    except Exception as error:
+        try:
+            from .config import record_degraded
+            record_degraded("health", error)
+        except Exception:
+            pass
+        return False
 
 
 def session_key(scope: dict) -> str:
@@ -52,16 +62,21 @@ def config_snapshot(config) -> dict:
     return {"data_dir": str(config.data_path), "sim": config.sim.model_dump(),
             "llm": config.llm.model_dump(), "budget": config.budget.model_dump(),
             "active_profile": config.active_profile, "profile_source": config.profile_source,
-            "project_path": str(config._project_path) if config._project_path else None}
+            "project_path": str(config._project_path) if config._project_path else None,
+            # An explicit --data-dir for another graph must not be stamped
+            # with the active profile by the background worker either.
+            "stamp_on_open": bool(getattr(config, "_stamp_on_open", True))}
 
 
 def restore_config(snapshot: dict):
     from .config import Config
     fields = dict(snapshot)
     project = fields.pop("project_path", None)
+    stamp = fields.pop("stamp_on_open", True)
     config = Config(**fields)
     if project:
         config._project_path = Path(project)
+    config._stamp_on_open = bool(stamp)
     return config
 
 
@@ -311,11 +326,16 @@ def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial
               {"state", "reason", "tick", "updated_at", "reviewed_at", "review_tick", "delivered_tick", "accounting_status", "advocate_state", "advocate_reason", "delivery_drop_reason", "delivery_drop_tick"}}
     public.setdefault("state", "skipped")
     context = "\n".join(lines)
-    if not injection and public["state"] in {"failed", "unavailable", "budget_exhausted"}:
+    failing = public["state"] in {"failed", "unavailable", "budget_exhausted"}
+    if not injection and failing:
         notice = public["state"] + ":" + public.get("reason", "unknown")
         if latest.get("notice") != notice:
             context = (context + "\n" if context else "") + f"Kindex supervisor: {public['state']} ({public.get('reason', 'unknown')}); no fresh lookback completed."
             write_state(store, conversation, None, notice=notice)
+    elif not failing and latest.get("notice"):
+        # A state that is no longer a failure re-arms the notice: the same
+        # failure after a good review is news again (json_patch drops null).
+        write_state(store, conversation, None, notice=None)
     return {"ok": True, "context": context, "supervisor": {**diagnostics, **public}}
 
 

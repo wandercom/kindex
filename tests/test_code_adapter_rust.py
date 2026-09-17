@@ -23,6 +23,7 @@ if (
     )
 
 from kindex.adapters.code import (  # noqa: E402
+    _check_ctags,
     _check_treesitter,
     _ts_extract_calls,
     _ts_extract_imports_rust,
@@ -205,6 +206,8 @@ class TestRustIngestion:
         finally:
             store.close()
 
+    @pytest.mark.skipif(not _check_ctags(),
+                        reason="symbol nodes come from universal-ctags, which is not installed")
     def test_ingest_creates_trait_impl_edges(self, tmp_path):
         """`impl Greet for Greeter` should create an `implements` edge.
 

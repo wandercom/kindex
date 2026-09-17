@@ -11,10 +11,25 @@ import atexit
 import functools
 import json
 import os
+import re
 import sqlite3
 import sys
 from typing import Any
 from .privacy import redact, redact_serialized, safe_error, redacting_print as print
+
+#: How long a reduced Kinbase sync may run inside one MCP tool call.
+KINBASE_SYNC_BUDGET_S = 60.0
+#: The most rows one tool call or resource renders; a caller's limit is
+#: clamped to it (the host's context is the bound, not the graph's size).
+MAX_TOOL_ROWS = 200
+
+
+def _bounded(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return MAX_TOOL_ROWS
+    return max(1, min(value, MAX_TOOL_ROWS))
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -142,15 +157,49 @@ class MemoryUnavailableError(RuntimeError):
 
 
 def _safe_output(fn):
-    """Project historical data at model egress without rewriting stored bytes."""
+    """Project historical data at model egress without rewriting stored bytes.
+
+    Resources and prompts get the tools' memory-unavailable answer here (they
+    have no `_tool` guard), and a failure while redacting is reported like
+    any other, never as the raw exception."""
     @functools.wraps(fn)
     def projected(*args, **kwargs):
         try:
             result = fn(*args, **kwargs)
+            return redact_serialized(result) if isinstance(result, str) else redact(result)
+        except MemoryUnavailableError as error:
+            if error.remedy:
+                return f"Error: memory unavailable ({error.error_class}): {error.remedy}"
+            return f"Error: memory unavailable ({error.error_class})"
+        except sqlite3.Error as error:
+            return f"Error: memory unavailable ({type(error).__name__})"
         except Exception as error:
             raise RuntimeError(safe_error(error)) from None
-        return redact_serialized(result) if isinstance(result, str) else redact(result)
     return projected
+
+
+# Leading phrases of the plain-text refusals tools return.
+_FAILURE_TEXT = re.compile(
+    r"^(Error\b|(?:\w+ )?not found:|Unknown \w+|Invalid JSON\b|No such\b)",
+)
+
+
+def _health_outcome(result) -> str:
+    """Whether a tool result is a refusal. Only an `Error:` prefix counted,
+    so "Node not found: ..." and a JSON `{"ok": false}` string were successes."""
+    if isinstance(result, dict):
+        failed = result.get("ok") is False or "error" in result
+    elif isinstance(result, str):
+        failed = bool(_FAILURE_TEXT.match(result.lstrip()))
+        if not failed and result.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(result)
+            except ValueError:
+                parsed = None
+            failed = isinstance(parsed, dict) and parsed.get("ok") is False
+    else:
+        failed = False
+    return "failed" if failed else "success"
 
 
 def _tool(*dargs, **dkwargs):
@@ -162,10 +211,7 @@ def _tool(*dargs, **dkwargs):
             health_outcome = "failed"
             try:
                 result = fn(*a, **kw)
-                health_outcome = "failed" if (
-                    isinstance(result, str) and result.startswith("Error:")
-                    or isinstance(result, dict) and result.get("ok") is False
-                ) else "success"
+                health_outcome = _health_outcome(result)
                 return result
             except MemoryUnavailableError as e:
                 if e.remedy:
@@ -277,6 +323,14 @@ def _mcp_client() -> str | None:
     from .agent_adapters import normalize_adapter
     raw = os.environ.get("KIN_CLIENT") or os.environ.get("KINDEX_CLIENT")
     return normalize_adapter(raw) if raw else None
+
+
+def _mcp_project_path() -> str:
+    """The project this server speaks for: KIN_PROJECT_PATH, then KIN_PROJECT,
+    then the process directory. Tools derived it four ways (cwd, $PWD, the
+    health scope's variable, an explicit argument)."""
+    return (os.environ.get("KIN_PROJECT_PATH") or os.environ.get("KIN_PROJECT")
+            or os.getcwd())
 
 
 def _scope_results(results: list[dict], client: str | None) -> list[dict]:
@@ -397,15 +451,26 @@ def _node_detail(store, node: dict) -> str:
 
 
 @_tool()
-def kinbase_sync(repo: str, mode: str = "auto", binary: str = "kinbase") -> str:
+def kinbase_sync(repo: str, mode: str = "auto") -> str:
     """Refresh signed Kinbase evidence; raw verifies bytes, reduced retains governance snapshots.
 
     The source events are never modified. Reduced covers local event keys and
     invokes exact-key explain, never project (which may submit questions).
+    The `kinbase` executable is the one on PATH: a tool caller does not name
+    what runs. A reduced sync that would outlast KINBASE_SYNC_BUDGET_S is
+    refused; the CLI has no such bound.
     """
     from .kinbase import sync_kinbase
     store, _ = _get_store()
-    return json.dumps(sync_kinbase(store, repo, mode=mode, binary=binary), indent=2)
+    try:
+        result = sync_kinbase(store, repo, mode=mode,
+                              explain_budget_s=KINBASE_SYNC_BUDGET_S)
+    except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+        # The CLI twin reports these as errors; here they were raised as
+        # untyped tool failures.
+        return json.dumps({"ok": False, "error": {
+            "code": "kinbase_sync_refused", "message": safe_error(exc)}}, indent=2)
+    return json.dumps(result, indent=2)
 
 
 @_tool()
@@ -433,6 +498,7 @@ def search(query: str, top_k: int = 10, tags: str = "",
 
     fence_stats: dict = {}
     grounding: dict = {}
+    top_k = _bounded(top_k)
     fetch_k = top_k * 3 if tags else top_k
     evaluation_time = operation_now() if trusted_only else None
     results = hybrid_search(store, query, top_k=fetch_k,
@@ -455,6 +521,9 @@ def search(query: str, top_k: int = 10, tags: str = "",
         results = [r for r in results if _tag_match(r)]
         results = results[:top_k]
         fenced_nodes = [r for r in fenced_nodes if _tag_match(r)]
+    # Scoped like context, ask and prime: a node scoped to another client is
+    # not this client's hit.
+    results = _scope_results(results, _mcp_client())
 
     # The fence note is derived in a single place both surfaces call (R3.1).
     from .retrieve import build_fence_note
@@ -550,7 +619,11 @@ def add(
     """
     store, config = _get_store()
     from .extract import keyword_extract
+    from .schema import ADDABLE_NODE_TYPES
 
+    if node_type not in ADDABLE_NODE_TYPES:
+        return (f"Error: node_type must be one of {', '.join(ADDABLE_NODE_TYPES)} "
+                f"(tasks, sessions and projects have their own tools)")
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     domain_list = [d.strip() for d in domains.split(",") if d.strip()] if domains else []
 
@@ -957,15 +1030,23 @@ def invalidate(
     invalidated_by: str,
     disposition_code: str,
     invalid_at: str = "",
+    force: bool = False,
 ) -> Any:
     """Set a node's exclusive valid-time end without deleting it.
+
+    A foreign advisory lock on the node refuses the change unless force=True.
+    The activity log names this server's agent identity as the actor; the
+    caller's `invalidated_by` is kept beside it as an assertion.
 
     Args:
         node_id: Durable node ID or exact title.
         invalidated_by: Asserted invalidating actor.
         disposition_code: Bounded machine invalidation reason.
         invalid_at: Optional timezone-aware RFC 3339 exclusive end time.
+        force: Override a foreign advisory lock.
     """
+    from .store import LockHeldError
+
     store, _ = _get_store()
     operation_instant = operation_now()
     node, error = _node_for_write(store, node_id)
@@ -973,10 +1054,16 @@ def invalidate(
         return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
+    actor = _default_agent()
+    try:
+        store._check_lock(node, actor, force)
+    except LockHeldError as exc:
+        return f"Error: {exc}"
     try:
         return store.invalidate_node(
             node["id"],
-            invalidated_by=invalidated_by,
+            invalidated_by=actor,
+            asserted_by=invalidated_by,
             disposition_code=disposition_code,
             invalid_at=invalid_at or operation_instant,
         )
@@ -1066,7 +1153,7 @@ def list_nodes(
         status=status or None,
         audience=audience or None,
         tags=tag_list,
-        limit=limit,
+        limit=_bounded(limit),
     )
     if not nodes:
         return "No nodes found matching filters."
@@ -1100,6 +1187,10 @@ def status() -> str:
     from .archive import archive_failures
     archive_failed_count, archive_failed = archive_failures(store)
 
+    # The version check runs when the store opens; a database another
+    # process migrated since then is only visible here.
+    from .schema import SCHEMA_VERSION
+    stored_version = store.get_meta("schema_version")
     lines = [
         "# Kindex Status\n",
         f"Nodes: {stats['semantic_nodes']} semantic",
@@ -1107,6 +1198,10 @@ def status() -> str:
         f"Orphans: {stats['orphans']} semantic",
         f"Metrics schema: {stats['metrics_schema']}",
     ]
+    if stored_version and stored_version != str(SCHEMA_VERSION):
+        lines.append(
+            f"Schema drift: the database is v{stored_version}; this server "
+            f"expects v{SCHEMA_VERSION}. Restart kin-mcp.")
     if recovery_path:
         display_path = "".join(
             char if char.isprintable() else "?" for char in recovery_path
@@ -1261,6 +1356,7 @@ def learn(text: str) -> str:
     store, config = _get_store()
     from .budget import BudgetLedger
     from .extract import extract
+    from .schema import ADDABLE_NODE_TYPES
 
     ledger = BudgetLedger(config.ledger_path, config.budget)
     existing = [n["title"] for n in store.all_nodes(limit=200)]
@@ -1282,10 +1378,12 @@ def learn(text: str) -> str:
         if existing_node:
             grounded_ids.append(existing_node["id"])
             continue
+        # Extraction proposes a type; one outside the addable set is a concept.
+        proposed = concept.get("type", "concept")
         nid = store.add_node(
             title=concept["title"],
             content=concept.get("content", ""),
-            node_type=concept.get("type", "concept"),
+            node_type=proposed if proposed in ADDABLE_NODE_TYPES else "concept",
             domains=concept.get("domains", []),
             prov_activity="mcp-learn",
         )
@@ -1561,6 +1659,10 @@ def graph_merge(source_id: str, target_id: str, keep: str = "target",
         return f"Source node not found: {source_id}"
     if not target:
         return f"Target node not found: {target_id}"
+    if source["id"] == target["id"]:
+        # Merging a node into itself rewrote its own edges' provenance and
+        # archived it, and reported success.
+        return f"Error: {source['id']} cannot be merged into itself"
 
     # Edit-policy chokepoint: graph_merge rewrites target content and
     # archives the source, so it honors the same class policy as edit.
@@ -1656,9 +1758,14 @@ def dream(
     consolidating memory — replay, strengthen, prune.
 
     Args:
-        mode: 'lightweight' (fast, <5s), 'full' (non-LLM), or 'deep' (LLM clusters).
+        mode: 'lightweight' (fast, <5s) or 'full' (non-LLM). The LLM 'deep'
+            mode spends on model calls and runs only from a shell
+            (`kin dream --deep`), not from a tool call.
         dry_run: If True, report what would happen without making changes.
     """
+    if mode == "deep" and not dry_run:
+        return ("Error: deep dream spends on model calls; run `kin dream --deep` "
+                "from a shell (or pass dry_run=True)")
     store, config = _get_store()
 
     from .dream import dream_cycle
@@ -1827,7 +1934,9 @@ def resource_orphans() -> str:
     orphans = store.orphans()
     if not orphans:
         return "No orphan nodes."
-    lines = [_node_summary(n) for n in orphans]
+    lines = [_node_summary(n) for n in orphans[:MAX_TOOL_ROWS]]
+    if len(orphans) > MAX_TOOL_ROWS:
+        lines.append(f"... {len(orphans) - MAX_TOOL_ROWS} more (use graph_heal or list_nodes)")
     return f"{len(orphans)} orphan(s):\n" + "\n".join(lines)
 
 
@@ -1860,7 +1969,7 @@ def prime(topic: str = "") -> str:
     stats = store.stats()
     header = (
         f"# Kindex Context\n\n"
-        f"Graph: {stats.get('node_count', 0)} nodes, {stats.get('edge_count', 0)} edges\n\n"
+        f"Graph: {stats['nodes']} nodes, {stats['edges']} edges\n\n"
     )
     block = format_context_block(store, results, query=topic, level="full", adapter=client)
     return header + block
@@ -1922,11 +2031,10 @@ def tag_start(name: str, description: str = "", focus: str = "",
     """
     store, _ = _get_store()
     from .sessions import start_tag
-    import os
     remaining_list = [r.strip() for r in remaining.split(",") if r.strip()] if remaining else []
     try:
         nid = start_tag(store, name, description=description, focus=focus,
-                        remaining=remaining_list, project_path=os.getcwd())
+                        remaining=remaining_list, project_path=_mcp_project_path())
         return f"Started session tag: {name} ({nid})"
     except ValueError as e:
         return f"Error: {e}"
@@ -1995,11 +2103,10 @@ def tag_update(name: str = "", focus: str = "", description: str = "",
     store, config = _get_store()
     from .sessions import (update_tag, add_segment, pause_tag,
                            complete_tag, get_active_tag, get_tag)
-    import os
-    project_path = os.getcwd()
+    project_path = _mcp_project_path()
 
     if not name:
-        active = get_active_tag(store, project_path=os.getcwd())
+        active = get_active_tag(store, project_path=_mcp_project_path())
         if not active:
             return "No active session tag found. Start one with tag_start."
         name = (active.get("extra") or {}).get("tag", active["title"])
@@ -2055,9 +2162,8 @@ def tag_resume(name: str = "", tokens: int = 1500) -> str:
     """
     store, _ = _get_store()
     from .sessions import format_resume_context, list_tags, resume_tag
-    import os
 
-    project_path = os.getcwd()
+    project_path = _mcp_project_path()
 
     if not name:
         tags = list_tags(
@@ -2467,18 +2573,21 @@ def coord_attach(name: str, node_id: str) -> str:
 
 @_tool()
 def coord_inject(name: str, action: str = "list", text: str = "",
-                 to: str = "", message_id: int = 0) -> str:
+                 to: str = "", message_id: int = 0, agent: str = "") -> str:
     """Manage standing inject messages on a coordination conversation.
 
     Inject messages are pushed into member agents' session context by the
-    prime/prompt hooks until cleared.
+    prime/prompt hooks until cleared or expired. Only the conversation's
+    creator or members may set or clear them, and only the creator may clear
+    another agent's message.
 
     Args:
         name: Conversation ID or name.
         action: set, clear, or list.
         text: Message text (for set).
         to: Optional target agent (for set); broadcast when empty.
-        message_id: Specific inject message id to clear (0 = clear all).
+        message_id: Specific inject message id to clear (0 = clear all you may).
+        agent: Acting agent name (default: resolved agent id).
     """
     store, _ = _get_store()
     from .coordination import (
@@ -2488,13 +2597,14 @@ def coord_inject(name: str, action: str = "list", text: str = "",
     )
     try:
         if action == "set":
-            entry = set_inject_message(store, name, text, _default_agent(),
-                                       to=to or None)
+            entry = set_inject_message(store, name, text, _default_agent(agent),
+                                       to=to or None, authorize=True)
             target = f" -> {entry['to']}" if entry.get("to") else ""
             return f"Set inject message #{entry['id']}{target} on {name}"
         if action == "clear":
             count = clear_inject_messages(
-                store, name, message_id=message_id or None)
+                store, name, message_id=message_id or None,
+                actor=_default_agent(agent))
             return f"Cleared {count} inject message(s) on {name}"
         if action == "list":
             msgs = list_inject_messages(store, name)
@@ -2530,16 +2640,23 @@ def coord_list(status: str = "active", task_id: str = "") -> str:
 
 
 @_tool()
-def coord_end(conversation: str, summary: str = "") -> str:
+def coord_end(conversation: str, summary: str = "", agent: str = "") -> str:
     """End a coordination conversation and clear transient messages.
+
+    Only the conversation's creator or members may end it while it is live.
 
     Args:
         conversation: Conversation ID or name.
         summary: Optional retained summary.
+        agent: Ending agent name (default: resolved agent id).
     """
     store, _ = _get_store()
     from .coordination import end_conversation
-    result = end_conversation(store, conversation, summary=summary)
+    try:
+        result = end_conversation(store, conversation, summary=summary,
+                                  actor=_default_agent(agent))
+    except ValueError as e:
+        return f"Could not end coordination conversation: {e}"
     if not result:
         return f"Conversation not found: {conversation}"
     return f"Ended coordination conversation: {conversation}"
@@ -2624,7 +2741,6 @@ def watch_add(text: str, owner: str = "", expires: str = "",
         link_to: Comma-separated node IDs/titles to link this watch to.
     """
     store, _ = _get_store()
-    import os
 
     extra = {"watch_status": "active"}
     if owner:
@@ -2633,7 +2749,7 @@ def watch_add(text: str, owner: str = "", expires: str = "",
         extra["expires"] = expires
 
     domains = []
-    project_path = os.environ.get("PWD", "")
+    project_path = _mcp_project_path()
     if project_path:
         extra["project_path"] = project_path
 
@@ -2738,8 +2854,9 @@ def remind_create(text: str, when: str, priority: str = "normal",
         conversation_id: Optional chat/session id for scoped hook injection.
         scope: Reminder visibility for hook injection: chat or global.
         wake: Wake an agent when due: codex or opencode.
-        wake_session: Optional host session id to resume; use 'last' for latest.
-        wake_cwd: Optional working directory for the wake run.
+        wake_session: Optional host session id to resume; 'last' is resolved to the
+            current (or newest Codex) session now, not when the reminder fires.
+        wake_cwd: Working directory for the wake run (default: this project).
         wake_model: Optional model override for the wake run.
         wake_agent: Optional OpenCode agent override for the wake run.
     """
@@ -2761,7 +2878,8 @@ def remind_create(text: str, when: str, priority: str = "normal",
             action_instructions=instructions,
             wake_client=wake,
             wake_session_id=wake_session,
-            wake_cwd=wake_cwd,
+            # The server's own directory is not necessarily the project's.
+            wake_cwd=wake_cwd or (_mcp_project_path() if wake else ""),
             wake_model=wake_model,
             wake_agent=wake_agent,
             conversation_id=conversation_id,
@@ -2867,7 +2985,14 @@ def remind_exec(id: str) -> str:
         return f"Error: Reminder not found: {id}"
     if not has_action(r):
         return f"Error: Reminder {id} has no action defined."
-    result = execute_action(store, r, config, manual=True)
+    from .reminders import settle_after_manual_action
+    # Not a person's invocation: a paused (stale) or exhausted action stays
+    # parked; only `kin remind exec` from a shell resumes it.
+    result = execute_action(store, r, config, manual=False)
+    settle_after_manual_action(store, r, result)
+    if result.get("status") == "skipped":
+        return (f"Action skipped: {result.get('output') or result.get('reason', '')} "
+                f"(resume a parked action from a shell: kin remind exec --reminder-id {id})")
     return f"Action {result['status']}: {result.get('output', '')[:500]}"
 
 

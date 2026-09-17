@@ -719,3 +719,47 @@ class TestProfileCreateExplicitConfig:
         assert r.returncode == 0, r.stderr
         data = yaml.safe_load(gpath.read_text())
         assert "work" in data["profiles"]
+
+
+class TestExplicitPathsAndRelativeProfiles:
+    def test_a_missing_config_file_is_refused(self, env_clean, tmp_path, project):
+        with pytest.raises(ValueError, match="config file not found"):
+            load_config(config_path=tmp_path / "absent.yaml", project_path=project)
+
+    def test_a_missing_project_path_is_refused(self, global_yaml, tmp_path, monkeypatch):
+        with pytest.raises(ValueError, match="--project-path does not exist"):
+            load_config(project_path=tmp_path / "gone")
+        monkeypatch.setenv("KIN_PROJECT", str(tmp_path / "also-gone"))
+        with pytest.raises(ValueError, match="KIN_PROJECT does not exist"):
+            load_config()
+
+    def test_a_relative_profile_dir_is_anchored_to_its_config(
+            self, global_yaml, project, tmp_path, monkeypatch):
+        global_yaml.write_text(yaml.dump({
+            "profiles": {"work": {"data_dir": "graphs/work", "roots": []}},
+            "default_profile": "work",
+        }))
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        cfg = load_config(project_path=project)
+        assert cfg.data_dir == str(global_yaml.parent / "graphs" / "work")
+
+    def test_every_profile_dir_is_anchored_for_cron(
+            self, global_yaml, project, tmp_path, monkeypatch):
+        """Cron and routing read every profile entry, not just the active one."""
+        global_yaml.write_text(yaml.dump({
+            "profiles": {
+                "work": {"data_dir": "graphs/work", "roots": []},
+                "home": {"data_dir": "graphs/home", "roots": []},
+            },
+            "default_profile": "work",
+        }))
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        cfg = load_config(project_path=project)
+        assert {name: entry.data_dir for name, entry in cfg.profiles.items()} == {
+            "work": str(global_yaml.parent / "graphs" / "work"),
+            "home": str(global_yaml.parent / "graphs" / "home"),
+        }

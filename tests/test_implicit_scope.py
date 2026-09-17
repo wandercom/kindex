@@ -180,3 +180,24 @@ if __name__ == '__main__':
     REPO = arguments.repo.resolve()
     PYTHON = str(Path(arguments.python).resolve())
     unittest.main(argv=[sys.argv[0], *unittest_arguments])
+
+
+def test_a_symlinked_kin_is_not_selected_implicitly(tmp_path, monkeypatch):
+    import subprocess
+
+    from kindex.config import load_config
+
+    for name in ("KIN_PROJECT", "KIN_PROFILE", "KIN_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("kindex.config._GLOBAL_PATHS", [tmp_path / "home" / "kin.yaml"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    elsewhere = tmp_path / "shared-kin" / "local" / "kindex"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "kindex.db").write_bytes(b"")
+    (repo / ".kin").symlink_to(tmp_path / "shared-kin")
+    monkeypatch.chdir(repo)
+    cfg = load_config()
+    assert not str(cfg.data_path).startswith(str(repo))
+    assert "shared-kin" not in str(cfg.data_path)

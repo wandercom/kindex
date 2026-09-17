@@ -36,7 +36,7 @@ PLUGIN_NAME = "kindex-modern"
 def legacy_manifest(config, kin_path: str) -> dict:
     """One command manifest for installs and generated plugin distribution.
 
-    Claude timeouts are seconds, unlike Codex's millisecond hook timeouts.
+    Claude timeouts are seconds, as Codex hook timeouts are.
     """
     from .setup import _kin_hook_command, _kin_stop_hook_command
     def command(args, seconds, stop=False):
@@ -50,7 +50,9 @@ def legacy_manifest(config, kin_path: str) -> dict:
         stop.append(command(["dream", "--detach", "--lightweight"], 3, True))
     items = {
         "SessionStart": [command(["prime", "--for", "hook"], 5)],
-        "PreCompact": [command(["compact-hook", "--emit-context"], 10)],
+        # Claude adds no PreCompact output to the context; the SessionStart
+        # it fires after compacting (source "compact") re-primes instead.
+        "PreCompact": [command(["compact-hook"], 10)],
         "UserPromptSubmit": [command(["prompt-check"], 2)],
         "PreToolUse": [command(["attention-hook", "--adapter", "claude", "--event",
                                 "PreToolUse", "--deadline-ms", "3500"], 5)],
@@ -136,8 +138,16 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
     actions = [f"Removed {removed} exact Kindex legacy handlers (foreign handlers preserved)"]
     plugin = base / "skills" / PLUGIN_NAME
     staged_plugin = None
-    enabled = data.setdefault("enabledPlugins", {})
-    enabled[f"{PLUGIN_NAME}@skills-dir"] = not uninstall and mode == "modern"
+    plugin_key = f"{PLUGIN_NAME}@skills-dir"
+    if not uninstall and mode == "modern":
+        enabled = data.setdefault("enabledPlugins", {})
+        enabled[plugin_key] = True
+    else:
+        # Switch off an entry that exists; a user who never enabled the
+        # plugin gets no enabledPlugins key written into their settings.
+        enabled = data.get("enabledPlugins") if isinstance(data.get("enabledPlugins"), dict) else {}
+        if plugin_key in enabled:
+            enabled[plugin_key] = False
     # Known packaged legacy plugin identities only; do not disable unrelated
     # plugin names which happen to contain 'kindex'.
     if mode == "modern" and not uninstall:

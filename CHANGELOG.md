@@ -4,6 +4,105 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- Coordination belongs to its participants: only a conversation's creator or
+  members may end it while it is live, or set or clear its standing
+  messages, and only the creator may clear another agent's message
+  (`coord_end` and `coord_inject` take `agent`; `kin coord ... --force` acts
+  as the operator). Standing messages expire with the conversation's TTL,
+  and no TTL exceeds 7 days.
+- A wake reminder's `last` session is resolved when the reminder is created
+  (the current host session, or the newest Codex rollout) rather than when
+  it fires; an OpenCode `last` with no current session is refused. Wake
+  options without `--wake` are refused, and the wake directory defaults to
+  the creator's.
+- The prime's token budget is a ceiling on everything drawn from the graph.
+  Key concepts keep at least 40% of it, the other sections give way in a
+  fixed order (due reminders last), and one closing line says what was left
+  out. Kindex's own session directives sit outside the budget.
+- Search confidence is each source's score over its best match: the only,
+  tied or weakest real match is no longer reported as 0.000.
+- A missing `--config` file or project path is refused instead of falling
+  through to the home store; every relative profile `data_dir` is anchored
+  to the config that declared it, so cron and routing open the same graphs.
+  A symlinked `.kin` chain is never selected implicitly.
+- The activity log keeps 365 days (cron prunes it).
+- Schema v15 indexes Kinbase rows by repository on existing stores (only
+  fresh stores had the index) and rebuilds an early-v7
+  `injection_pheromone` table with its `(node_id, context)` key, keeping its
+  rows; `kin doctor --fix` performs the same rebuild on a current store.
+- The MCP `kinbase_sync` tool runs only the `kinbase` found on PATH and stops at a
+  time budget, which also caps each `kinbase explain` call.
+
+### Fixed
+- The reminder sweep holds its lock through a whole action; renewed to the
+  120-second base TTL, it expired under a 300-second action, and another
+  sweep could fire the same reminder.
+- A manual `kin remind exec` settles the reminder, so a completed one-shot
+  stops firing; the MCP `remind_exec` no longer lifts a stale poller's pause.
+- A wake session id, model or agent that could be read as an option never
+  reaches the agent's argv, including from rows written before this check.
+  A failed claude action keeps its stderr, and action results keep both ends
+  of a long output.
+- Ending an ended conversation keeps its message count; conversation
+  lookups, membership and cleanup are filtered in SQL rather than in a
+  500-row window; starting a conversation archives expired ones.
+- Collab and activity hook paths no longer write `last_accessed` on every
+  SessionStart and prompt, and prompt cooldown rows are pruned.
+- A failed prime or prompt-check section (collabs, reminders, tasks, the
+  session tag), and a malformed conversation, is recorded in the degraded
+  ledger instead of being swallowed.
+- Context evidence notes name their node and appear only for rows the tier
+  rendered. The trusted-only note counts every omission reason, including a
+  stale referent. The token estimate counts text with few spaces by its
+  size.
+- MCP: a node is never merged into itself; the prime header counts the
+  graph; `add` and `learn` create only addable types; `changelog` keeps the
+  boundary day (and `kin changelog --actor` filters in SQL); every refusal
+  form counts as a failed health outcome; list, search and orphan outputs are
+  clamped; `invalidate` honours locks and names the server's actor;
+  resources and prompts answer memory-unavailable; `status` shows schema
+  drift; `search` applies the client scope; one project-path resolver
+  replaces the `getcwd`/`$PWD` reads.
+- `prompt-check` context is plain text with graph text neutralised and
+  actions summarised. A malformed hook command exits 1 rather than
+  argparse's blocking 2, and `supervisor-hook` degrades like the other hook
+  surfaces.
+- Codex hook timeouts are seconds (SessionStart was 5000). The Claude
+  PreCompact hook no longer computes context the host discards. A legacy
+  install writes no `enabledPlugins` key.
+- `kin doctor --fix` adds the columns a current-version store lacks,
+  backfilling expression defaults, and a store with a meta table but no
+  version row is migrated from v1. Read helpers treat only a missing table
+  as empty.
+- Loading config reads a legacy `.kin` file in place; opening a repo-local
+  store upgrades it to `.kin/config` (a store cannot be created beneath the
+  file), moving it aside before writing so a failure never loses it.
+- `cron` reports failing steps, runs one pass at a time, and skips the
+  embedding coverage scan. A failed cron or remind check says why on stderr.
+- Health failures are signalled and their receipts kept pending; the
+  supervisor notice re-arms after a good state; review-failure alerts carry
+  their reasons and survive a wording change.
+- Sim and Advocate output is bounded; only a failed Advocate command counts
+  as an escalation failure; an evicted review is marked and its admission
+  key released. The Sim drain worker keeps the caller's stamp decision.
+- Dream stages dedup near-misses for review, checks merge guards before
+  snapshotting (counting a refused pair once), and bounds deep-dream
+  prompts; MCP refuses deep dreams.
+- Suggestions are deduplicated in either order and against rejected pairs.
+  Merge-mode graph import ignores decayed local weight. Sessions link to
+  hyphenated project names. The attention lock no longer leaks a descriptor
+  when contended.
+- `scripts/sync-version.sh` works with GNU sed, and
+  `make validate-mcp-registry` fails unless `ALLOW_SKIP_REGISTRY=1`.
+- Tests: CI installs tmux and tree-sitter-rust so those tests run, and sets
+  job and per-test timeouts; subprocess tests run with an isolated HOME.
+
+### Security
+- The Linear adapter sends its API key in-process instead of on a `curl`
+  command line.
+- GitHub Pages no longer publishes `docs/reviews`.
+
 ## [0.42.0] - 2026-09-17
 
 ### Changed

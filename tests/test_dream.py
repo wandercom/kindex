@@ -176,8 +176,8 @@ class TestAutoApplySuggestions:
         a = store.add_node("Kindex architecture overview")
         b = store.add_node("Kindex architecture overview details")
         store.add_suggestion(
-            a, b, reason="test", source="dream-cycle",
-            identity_kind="node_id",
+            "Kindex architecture overview", "Kindex architecture overview details",
+            reason="test", source="cron-auto-suggest",
         )
 
         count = auto_apply_suggestions(store)
@@ -190,23 +190,34 @@ class TestAutoApplySuggestions:
 
     def test_skips_when_titles_dissimilar(self, store):
         from kindex.dream import auto_apply_suggestions
-        a = store.add_node("Alpha concept")
-        b = store.add_node("Zeta completely different")
+        store.add_node("Alpha concept")
+        store.add_node("Zeta completely different")
         store.add_suggestion(
-            a, b, reason="test", source="dream-cycle",
-            identity_kind="node_id",
+            "Alpha concept", "Zeta completely different",
+            reason="test", source="cron-auto-suggest",
         )
 
         count = auto_apply_suggestions(store)
         assert count == 0
 
+    def test_leaves_dedup_near_misses_for_review(self, store):
+        from kindex.dream import auto_apply_suggestions
+        a = store.add_node("Kindex architecture overview")
+        b = store.add_node("Kindex architecture overview details")
+        store.add_suggestion(
+            a, b, reason="Fuzzy match", source="dream-cycle",
+            identity_kind="node_id",
+        )
+        assert auto_apply_suggestions(store) == 0
+        assert len(store.pending_suggestions(limit=10)) == 1
+
     def test_skips_archived_nodes(self, store):
         from kindex.dream import auto_apply_suggestions
-        a = store.add_node("Same title", status="archived")
-        b = store.add_node("Same title nearby")
+        store.add_node("Same title", status="archived")
+        store.add_node("Same title nearby")
         store.add_suggestion(
-            a, b, reason="test", source="dream-cycle",
-            identity_kind="node_id",
+            "Same title", "Same title nearby",
+            reason="test", source="cron-auto-suggest",
         )
 
         count = auto_apply_suggestions(store)

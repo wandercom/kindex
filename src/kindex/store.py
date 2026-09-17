@@ -329,6 +329,9 @@ def node_retired(node: dict) -> bool:
     return (node.get("status") or "active") != "active"
 
 
+#: How long the activity log keeps an entry (days).
+ACTIVITY_RETENTION_DAYS = 365
+
 class Store:
     """SQLite-backed knowledge graph with FTS5 full-text search.
 
@@ -439,9 +442,25 @@ class Store:
         )
         has_meta = cur.fetchone() is not None
 
+        has_nodes = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
+        ).fetchone() is not None
         if has_meta:
             cur = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'")
             row = cur.fetchone()
+            if row is None and has_nodes:
+                # A store with a meta table but no version row predates
+                # versioning: it is migrated from v1, not stamped current
+                # over its old shape.
+                self._refuse_migration_unless_allowed(1)
+                with self._schema_migration_lock():
+                    if self._conn.execute(
+                            "SELECT 1 FROM meta WHERE key = 'schema_version'").fetchone() is None:
+                        self._conn.execute(
+                            "INSERT INTO meta (key, value) VALUES ('schema_version', '1')")
+                        self._conn.commit()
+                    self._migrate_versioned_schema_after_lock()
+                return
             if row is not None:
                 current = self._parse_schema_version(row["value"])
                 if current > SCHEMA_VERSION:
@@ -550,6 +569,8 @@ class Store:
                 f"snapshot: {snapshot}"
             ) from exc
         self._record_schema_migration_snapshot(snapshot, reason)
+
+
 
     @contextmanager
     def _schema_migration_lock(self):
@@ -837,6 +858,9 @@ class Store:
 
         if current_version < 14:
             self._migrate_v14()
+
+        if current_version < 15:
+            self._migrate_v15()
 
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
@@ -1338,6 +1362,32 @@ class Store:
             c.rollback()
             raise
 
+    def _migrate_v15(self) -> None:
+        """Index Kinbase rows by repository, and give an early-v7
+        ``injection_pheromone`` its composite key.
+
+        ``idx_nodes_kinbase_repo`` was added to the schema after v14 shipped,
+        so only fresh stores had it and sync scanned ``nodes`` everywhere
+        else. The early-v7 pheromone table was keyed by ``node_id`` alone:
+        adding its missing columns left that key, and a deposit for a second
+        context of the same node failed.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nodes_kinbase_repo "
+                "ON nodes (json_extract(extra, '$.kinbase.repo')) WHERE json_valid(extra)")
+            if _pheromone_needs_rebuild(c):
+                _rebuild_pheromone_table(c)
+            if _pheromone_needs_rebuild(c):
+                raise RuntimeError("v15 migration verification failed: injection_pheromone key")
+            c.execute("UPDATE meta SET value = '15' WHERE key = 'schema_version'")
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
     # Columns each table must carry for the code that queries it to work.
     # Checked by `kin doctor`, which is the only place that catches the failure
     # class v10 repairs: a table that exists with the right name and the wrong
@@ -1361,6 +1411,48 @@ class Store:
         },
     }
 
+    def repair_schema_drift(self) -> dict[str, set[str]]:
+        """Add the required columns a current-version store lacks, each with
+        its definition from the schema, under the migration lock and after a
+        recovery snapshot. Reopening could never repair this: a store whose
+        version reads current performs no DDL. Returns the drift that
+        remains."""
+        drift = self.schema_drift()
+        if not drift:
+            return {}
+        definitions = _column_definitions(CREATE_TABLES)
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        version = self._parse_schema_version(row["value"]) if row else 0
+        with self._schema_migration_lock():
+            snapshot, reason = self._snapshot_schema_migration(version)
+            self._record_schema_recovery_metadata(snapshot, reason)
+            for table, columns in sorted(drift.items()):
+                for column in sorted(columns):
+                    ddl = definitions.get(table, {}).get(column)
+                    if ddl is None:
+                        continue
+                    # SQLite adds no column whose default is an expression:
+                    # add it with an empty default and backfill the value.
+                    backfill = None
+                    if "(datetime('now'))" in ddl:
+                        ddl = ddl.replace("(datetime('now'))", "''")
+                        backfill = "datetime('now')"
+                    try:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+                        if backfill:
+                            self._conn.execute(
+                                f"UPDATE {table} SET {column} = {backfill} WHERE {column} = ''")
+                    except sqlite3.OperationalError:
+                        continue  # a column SQLite cannot add in place stays drift
+            # A wrong primary key cannot be altered in place: the table is
+            # rebuilt with the schema's key, keeping every row.
+            if _pheromone_needs_rebuild(self._conn):
+                _rebuild_pheromone_table(self._conn)
+            self._conn.commit()
+            self._record_schema_migration_snapshot(snapshot, reason)
+        return self.schema_drift()
+
     def schema_drift(self) -> dict[str, set[str]]:
         """Report columns the code requires that this store is missing.
 
@@ -1369,21 +1461,27 @@ class Store:
         (a migration will create it); a table present with missing columns is,
         because ``CREATE TABLE IF NOT EXISTS`` will never repair it.
         """
+        return self._drift_of(self.conn)
+
+    @classmethod
+    def _drift_of(cls, conn) -> dict[str, set[str]]:
         drift: dict[str, set[str]] = {}
-        for table, required in self.REQUIRED_COLUMNS.items():
+        for table, required in cls.REQUIRED_COLUMNS.items():
             try:
-                exists = self.conn.execute(
+                exists = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
                     (table,),
                 ).fetchone()
                 if not exists:
                     continue
                 cols = {
-                    row["name"]
-                    for row in self.conn.execute(
+                    row[1]
+                    for row in conn.execute(
                         f"PRAGMA table_info({table})").fetchall()
                 }
                 missing = required - cols
+                if table == "injection_pheromone" and _pheromone_key_drift(conn):
+                    missing = missing | {PHEROMONE_KEY_DRIFT}
                 if missing:
                     drift[table] = missing
             except Exception:
@@ -1448,29 +1546,55 @@ class Store:
                         pass
                 result.append(d)
             return result
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     # ── Temporal queries ───────────────────────────────────────────────
+
+    @staticmethod
+    def _activity_bound(since_iso: str) -> str:
+        """A caller's ISO time in the log's own form (SQLite `datetime('now')`,
+        UTC, space-separated). A local `T`-separated bound compared as text
+        against it dropped every entry of the boundary day and was off by the
+        UTC offset; a naive time is local."""
+        try:
+            parsed = datetime.fromisoformat(since_iso.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return since_iso
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     def activity_counts_since(self, since_iso: str) -> dict[str, int]:
         """Activity entries since a timestamp, counted per action."""
         try:
             return {row[0]: row[1] for row in self.conn.execute(
                 "SELECT action, COUNT(*) FROM activity_log WHERE timestamp >= ? "
-                "GROUP BY action ORDER BY COUNT(*) DESC, action", (since_iso,))}
-        except sqlite3.Error:
+                "GROUP BY action ORDER BY COUNT(*) DESC, action",
+                (self._activity_bound(since_iso),))}
+        except sqlite3.Error as error:
+            if not _absent_schema(error):
+                raise
             return {}
 
     def activity_since(self, since_iso: str, action: str | None = None,
-                       limit: int | None = None) -> list[dict]:
-        """Get activity log entries since a timestamp, optionally filtered by action type."""
+                       limit: int | None = None,
+                       actor: str | None = None) -> list[dict]:
+        """Get activity log entries since a timestamp, optionally filtered by
+        action type and actor."""
         try:
             q = "SELECT * FROM activity_log WHERE timestamp >= ? "
-            params: list = [since_iso]
+            params: list = [self._activity_bound(since_iso)]
             if action:
                 q += "AND action = ? "
                 params.append(action)
+            if actor:
+                q += "AND actor = ? "
+                params.append(actor)
             q += "ORDER BY timestamp DESC"
             if limit is not None:
                 q += " LIMIT ?"
@@ -1486,7 +1610,11 @@ class Store:
                         pass
                 result.append(d)
             return result
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     def nodes_changed_since(self, since_iso: str) -> list[dict]:
@@ -1514,7 +1642,11 @@ class Store:
                         pass
                 result.append(d)
             return result
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     # ── Suggestions ───────────────────────────────────────────────────
@@ -1548,6 +1680,16 @@ class Store:
         concept_a, concept_b, reason, source = (
             redact_text(value) for value in (concept_a, concept_b, reason, source)
         )
+        # One row per pair: a pending or rejected pair (either order) is not
+        # raised again. Three producers skipped this check and the table grew
+        # without bound.
+        existing = self.conn.execute(
+            "SELECT id FROM suggestions WHERE kind = 'bridge' AND identity_kind = ? "
+            "AND status IN ('pending', 'rejected') AND ((concept_a = ? AND concept_b = ?) "
+            "OR (concept_a = ? AND concept_b = ?)) ORDER BY id LIMIT 1",
+            (identity_kind, concept_a, concept_b, concept_b, concept_a)).fetchone()
+        if existing is not None:
+            return existing["id"]
         cur = self.conn.execute(
             """INSERT INTO suggestions
                (concept_a, concept_b, reason, source, identity_kind, kind)
@@ -1558,6 +1700,15 @@ class Store:
         self._log("add_suggestion", f"{concept_a}->{concept_b}", "",
                   details={"reason": reason, "source": source})
         return cur.lastrowid
+
+    def prune_activity(self, *, older_than_days: int = ACTIVITY_RETENTION_DAYS) -> int:
+        """Delete activity entries older than the retention window; the log
+        otherwise grew with every write for the life of the graph."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.execute("DELETE FROM activity_log WHERE timestamp < ?", (cutoff,))
+        self.conn.commit()
+        return cursor.rowcount
 
     def prune_suggestions(self, *, accepted_after_days: int = 90) -> int:
         """Delete accepted suggestions older than ``accepted_after_days``:
@@ -1580,7 +1731,11 @@ class Store:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
     def resolve_suggestion_node(
@@ -1803,6 +1958,17 @@ class Store:
             "UPDATE nodes SET last_accessed = ? WHERE id = ?", (_now(), node_id))
         self.conn.commit()
         return self._row_to_dict(row)
+
+    def peek_node(self, node_id: str) -> dict | None:
+        """Fetch a node by ID without touching last_accessed.
+
+        For hook paths that only display a node: a read there is not use, and
+        get_node's write would commit on every SessionStart and prompt.
+        """
+        if not node_id:
+            return None
+        row = self.conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        return None if row is None else self._row_to_dict(row)
 
     def get_node_domains(self, node_id: str) -> list[str]:
         """Read a node's domains/tags without touching last_accessed (non-mutating).
@@ -2526,11 +2692,17 @@ class Store:
         invalidated_by: str,
         disposition_code: str,
         invalid_at: str | None = None,
+        asserted_by: str | None = None,
     ) -> dict:
-        """Record an exclusive valid-time end without deleting the node."""
+        """Record an exclusive valid-time end without deleting the node.
+
+        `invalidated_by` is the actor the log names; `asserted_by`, when a
+        caller claimed a different one, is recorded beside it."""
         from .trust import normalize_rfc3339, validate_interval
 
         actor = _clean_audit_text(invalidated_by, field="invalidated_by")
+        claimed = (_clean_audit_text(asserted_by, field="asserted_by")
+                   if asserted_by else None)
         code = _clean_audit_text(disposition_code, field="disposition_code")
         invalid = normalize_rfc3339(
             invalid_at or _utc_now(), field="invalid_at"
@@ -2556,7 +2728,8 @@ class Store:
                 node_id,
                 row["title"],
                 actor,
-                {"disposition_code": code, "invalid_at": invalid},
+                {"disposition_code": code, "invalid_at": invalid,
+                 **({"asserted_by": claimed} if claimed and claimed != actor else {})},
             )
             result_row = conn.execute(
                 "SELECT * FROM nodes WHERE id = ?", (node_id,)
@@ -3862,7 +4035,11 @@ class Store:
                       AND context = ? AND events >= ?""",
                 params,
             ).fetchall()
-        except Exception:
+        except sqlite3.Error as error:
+            # Only a table or column this store predates reads as empty;
+            # any other database error is not "no rows".
+            if not _absent_schema(error):
+                raise
             return []
 
         totals: dict[str, float] = {}
@@ -4689,3 +4866,78 @@ class Store:
     def node_ids(self) -> list[str]:
         """All node IDs."""
         return [r[0] for r in self.conn.execute("SELECT id FROM nodes").fetchall()]
+
+#: How schema drift names a table whose primary key is not the schema's.
+PHEROMONE_KEY_DRIFT = "primary key (node_id, context)"
+
+
+def _pheromone_key_drift(conn) -> bool:
+    """Whether ``injection_pheromone`` is keyed other than (node_id, context)."""
+    rows = conn.execute("PRAGMA table_info(injection_pheromone)").fetchall()
+    key = [row[1] for row in sorted(rows, key=lambda row: row[5]) if row[5]]
+    return bool(rows) and key != ["node_id", "context"]
+
+
+def _pheromone_needs_rebuild(conn) -> bool:
+    rows = conn.execute("PRAGMA table_info(injection_pheromone)").fetchall()
+    if not rows:
+        return False
+    columns = {row[1] for row in rows}
+    return _pheromone_key_drift(conn) or not Store.REQUIRED_COLUMNS["injection_pheromone"] <= columns
+
+
+def _rebuild_pheromone_table(conn) -> None:
+    """Recreate ``injection_pheromone`` from the schema inside the caller's
+    transaction, copying every column both shapes share."""
+    import re
+
+    statement = re.search(
+        r"CREATE TABLE IF NOT EXISTS injection_pheromone\s*\(.*?\n\);", CREATE_TABLES, re.S)
+    if statement is None:
+        raise RuntimeError("the schema holds no injection_pheromone table")
+    old = {row[1] for row in conn.execute("PRAGMA table_info(injection_pheromone)")}
+    conn.execute("ALTER TABLE injection_pheromone RENAME TO injection_pheromone_rebuild")
+    conn.execute(statement.group(0))
+    new = [row[1] for row in conn.execute("PRAGMA table_info(injection_pheromone)")]
+    shared = ", ".join(column for column in new if column in old)
+    # Rows for nodes that no longer exist would fail the foreign key; they
+    # carry nothing a lookup can reach.
+    conn.execute(
+        f"INSERT OR IGNORE INTO injection_pheromone ({shared}) "
+        f"SELECT {shared} FROM injection_pheromone_rebuild "
+        "WHERE node_id IN (SELECT id FROM nodes)")
+    conn.execute("DROP TABLE injection_pheromone_rebuild")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pheromone_node ON injection_pheromone(node_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pheromone_strength ON injection_pheromone(strength DESC)")
+
+
+def _column_definitions(schema_sql: str) -> dict[str, dict[str, str]]:
+    """`{table: {column: definition}}` from CREATE TABLE statements, for
+    adding a missing column with the schema's own type and default."""
+    import re
+
+    definitions: dict[str, dict[str, str]] = {}
+    for match in re.finditer(
+            r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", schema_sql, re.S):
+        table, body = match.group(1), match.group(2)
+        columns: dict[str, str] = {}
+        for line in body.splitlines():
+            text = line.split("--", 1)[0].strip().rstrip(",")
+            if not text or text.upper().startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "CHECK", "CONSTRAINT")):
+                continue
+            name = text.split()[0]
+            if name.isidentifier():
+                # ALTER TABLE cannot add a primary key or a unique column.
+                if "PRIMARY KEY" in text.upper() or " UNIQUE" in text.upper():
+                    continue
+                columns[name] = text
+        definitions[table] = columns
+    return definitions
+
+
+def _absent_schema(error: sqlite3.Error) -> bool:
+    """A read of an optional table or column that this store predates."""
+    text = str(error)
+    return isinstance(error, sqlite3.OperationalError) and (
+        "no such table" in text or "no such column" in text)

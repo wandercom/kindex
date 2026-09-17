@@ -27,9 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/configure-pages@v6
+      # docs/reviews are internal working notes (the sdist excludes them too);
+      # the published site is docs/ without them.
+      - name: Stage the site
+        run: |
+          mkdir -p "$RUNNER_TEMP/site"
+          cp -a docs/. "$RUNNER_TEMP/site/"
+          rm -rf "$RUNNER_TEMP/site/reviews"
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: docs
+          path: ${{ runner.temp }}/site
           include-hidden-files: true
       - id: deployment
         uses: actions/deploy-pages@v5

@@ -20,6 +20,14 @@ from .privacy import safe_error
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         from .privacy import redact_text
+        words = self.prog.split()
+        command = words[1] if len(words) > 1 else (sys.argv[1] if len(sys.argv) > 1 else "")
+        if command in _HOOK_SURFACE_COMMANDS:
+            # argparse exits 2, which a host reads as "block this action";
+            # a malformed hook command is an error to show, not a veto.
+            self.print_usage(sys.stderr)
+            print(f"{self.prog}: error: {redact_text(message)}", file=sys.stderr)
+            raise SystemExit(1)
         super().error(redact_text(message))
 
 
@@ -1404,14 +1412,12 @@ def cmd_doctor(args):
         )
         issues.append(f"Schema drift: {detail} — run `kin doctor --fix`")
         if do_fix:
-            store.close()
-            store = _store(args)
-            remaining = store.schema_drift()
+            remaining = store.repair_schema_drift()
             if remaining:
-                issues[-1] += " (FIX FAILED — migration did not add the columns)"
+                issues[-1] += " (FIX FAILED — columns could not be added in place)"
             else:
                 fixes_applied += 1
-                issues[-1] += " (FIXED: migrations replayed)"
+                issues[-1] += " (FIXED: missing columns added)"
 
     # ── Silently-recovered failures ──
     # Counters bumped by recovery paths. A handled failure still emits a
@@ -2773,13 +2779,9 @@ def cmd_changelog(args):
         since_dt = datetime.datetime.now() - datetime.timedelta(days=days)
         since_iso = since_dt.isoformat(timespec="seconds")
 
-    # Fetch activity, optionally filtered by actor
-    if args.actor:
-        entries = store.activity_by_actor(args.actor)
-        # Further filter by timestamp
-        entries = [e for e in entries if (e.get("timestamp") or "") >= since_iso]
-    else:
-        entries = store.activity_since(since_iso)
+    # The store compares the bound in the log's own UTC form; a raw string
+    # comparison here dropped the boundary day and capped the actor's rows at 50.
+    entries = store.activity_since(since_iso, actor=args.actor or None)
 
     if not entries:
         if args.json:
@@ -3960,6 +3962,9 @@ def cmd_cron(args):
 
     for p in passes:
         results = p["results"]
+        if results.get("skipped") == "cron_already_running":
+            print("Cron maintenance skipped: another run is in progress.")
+            continue
         if p["profile"]:
             print(f"Cron maintenance complete (profile: {p['profile']}):")
         else:
@@ -4420,6 +4425,9 @@ def cmd_coord(args):
     store = _store(args)
     action = getattr(args, "coord_action", "list")
     agent = getattr(args, "agent", "") or resolve_agent_id(cfg)
+    # The operator may end a conversation or clear a standing message that is
+    # not theirs; an agent acts only on conversations it belongs to.
+    force = bool(getattr(args, "force", False))
 
     if action == "start":
         from .coordination import create_conversation
@@ -4524,12 +4532,14 @@ def cmd_coord(args):
             if sub == "set":
                 text = " ".join(words[1:])
                 entry = set_inject_message(store, ref, text, agent,
-                                           to=getattr(args, "to", None))
+                                           to=getattr(args, "to", None),
+                                           authorize=not force)
                 print(f"Set inject message #{entry['id']}"
                       + (f" -> {entry['to']}" if entry.get("to") else ""))
             elif sub == "clear":
                 count = clear_inject_messages(
-                    store, ref, message_id=getattr(args, "id", None))
+                    store, ref, message_id=getattr(args, "id", None),
+                    actor=None if force else agent)
                 print(f"Cleared {count} inject message(s)")
             else:
                 msgs = list_inject_messages(store, ref)
@@ -4563,7 +4573,13 @@ def cmd_coord(args):
             print("Usage: kin coord end <name-or-id>", file=sys.stderr)
             store.close()
             return
-        result = end_conversation(store, ref, summary=getattr(args, "summary", "") or "")
+        try:
+            result = end_conversation(store, ref, summary=getattr(args, "summary", "") or "",
+                                      actor=None if force else agent)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            store.close()
+            sys.exit(1)
         if result:
             print(f"Ended coordination conversation: {ref}")
         else:
@@ -4864,7 +4880,9 @@ def cmd_remind(args):
             print(f"Reminder {rid} has no action defined.", file=sys.stderr)
             store.close()
             return
+        from .reminders import settle_after_manual_action
         result = execute_action(store, r, cfg, manual=True)
+        settle_after_manual_action(store, r, result)
         if getattr(args, "json", False):
             print(_dumps(result))
         else:
@@ -4959,11 +4977,15 @@ def cmd_stop_guard(args):
     store.close()
 
     if pending:
-        titles = [r["title"] for r in pending[:5]]
+        from .retrieve import graph_text
+        titles = [f"{graph_text(r['title'], 120, single_line=True)} ({r['id']})"
+                  for r in pending[:5]]
+        # Reviewing is the ask; the text never tells an agent to run an action.
         msg = (
             f"BLOCKED: {len(pending)} actionable reminder(s) pending. "
             f"Handle before exiting: {', '.join(titles)}. "
-            f"Use `kin remind exec <id>` to run or `kin remind done <id>` to dismiss."
+            f"Review with `kin remind show --reminder-id <id>`; dismiss with "
+            f"`kin remind done --reminder-id <id>`."
         )
         result = {"decision": "block", "message": msg}
         print(_json.dumps(result))
@@ -4992,7 +5014,7 @@ def _collab_unread_messages(store, collab: dict, agent: str) -> list[dict]:
     """New messages in a collab for an agent: id > their read cursor,
     targeted to them or broadcast. Does NOT advance the cursor (only an
     explicit coord_read marks messages as read)."""
-    node = store.get_node(collab.get("node_id", ""))
+    node = store.peek_node(collab.get("node_id", ""))
     if not node:
         return []
     extra = node.get("extra") or {}
@@ -5012,7 +5034,8 @@ def _collab_unread_messages(store, collab: dict, agent: str) -> list[dict]:
     return out
 
 
-def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
+def _collab_prompt_lines(store, cfg, conversation_id: str,
+                         failures: list | None = None) -> list[str]:
     """Collab updates for the UserPromptSubmit hook.
 
     New targeted/broadcast messages since the agent's read cursor plus standing
@@ -5028,10 +5051,14 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
         return []
 
     agent = resolve_agent_id(cfg)
+    skipped: list | None = None if failures is None else []
     collabs = [
-        c for c in active_collabs_for_agent(store, agent)
+        c for c in active_collabs_for_agent(store, agent, skipped=skipped)
         if c.get("unread_count") or c.get("inject_messages")
     ]
+    if skipped:
+        from .coordination import skipped_conversation_error
+        failures.extend(skipped_conversation_error(cid, error) for cid, error in skipped)
     if not collabs:
         return []
 
@@ -5072,6 +5099,13 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
         lines.append(f"  +{len(collabs) - 3} more collabs")
 
     store.set_meta(key, now.isoformat(timespec="seconds"))
+    # One cooldown row per host session: a row older than the window no longer
+    # suppresses anything, so drop it rather than keep one per session forever.
+    cutoff = (now - datetime.timedelta(minutes=max(cooldown_min, 1))).isoformat(timespec="seconds")
+    store.conn.execute(
+        "DELETE FROM meta WHERE key LIKE 'collab.prompt\\_last\\_injected.%' ESCAPE '\\' "
+        "AND value < ? AND key != ?", (cutoff, key))
+    store.conn.commit()
     return lines
 
 
@@ -5260,11 +5294,17 @@ def cmd_prompt_check(args):
 
     # Collab updates: new targeted/broadcast messages since the agent's read
     # cursor + standing inject messages, with a per-conversation cooldown.
+    # A failed section is skipped and recorded once the hook has answered:
+    # one invocation that fails as a whole writes only the catch-all's event.
+    section_failures: list[tuple[str, Exception]] = []
     collab_lines: list[str] = []
+    collab_failures: list[Exception] = []
     try:
-        collab_lines = _collab_prompt_lines(store, cfg, conversation_id)
-    except Exception:
+        collab_lines = _collab_prompt_lines(store, cfg, conversation_id, collab_failures)
+    except Exception as exc:
         collab_lines = []
+        section_failures.append(("prompt-check.collabs", exc))
+    section_failures.extend(("prompt-check.collabs", exc) for exc in collab_failures)
 
     due = []
     if cfg.reminders.enabled:
@@ -5276,12 +5316,14 @@ def cmd_prompt_check(args):
                 include_global=True,
                 include_legacy=not strict_scope,
             )
-        except Exception:
+        except Exception as exc:
             due = []
+            section_failures.append(("prompt-check.reminders", exc))
 
     # Also check tasks that are urgent/overdue
     task_lines = []
     try:
+        from .retrieve import graph_text
         from .scoping import item_matches_conversation
         from .tasks import list_tasks
         urgent_tasks = list_tasks(store, status="open", limit=5)
@@ -5298,44 +5340,49 @@ def cmd_prompt_check(args):
             due_date = extra.get("due", "")
             if p <= 2 or (due_date and due_date[:10] <= datetime.date.today().isoformat()):
                 p_label = {1: "URGENT", 2: "HIGH"}.get(p, "")
-                task_lines.append(f"  - [{p_label}] {t['title']} (id: {t['id']})")
-    except Exception:
-        pass
+                task_lines.append(
+                    f"  - [{p_label}] {graph_text(t['title'], 200, single_line=True)} (id: {t['id']})")
+    except Exception as exc:
+        section_failures.append(("prompt-check.tasks", exc))
+
+    def record_section_failures() -> None:
+        from .hooks import _record_section_degraded
+        for section, exc in section_failures:
+            _record_section_degraded(section, exc, cfg)
 
     if (not due and not attention_lines and not task_lines and not sim_lines
             and not collab_lines):
         store.close()
+        record_section_failures()
         return
 
-    # ANSI codes for visual distinction
-    BOLD = "\033[1m"
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    CYAN = "\033[96m"
-    RESET = "\033[0m"
-    BEL = "\a"
+    # Plain text: this block is model context, where terminal colour codes
+    # and a bell were only noise. Graph text is neutralised and an action is
+    # summarised, never shown beside a call to run it (as in the prime).
+    from .hooks import reminder_action_summary
+    from .privacy import redact
+    from .retrieve import graph_text
 
     lines = []
-    lines.append(f"{BEL}<system-reminder>")
+    lines.append("<system-reminder>")
     if due:
-        lines.append(f"{BOLD}{RED}{'=' * 50}")
+        lines.append("=" * 50)
         lines.append(f"  KINDEX REMINDERS DUE ({len(due)})")
-        lines.append(f"{'=' * 50}{RESET}")
-        for r in due[:5]:
+        lines.append("=" * 50)
+        for r in redact(due[:5]):
             priority = r.get("priority", "normal")
-            p_color = RED if priority in ("urgent", "high") else YELLOW
-            p_marker = f" {p_color}[{priority.upper()}]{RESET}" if priority != "normal" else ""
+            p_marker = f" [{str(priority).upper()}]" if priority != "normal" else ""
             extra = r.get("extra") or {}
-            lines.append(f"  {BOLD}{CYAN}-{RESET}{p_marker} {r['title']} (due: {r['next_due'][:16]}, id: {r['id']})")
-            if extra.get("action_instructions"):
-                lines.append(f"    Instructions: {extra['action_instructions'][:100]}")
-            if extra.get("action_command"):
-                lines.append(f"    Action: `{extra['action_command']}`")
+            lines.append(
+                f"  -{p_marker} {graph_text(r['title'], 200, single_line=True)} "
+                f"(due: {r['next_due'][:16]}, id: {r['id']})")
+            if extra.get("action_command") or extra.get("action_instructions"):
+                lines.append("    " + reminder_action_summary(extra))
+                lines.append(f"    Review it with `kin remind show --reminder-id {r['id']} --json`")
         lines.append("")
-        lines.append(f"{BOLD}Act on these NOW:{RESET}")
-        lines.append(f"  - `kin remind done <id>` to complete")
-        lines.append(f"  - `kin remind snooze <id>` to defer")
-        lines.append(f"  - `kin remind exec <id>` to run action")
+        lines.append("Act on these now:")
+        lines.append("  - `kin remind done --reminder-id <id>` to complete")
+        lines.append("  - `kin remind snooze --reminder-id <id>` to defer")
 
     if attention_lines:
         if due:
@@ -5354,7 +5401,7 @@ def cmd_prompt_check(args):
 
     if task_lines:
         lines.append("")
-        lines.append(f"{BOLD}{RED}URGENT TASKS:{RESET}")
+        lines.append("URGENT TASKS:")
         lines.extend(task_lines)
 
     lines.append("</system-reminder>")
@@ -5376,6 +5423,7 @@ def cmd_prompt_check(args):
     if rendered:
         print(rendered)
     store.close()
+    record_section_failures()
 
 
 def cmd_attention_hook(args):
@@ -6893,6 +6941,8 @@ def _common(p):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .schema import ADDABLE_NODE_TYPES
+
     p = _ArgumentParser(prog="kin",
                                 description="Knowledge graph that learns from your conversations")
     p.add_argument("--version", action="store_true")
@@ -6991,9 +7041,7 @@ def build_parser() -> argparse.ArgumentParser:
     # add
     s = sub.add_parser("add", help="Quick capture with auto-linking")
     s.add_argument("note", nargs="+")
-    s.add_argument("--type", choices=["concept", "document", "decision",
-                                       "question", "skill", "artifact", "person",
-                                       "constraint", "directive", "checkpoint", "watch"])
+    s.add_argument("--type", choices=list(ADDABLE_NODE_TYPES))
     # Operational node metadata
     s.add_argument("--trigger", help="Trigger event (pre-commit, pre-deploy, etc.)")
     s.add_argument("--action", choices=["verify", "warn", "block"], help="Constraint action")
@@ -7773,6 +7821,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary", help="End summary retained after clearing messages")
     s.add_argument("--to", help="Target agent (post / inject set)")
     s.add_argument("--id", type=int, help="Inject message id (inject clear)")
+    s.add_argument("--force", action="store_true",
+                   help="Act as the operator: end, set or clear on a conversation you do not belong to")
     _common(s)
     s.set_defaults(func=cmd_coord)
 
@@ -7814,9 +7864,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--wake", dest="wake_client", choices=["codex", "opencode"],
                    help="Wake a headless agent when due")
     s.add_argument("--wake-session", "--session", dest="wake_session_id",
-                   help="Host session id to resume for --wake; use 'last' for latest")
+                   help="Host session id to resume for --wake; 'last' is resolved to "
+                        "the current (or newest Codex) session when the reminder is created")
     s.add_argument("--wake-cwd", "--cwd", dest="wake_cwd",
-                   help="Working directory for the wake run")
+                   help="Working directory for the wake run (default: the current directory)")
     s.add_argument("--wake-model", dest="wake_model",
                    help="Model override for the wake run")
     s.add_argument("--wake-agent", dest="wake_agent",
@@ -7918,6 +7969,9 @@ def build_parser() -> argparse.ArgumentParser:
 _HOOK_SURFACE_COMMANDS = {
     "prime", "compact-hook", "prompt-check", "stop-guard",
     "attention-hook", "agent-prime-hook", "agent-stop-hook", "cron",
+    # Installed as a hook for Antigravity, Cursor and OpenCode: a bad
+    # payload degrades like any hook, never a traceback with exit 1.
+    "supervisor-hook",
 }
 
 
@@ -7950,6 +8004,13 @@ def _degrade_hook_failure(args, exc: BaseException) -> None:
         output = _degraded_hook_output(args, exc)
         if output:
             print(output, end="")
+        if getattr(args, "command", None) in ("cron", "remind"):
+            # Scheduler entries are not host hooks: a person running them (or
+            # the scheduler's log) sees why nothing happened, still exit 0.
+            from .privacy import safe_error
+            remedy = getattr(exc, "remedy", "") or safe_error(exc)
+            print(f"kindex {args.command} degraded: {type(exc).__name__}: {remedy}",
+                  file=sys.stderr)
 
 
 def _degraded_hook_output(args, exc: BaseException) -> str:
@@ -7972,6 +8033,7 @@ def _degraded_hook_output(args, exc: BaseException) -> str:
     event = {
         "attention-hook": getattr(args, "event", None) or "PreToolUse",
         "agent-stop-hook": "Stop",
+        "supervisor-hook": "PreInvocation",
     }.get(command)
     if event is None:
         return ""

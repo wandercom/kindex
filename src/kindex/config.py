@@ -936,10 +936,13 @@ def load_config(
 
     if config_path:
         p = _resolve_path(config_path)
+        if not p.exists() and _bound_root is None:
+            raise ValueError(f"Kindex config file not found: {config_path}")
         if p.exists():
             data = yaml.safe_load(p.read_text()) or {}
             kin_profile = data.pop("profile", None)
-            cfg = _resolve_profile(Config(**data), profile, kin_profile)
+            cfg = _resolve_profile(Config(**data), profile, kin_profile,
+                                   profiles_base=p.parent)
             cfg = _contain_data_dir(cfg)
             local = project_root / ".kin" / "local"
             if not data_dir and not cfg.active_profile and cfg.data_path in (local, local / "kindex"):
@@ -952,11 +955,13 @@ def load_config(
 
     # Layer 1: global config (user-level)
     merged: dict = {}
+    profiles_base: Path | None = None
     for p in _effective_global_paths():
         p = _contained_resolve(p)
         if p is not None and p.is_file():
             data = yaml.safe_load(p.read_text()) or {}
             merged = _deep_merge(merged, data)
+            profiles_base = p.parent
             break  # use first global found
 
     project_layers = _project_config_paths(project_root)
@@ -988,7 +993,7 @@ def load_config(
 
     cfg = Config(**merged) if merged else Config()
     cfg._ignored_project_keys = ignored_project_keys
-    cfg = _resolve_profile(cfg, profile, kin_profile)
+    cfg = _resolve_profile(cfg, profile, kin_profile, profiles_base=profiles_base)
     cfg = _contain_data_dir(cfg)
     # Explicit project callers and existing repo-local configurations share the
     # integration store. Unscoped legacy/global and named profiles stay separate.
@@ -998,8 +1003,12 @@ def load_config(
         selected = cfg.data_path
         repo_selected = selected in (local, local / "kindex")
         explicit_project = bool(project_path or os.environ.get("KIN_PROJECT")) and _bound_root is None and _git_root(project_root) is not None
-        existing_repo = any((d / n).exists() for d in (local, local / "kindex")
-                            for n in ("kindex.db", "conv.db"))
+        # A symlinked chain is never selected implicitly (the store refuses
+        # it); an unscoped call in such a repository uses the home store
+        # instead of failing every time. An explicit project still refuses.
+        linked = any(path.is_symlink() for path in (project_root / ".kin", local, local / "kindex"))
+        existing_repo = not linked and any((d / n).exists() for d in (local, local / "kindex")
+                                           for n in ("kindex.db", "conv.db"))
         implicit_repo = existing_repo and "data_dir" not in merged
         if repo_selected or ((explicit_project or implicit_repo) and cfg.data_dir == "~/.kindex"):
             project_store = project_data_path(project_root)
@@ -1052,7 +1061,8 @@ def trusted_supervisor_config(project_path: str | Path, data_dir: str) -> Config
 
 
 def _resolve_profile(cfg: Config, explicit: str | None,
-                     kin_profile: str | None) -> Config:
+                     kin_profile: str | None, *,
+                     profiles_base: Path | None = None) -> Config:
     """Resolve the active profile on a freshly loaded Config (in place).
 
     No profiles configured AND no explicit/env request => legacy single-graph
@@ -1062,14 +1072,16 @@ def _resolve_profile(cfg: Config, explicit: str | None,
     env_profile = os.environ.get("KIN_PROFILE") or None
     if not cfg.profiles and not explicit and not env_profile:
         return cfg  # legacy: byte-identical to pre-profile behavior
+    _anchor_profile_dirs(cfg, profiles_base)
 
     # Explicit tiers: flag > env > .kin chain key
     for name, source in ((explicit, "flag"), (env_profile, "env"),
                          (kin_profile, "kin")):
         if name:
-            return _activate_profile(cfg, str(name), source)
+            return _activate_profile(cfg, str(name), source, profiles_base)
 
     # Roots tier: longest-prefix match of cwd against any profile's roots
+    # (the documented contract; the project root only locates config).
     try:
         cwd = Path.cwd().resolve()
     except OSError:
@@ -1088,15 +1100,30 @@ def _resolve_profile(cfg: Config, explicit: str | None,
                     if best is None or plen > best[0]:
                         best = (plen, name)
         if best is not None:
-            return _activate_profile(cfg, best[1], "roots")
+            return _activate_profile(cfg, best[1], "roots", profiles_base)
 
     if cfg.default_profile:
-        return _activate_profile(cfg, cfg.default_profile, "default")
+        return _activate_profile(cfg, cfg.default_profile, "default", profiles_base)
 
     return cfg  # profiles exist but nothing matched -> legacy passthrough
 
 
-def _activate_profile(cfg: Config, name: str, source: str) -> Config:
+def _anchor_profile_dirs(cfg: Config, profiles_base: Path | None) -> None:
+    """Make every profile's relative data_dir absolute against the config that
+    declared it. Cron, routing and `kin profile list` read the entries
+    directly; anchoring only the active one left the rest resolving against
+    whatever directory the scheduler ran in, so cron opened other graphs and
+    missed their reminders."""
+    if profiles_base is None:
+        return
+    for entry in cfg.profiles.values():
+        data_dir = Path(entry.data_dir).expanduser()
+        if not data_dir.is_absolute():
+            entry.data_dir = str(profiles_base / data_dir)
+
+
+def _activate_profile(cfg: Config, name: str, source: str,
+                      profiles_base: Path | None = None) -> Config:
     if name not in cfg.profiles:
         known = ", ".join(sorted(cfg.profiles)) or "(none)"
         raise ValueError(
@@ -1104,7 +1131,16 @@ def _activate_profile(cfg: Config, name: str, source: str) -> Config:
             f"known profiles: {known}"
         )
     cfg._legacy_data_dir = cfg.data_dir
-    cfg.data_dir = str(Path(cfg.profiles[name].data_dir).expanduser())
+    profile_dir = Path(cfg.profiles[name].data_dir).expanduser()
+    if not profile_dir.is_absolute():
+        # Relative to the config that declared it, not to wherever the
+        # process runs (which made one profile a store per directory).
+        if profiles_base is None:
+            raise ValueError(
+                f"Kindex profile '{name}' has a relative data_dir "
+                f"({cfg.profiles[name].data_dir}); make it absolute")
+        profile_dir = profiles_base / profile_dir
+    cfg.data_dir = str(profile_dir)
     cfg.active_profile = name
     cfg.profile_source = source
     return cfg
@@ -1371,6 +1407,11 @@ def resolve_project_root(project_path: str | Path | None = None) -> Path:
     raw = project_path or os.environ.get("KIN_PROJECT")
     if raw:
         start = _resolve_path(raw)
+        if _bound_root is None and not start.exists():
+            # A named project that is not there used to fall through to the
+            # home store without a word.
+            source = "--project-path" if project_path else "KIN_PROJECT"
+            raise ValueError(f"Kindex project path from {source} does not exist: {raw}")
     elif _bound_root is not None:
         start = _bound_root
     else:
@@ -1435,9 +1476,10 @@ def _project_config_paths(project_root: Path) -> list[Path]:
     for _ in range(10):
         kin_entry = current / ".kin"
         if kin_entry.is_file():
-            upgraded = _maybe_upgrade_kin_file(kin_entry)
-            if upgraded:
-                candidates.append(upgraded)
+            # A legacy .kin file is read where it is: loading config is a
+            # read, and upgrading here rewrote ancestors (and raced, losing
+            # the file) on every hook call. `kin config` upgrades it.
+            candidates.append(kin_entry)
         elif kin_entry.is_dir():
             candidates.append(kin_entry / "config")
         parent = current.parent
@@ -1531,16 +1573,31 @@ def _maybe_upgrade_kin_file(path: Path) -> Path | None:
             path.resolve().relative_to(_bound_root)
         except ValueError:
             return None  # Outside the binding — refuse
+    import uuid
+
+    # The file is moved aside first (atomic), so a crash or a concurrent
+    # upgrade can never lose it: it is removed only once .kin/config holds
+    # its bytes. It used to be unlinked before the new file was written.
+    aside = path.with_name(f".kin.upgrade-{uuid.uuid4().hex[:8]}")
     try:
-        content = path.read_bytes()
-        path.unlink()
+        path.rename(aside)
+    except OSError:
+        return None  # another process moved it first
+    try:
+        content = aside.read_bytes()
         kin_dir = path.parent / ".kin"
         kin_dir.mkdir(exist_ok=True)
         config_path = kin_dir / "config"
-        config_path.write_bytes(content)
-        return config_path
+        staged = kin_dir / f".config.{aside.name[-8:]}"
+        staged.write_bytes(content)
+        os.replace(staged, config_path)
     except OSError:
-        return None
+        return None  # the moved-aside file keeps the content
+    try:
+        aside.unlink()
+    except OSError:
+        pass
+    return config_path
 
 
 def resolve_kin_config(path: Path) -> Path:
@@ -1556,9 +1613,7 @@ def resolve_kin_config(path: Path) -> Path:
         return Path("/dev/null/__binding_escaped__")
     path = resolved
     if path.is_file():
-        if path.name == ".kin":
-            upgraded = _maybe_upgrade_kin_file(path)
-            return upgraded if upgraded else path
+        # A legacy .kin file is the config itself; reading it changes nothing.
         return path
     if path.is_dir() and path.name == ".kin":
         return path / "config"

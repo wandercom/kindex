@@ -103,13 +103,16 @@ def prime_context(
     lines.append(GRAPH_DATA_NOTE)
     lines.append("")
 
-    # Budget: roughly 3 chars per token, target ~2000-2250 chars for 750 tokens
-    char_budget = max_tokens * 3
-    used = sum(len(l) for l in lines)
+    # The budget is a ceiling on everything drawn from the graph, at about
+    # four characters per token; see _fit_prime_to_budget.
+    char_budget = max_tokens * 4
 
     # -- Key concepts (summarized tier) --
+    # Built now, placed once the other sections are known: they are the
+    # elastic part of the prime and take what the budget leaves.
+    concept_entries: list[str] = []
+    concepts_at = len(lines)
     if results:
-        lines.append("### Key concepts")
         for r in results[:6]:
             try:
                 title = graph_text(r.get("title", r["id"]), 200, single_line=True)
@@ -139,13 +142,7 @@ def prime_context(
                     entry += "\n  " + graph_text(caveat).replace("\n", "\n  ")
             except Exception:
                 continue  # one malformed node never zeroes the prime
-
-            if used + len(entry) + 1 > char_budget - 400:
-                break
-            lines.append(entry)
-            used += len(entry) + 1
-
-        lines.append("")
+            concept_entries.append(entry)
 
     # -- Active operational nodes (expired ones are skipped in every section) --
     # Client-scoped nodes (e.g. an Antigravity hook-protocol directive) are dropped
@@ -180,7 +177,6 @@ def prime_context(
             except Exception:
                 continue
             lines.append(entry)
-            used += len(entry) + 1
         lines.append("")
 
     if ops["watches"]:
@@ -211,7 +207,6 @@ def prime_context(
             except Exception:
                 continue
             lines.append(entry)
-            used += len(entry) + 1
         lines.append("")
 
     if ops["directives"]:
@@ -227,7 +222,6 @@ def prime_context(
             except Exception:
                 continue
             lines.append(entry)
-            used += len(entry) + 1
         lines.append("")
 
     # -- Recent activity summary (since yesterday) --
@@ -260,7 +254,7 @@ def prime_context(
                     target_id = str(entry.get("target_id") or "")
                     if not target_id or action.startswith("delete"):
                         continue
-                    target_node = store.get_node(target_id)
+                    target_node = store.peek_node(target_id)
                     if (target_node is None
                             or (target_node.get("status") or "active") != "active"
                             or node_expired(target_node)):
@@ -313,8 +307,8 @@ def prime_context(
                             f"  - {graph_text(seg.get('focus', ''), 80, single_line=True)}: "
                             f"{graph_text(seg.get('summary', ''), 80, single_line=True)}")
             lines.append("")
-    except Exception:
-        pass  # Don't break priming if sessions module has issues
+    except Exception as e:
+        section_failures.append(("prime.session", e))
 
     # -- Active collabs (multi-agent coordination) --
     try:
@@ -324,7 +318,13 @@ def prime_context(
             from .config import resolve_agent_id
             from .coordination import active_collabs_for_agent
 
-            collabs = redact(active_collabs_for_agent(store, resolve_agent_id(config)))
+            skipped: list = []
+            collabs = redact(active_collabs_for_agent(
+                store, resolve_agent_id(config), skipped=skipped))
+            from .coordination import skipped_conversation_error
+            section_failures.extend(
+                ("prime.collabs", skipped_conversation_error(cid, error))
+                for cid, error in skipped)
             if collabs:
                 from .coordination import render_field
                 lines.append("### Active collabs")
@@ -366,8 +366,9 @@ def prime_context(
                 if len(collabs) > 3:
                     lines.append(f"- +{len(collabs) - 3} more")
                 lines.append("")
-    except Exception:
-        pass  # Don't break priming
+    except Exception as error:
+        # Don't break priming; the skipped section is recorded with the others.
+        section_failures.append(("prime.collabs", error))
 
     # -- Due/upcoming reminders --
     try:
@@ -425,8 +426,8 @@ def prime_context(
                             f"`kin remind snooze --reminder-id {r['id']}`"
                         )
                 lines.append("")
-    except Exception:
-        pass  # Don't break priming
+    except Exception as e:
+        section_failures.append(("prime.reminders", e))
 
     # -- Contextual tasks --
     try:
@@ -464,10 +465,15 @@ def prime_context(
                 "  Use `task_done <id>` to complete, `task_add` to create new tasks"
             )
             lines.append("")
-    except Exception:
-        pass  # Don't break priming if tasks module has issues
+    except Exception as e:
+        section_failures.append(("prime.tasks", e))
+
+    lines = _fit_prime_to_budget(
+        lines[:concepts_at], concept_entries if results else None,
+        lines[concepts_at:], char_budget)
 
     # -- Session directives (gated by reminders.remind_kindex_usage) --
+    # Kindex's own fixed instructions, not graph content: outside the budget.
     if config is None or config.reminders.remind_kindex_usage:
         lines.append("### Session directives")
         lines.append("You MUST use kindex MCP tools proactively — this is the user's external memory.")
@@ -506,6 +512,124 @@ def prime_context(
 
 #: Rows of activity the prime reads for its 24-hour summary.
 ACTIVITY_SCAN_LIMIT = 500
+
+#: The prime's sections in the order they give way to the budget: the first
+#: loses entries first; due reminders go last. Matched by heading prefix.
+PRIME_TRIM_ORDER = (
+    "### Recent activity", "### Active session", "### Tasks", "### Directives",
+    "### Watches", "### Active collabs", "### Active constraints", "### Reminders",
+)
+#: The share of the budget key concepts keep however full the other sections are.
+PRIME_CONCEPT_FLOOR = 0.4
+
+
+def _prime_sections(lines: list[str]) -> list[dict]:
+    """Split rendered prime lines into sections of whole entries. An entry is
+    a "- " line with the indented lines under it; any other line is its own."""
+    sections: list[dict] = []
+    for line in lines:
+        if line.startswith("### ") or not sections:
+            sections.append({"heading": line, "entries": [], "omitted": 0})
+            continue
+        entries = sections[-1]["entries"]
+        if line == "":
+            continue
+        if line.startswith("  ") and entries:
+            entries[-1].append(line)
+        else:
+            entries.append([line])
+    return sections
+
+
+def _render_prime_section(section: dict) -> list[str]:
+    if not section["entries"]:
+        return []
+    out = [section["heading"]]
+    for entry in section["entries"]:
+        out.extend(entry)
+    out.append("")
+    return out
+
+
+#: Room kept for the line naming what the budget left out.
+_OMISSION_RESERVE = 200
+
+
+def _fit_prime_to_budget(head: list[str], concepts: list[str] | None,
+                         tail: list[str], budget: int) -> list[str]:
+    """Assemble the prime inside ``budget`` characters.
+
+    Key concepts take what the other sections leave, but never less than
+    ``PRIME_CONCEPT_FLOOR`` of the budget; the other sections then give up
+    entries in ``PRIME_TRIM_ORDER`` until the whole fits, and one closing
+    line says what was left out. Only key concepts were bounded before, so a
+    busy graph produced a prime far over its budget.
+    """
+    def size(block: list[str]) -> int:
+        return sum(len(line) + 1 for line in block)
+
+    sections = _prime_sections(tail)
+    head_size = size(head)
+
+    def tail_size() -> int:
+        return sum(size(_render_prime_section(s)) for s in sections)
+
+    heading = "### Key concepts"
+
+    def allocate(room: int) -> tuple[list[str], int]:
+        chosen: list[str] = []
+        used = 0
+        for index, entry in enumerate(concepts or []):
+            if used + len(entry) + 1 > room:
+                return chosen, len(concepts) - index
+            chosen.append(entry)
+            used += len(entry) + 1
+        return chosen, 0
+
+    def render_concepts(chosen: list[str]) -> list[str]:
+        return [heading, *chosen, ""] if concepts is not None else []
+
+    room = max(budget - head_size - tail_size() - len(heading) - 2,
+               int(budget * PRIME_CONCEPT_FLOOR))
+    chosen, concepts_left = allocate(room)
+    total = head_size + size(render_concepts(chosen)) + tail_size()
+    if total > budget or concepts_left:
+        # Something will be left out, so the closing line's room is kept
+        # before anything else is placed.
+        room = max(budget - head_size - tail_size() - len(heading) - 2 - _OMISSION_RESERVE,
+                   int(budget * PRIME_CONCEPT_FLOOR))
+        chosen, concepts_left = allocate(room)
+        total = head_size + size(render_concepts(chosen)) + tail_size()
+    limit = budget - _OMISSION_RESERVE if total > budget or concepts_left else budget
+    for prefix in PRIME_TRIM_ORDER:
+        for section in sections:
+            if total <= limit:
+                break
+            if not section["heading"].startswith(prefix):
+                continue
+            while total > limit and section["entries"]:
+                before = size(_render_prime_section(section))
+                section["entries"].pop()
+                section["omitted"] += 1
+                total += size(_render_prime_section(section)) - before
+    # The concept floor gives way last, so the whole never passes the budget.
+    while total > limit and chosen:
+        total -= len(chosen.pop()) + 1
+        concepts_left += 1
+    concept_lines = render_concepts(chosen)
+    rendered = list(head) + concept_lines
+    for section in sections:
+        rendered.extend(_render_prime_section(section))
+    left_out = [f"{concepts_left} key concepts"] if concepts_left else []
+    left_out += [f"{section['omitted']} of {section['heading'].lstrip('# ').split(':')[0]}"
+                 for section in sections if section["omitted"]]
+    if left_out:
+        line = ("_(Left out for the token budget: " + "; ".join(left_out)
+                + ". Ask with `context` or `search` for more.)_")
+        rendered.append(line[:_OMISSION_RESERVE - 1])
+    return rendered
+
+
 #: Characters of a reminder action shown in the prime.
 ACTION_PREVIEW_CHARS = 80
 

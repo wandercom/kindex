@@ -64,8 +64,10 @@ def dream_deep(
             if member_ids:
                 existing_member_sets.append(member_ids)
 
+    attempts = 0
     for cluster in clusters:
-        if summaries_created >= 5:
+        # Failed calls cost too: attempts are bounded, not just successes.
+        if summaries_created >= MAX_SUMMARIES or attempts >= MAX_SUMMARY_ATTEMPTS:
             break
         signature = _cluster_signature(cluster)
         member_ids = {node["id"] for node in cluster}
@@ -79,6 +81,7 @@ def dream_deep(
             summaries_created += 1
             continue
 
+        attempts += 1
         summary = _llm_summarise_cluster(cluster, timeout=timeout)
         if not summary:
             continue
@@ -253,12 +256,22 @@ def _parse_domains(node: dict) -> set[str]:
     return set(domains)
 
 
+MAX_SUMMARIES = 5
+MAX_SUMMARY_ATTEMPTS = 5
+# A cluster prompt names at most this many members, and never exceeds this
+# many characters; it is sent on stdin (an argv element this large failed
+# with E2BIG and was visible to every local process).
+MAX_CLUSTER_MEMBERS = 40
+MAX_PROMPT_CHARS = 32_000
+
+
 def _llm_summarise_cluster(
     cluster: list[dict], timeout: int = 300,
 ) -> dict | None:
     """Use claude -p to generate a summary node for a cluster."""
-    titles = [redact_text(n.get("title", "")) for n in cluster]
-    contents = [redact_text(n.get("content", ""))[:200] for n in cluster]
+    shown = cluster[:MAX_CLUSTER_MEMBERS]
+    titles = [redact_text(n.get("title", ""))[:120] for n in shown]
+    contents = [redact_text(n.get("content", ""))[:200] for n in shown]
 
     prompt = (
         "You are summarising a cluster of related knowledge graph nodes.\n"
@@ -267,7 +280,12 @@ def _llm_summarise_cluster(
         "Nodes:\n"
     )
     for t, c in zip(titles, contents):
-        prompt += f"- {t}: {c}\n"
+        line = f"- {t}: {c}\n"
+        if len(prompt) + len(line) > MAX_PROMPT_CHARS:
+            break
+        prompt += line
+    if len(cluster) > len(shown):
+        prompt += f"(and {len(cluster) - len(shown)} more related nodes)\n"
     prompt += (
         "\nRespond with exactly two lines:\n"
         "TITLE: <concise title for the summary concept>\n"
@@ -276,7 +294,7 @@ def _llm_summarise_cluster(
 
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt],
+            ["claude", "-p"], input=prompt,
             capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode != 0:
@@ -300,4 +318,7 @@ def _llm_summarise_cluster(
         return None
     except FileNotFoundError:
         logger.warning("claude CLI not found in PATH")
+        return None
+    except OSError as exc:
+        logger.warning("claude -p could not start (%s)", type(exc).__name__)
         return None
