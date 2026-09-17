@@ -96,7 +96,7 @@ This auto-detects the current project from `$PWD` and outputs a context block wi
 When asked to release, follow these steps exactly. Do NOT install twine or attempt manual PyPI upload — it's fully automated.
 
 1. Run full test suite: `pytest tests/ -v`
-2. Bump `version` in `pyproject.toml` and add a `## [X.Y.Z] - YYYY-MM-DD` entry to `CHANGELOG.md`. The pre-commit hook (`scripts/sync-version.sh`) syncs `src/kindex/__init__.py`, the README badge, `docs/index.html`, `server.json`, `docs/.well-known/mcp/server-card.json` and both plugin manifests from it; `tests/test_release_metadata.py` fails CI if any surface disagrees
+2. Bump `version` in `pyproject.toml` and add a `## [X.Y.Z] - YYYY-MM-DD` entry to `CHANGELOG.md`. The pre-commit hook (`scripts/sync-version.sh`) syncs `src/kindex/__init__.py`, the README badge, `docs/index.html`, `server.json`, `docs/.well-known/mcp/server-card.json` and both plugin manifests from it; `tests/test_release_metadata.py` fails CI if any surface disagrees. If `git config core.hooksPath` is set globally (it is on Jeremy's machine), the repo hook never runs: run `bash scripts/sync-version.sh` by hand before committing, and run `pytest tests/test_release_metadata.py` before tagging
 3. Commit version bump and all changes
 4. Push to main: `git push origin main`
 5. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`

@@ -4,7 +4,7 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
-## [0.39.1] - 2026-09-17
+## [0.39.2] - 2026-09-17
 
 ### Added
 - Schema v14: `suggestions.identity_kind` is added, with its node-id backfill, to
@@ -23,8 +23,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Every store takes its usual pre-migration snapshot on first open with this
   version; restart long-lived `kin-mcp` servers after upgrading, since an older
   build refuses a migrated store.
-- 0.39.0 was tagged but never published (its publish workflow failed on release
-  metadata); 0.39.1 supersedes it.
+- 0.39.0 and 0.39.1 were tagged but never published (their publish workflows
+  failed on release-metadata drift); 0.39.2 supersedes them.
 
 ## [0.38.0] - 2026-09-13
 
