@@ -2157,6 +2157,7 @@ def cmd_compact_hook(args):
     read_state_key = ""
     read_state: dict = {}
     next_offset = 0
+    topic = ""
     if is_envelope:
         # Extracting from the envelope itself would mint one junk node per
         # JSON field (issue #14). Substitute the real conversation text
@@ -2172,32 +2173,46 @@ def cmd_compact_hook(args):
             read_state = json.loads(store.get_meta(read_state_key) or "{}")
         except (TypeError, ValueError):
             read_state = {}
+        if not isinstance(read_state, dict):
+            read_state = {}
         start = int(read_state.get("offset", 0) or 0)
         try:
             if Path(tpath).stat().st_size < start:
                 start = 0  # the transcript was replaced
+                read_state = {}
         except OSError:
             start = 0
         text, next_offset, at_end = _extract_session_text_since(Path(tpath), start)
         text_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # The conversation's topic (for --emit-context) is kept with the
+        # cursor: once a turn is consumed, its text is not read again.
+        topic = str(read_state.get("topic") or "") or _topic_line(text)
+        if not topic and getattr(args, "emit_context", False):
+            topic = _transcript_topic(Path(tpath))
+
         if len(text.strip()) < min_len:
             # Too little to extract. Keep it for the next turn unless the
             # read stopped short of the end (a long stretch with no assistant
             # text), which is skipped rather than re-read every turn.
             if not at_end:
-                store.set_meta(read_state_key, json.dumps({"offset": next_offset}))
-            _emit_compact_context(store, args, tpath=tpath)
+                _save_capture_state(store, read_state_key, topic, offset=next_offset)
+            elif topic != read_state.get("topic", ""):
+                _save_capture_state(store, read_state_key, topic, **{
+                    k: v for k, v in read_state.items() if k != "topic"})
+            _emit_compact_context(store, args, topic)
             store.close()
             return
         if text_digest == read_state.get("digest"):
-            store.set_meta(read_state_key, json.dumps(
-                {"offset": next_offset, "digest": text_digest}))
-            _emit_compact_context(store, args, tpath=tpath)
+            _save_capture_state(store, read_state_key, topic,
+                                offset=next_offset, digest=text_digest)
+            _emit_compact_context(store, args, topic)
             store.close()
             return
+    else:
+        topic = _topic_line(text or "")
 
     if not text or len(text.strip()) < min_len:
-        _emit_compact_context(store, args, tpath=tpath if is_envelope else "")
+        _emit_compact_context(store, args, topic)
         store.close()
         return
 
@@ -2214,7 +2229,7 @@ def cmd_compact_hook(args):
             record_degraded("compact-hook-extract", exc, config=cfg)
         except Exception:
             pass
-        _emit_compact_context(store, args, topic_text=text)
+        _emit_compact_context(store, args, topic)
         store.close()
         return
 
@@ -2222,8 +2237,8 @@ def cmd_compact_hook(args):
 
     source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     if read_state_key:
-        store.set_meta(read_state_key, json.dumps(
-            {"offset": next_offset, "digest": source_digest}))
+        _save_capture_state(store, read_state_key, topic,
+                            offset=next_offset, digest=source_digest)
     staged_ids: list[str] = []
     proposals = extraction.get("connections", [])
     if not isinstance(proposals, list):
@@ -2276,28 +2291,52 @@ def cmd_compact_hook(args):
     # Output context at executive level for re-injection after compaction
     if count > 0:
         print(f"# Kindex: staged {count} capture candidate(s) for review.")
-    _emit_compact_context(store, args, topic_text=text, force=count > 0)
+    _emit_compact_context(store, args, topic, force=count > 0)
 
     store.close()
 
 
-def _emit_compact_context(store, args, *, topic_text: str = "", tpath: str = "",
-                          force: bool = False) -> None:
+def _save_capture_state(store, key: str, topic: str, **fields) -> None:
+    if topic:
+        fields["topic"] = topic
+    store.set_meta(key, json.dumps(fields))
+
+
+def _topic_line(text: str) -> str:
+    """A context query from conversation text: its first non-empty line,
+    bounded (the text is already redacted)."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:100]
+    return ""
+
+
+_TOPIC_SCAN_BYTES = 64 * 1024 * 1024
+
+
+def _transcript_topic(path: Path) -> str:
+    """The first assistant text in a transcript, past any stretch of tool
+    output, within a bounded read."""
+    from .ingest import _extract_session_text_since
+    offset = 0
+    while offset < _TOPIC_SCAN_BYTES:
+        text, following, at_end = _extract_session_text_since(
+            path, offset, max_chars=200, complete_lines_only=False)
+        if text.strip():
+            return _topic_line(text)
+        if at_end or following <= offset:
+            return ""
+        offset = following
+    return ""
+
+
+def _emit_compact_context(store, args, topic: str, *, force: bool = False) -> None:
     """Print the executive context block when it was asked for.
 
     Requested context does not depend on whether this run extracted
-    anything: a Stop hook may already have consumed the transcript. With no
-    new text, the topic comes from the transcript's opening.
+    anything: a Stop hook may already have consumed the transcript.
     """
-    if not (force or getattr(args, "emit_context", False)):
-        return
-    if not topic_text.strip() and tpath:
-        from .ingest import _extract_session_text_since
-        topic_text = _extract_session_text_since(
-            Path(tpath), 0, max_chars=200, max_bytes=256 * 1024,
-            complete_lines_only=False)[0]
-    topic = topic_text[:100].split("\n")[0]
-    if not topic.strip():
+    if not (force or getattr(args, "emit_context", False)) or not topic:
         return
     from .retrieve import format_context_block, hybrid_search
     results = hybrid_search(store, topic, top_k=5)

@@ -318,3 +318,47 @@ def test_the_drain_judges_with_the_hooks_client_overrides(monkeypatch, tmp_path)
     assert calls, "the drain dropped a job its instance enabled"
     assert drained["flagged"] == 1
     store.close()
+
+
+def test_requested_context_finds_the_topic_past_a_long_stretch_of_tool_output(
+        monkeypatch, tmp_path, capsys):
+    isolate_global_config(monkeypatch, tmp_path)
+    import kindex.retrieve as retrieve
+    from kindex.cli import build_parser, cmd_compact_hook
+
+    transcript = tmp_path / "t.jsonl"
+    tool_output = json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": "x" * 60000}]}})
+    with transcript.open("w") as handle:
+        for _ in range(80):  # past both the live window and one scan window
+            handle.write(tool_output + "\n")
+        for n in range(3):
+            handle.write(assistant_line(turn(n)) + "\n")
+    topics: list[str] = []
+    monkeypatch.setattr(retrieve, "hybrid_search",
+                        lambda store, topic, top_k=5: topics.append(topic) or [])
+    monkeypatch.setattr(retrieve, "format_context_block",
+                        lambda store, results, query, level: "CONTEXT BLOCK")
+    calls: list = []
+    import kindex.extract as extract_module
+    monkeypatch.setattr(extract_module, "extract",
+                        lambda text, existing, config, ledger, timeout=None:
+                        calls.append(text) or {"concepts": [], "connections": []})
+
+    def run(event, *flags):
+        envelope = json.dumps({"hook_event_name": event, "session_id": "s1",
+                               "transcript_path": str(transcript)})
+        monkeypatch.setattr(sys, "stdin", io.StringIO(envelope))
+        cmd_compact_hook(build_parser().parse_args(
+            ["compact-hook", *flags, "--data-dir", str(tmp_path / "data")]))
+
+    run("PreCompact", "--emit-context")
+    assert "CONTEXT BLOCK" in capsys.readouterr().out
+    assert topics[-1].startswith("Turn 0")
+    # Stop consumes the turns; a later PreCompact reuses the kept topic.
+    run("Stop")
+    run("Stop")
+    assert calls and turn(2) in calls[-1]
+    run("PreCompact", "--emit-context")
+    assert "CONTEXT BLOCK" in capsys.readouterr().out
+    assert topics[-1].startswith("Turn 0")
