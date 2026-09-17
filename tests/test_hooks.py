@@ -472,6 +472,25 @@ class TestPrimeCollabs:
         assert "x" * 201 not in output
 
 
+def test_a_failing_collab_section_is_recorded(store, collab_config, monkeypatch):
+    from kindex import config as config_mod
+    from kindex import coordination as coord
+    from kindex.cli import _collab_prompt_lines
+    from kindex.hooks import prime_context
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("collab store unreadable")
+
+    recorded = []
+    monkeypatch.setattr(config_mod, "record_degraded",
+                        lambda cmd, error, **kw: recorded.append(cmd))
+    monkeypatch.setattr(coord, "active_collabs_for_agent", broken)
+    assert "Active collabs" not in prime_context(store, topic="x", config=collab_config)
+    assert recorded == ["prime-collabs"]
+    with pytest.raises(RuntimeError):
+        _collab_prompt_lines(store, collab_config, "conv-1")
+
+
 class TestPromptCheckCollabLines:
     """In-process tests of the _collab_prompt_lines helper."""
 
@@ -518,6 +537,26 @@ class TestPromptCheckCollabLines:
                ).isoformat(timespec="seconds")
         store.set_meta("collab.prompt_last_injected.conv-1", old)
         assert _collab_prompt_lines(store, collab_config, "conv-1")
+
+    def test_expired_cooldown_rows_are_dropped(self, store, collab_config):
+        from kindex.cli import _collab_prompt_lines
+
+        self._seed(store)
+        cooldown = collab_config.collab.prompt_cooldown_minutes
+        stale = (datetime.datetime.now()
+                 - datetime.timedelta(minutes=cooldown + 5)).isoformat(timespec="seconds")
+        fresh = datetime.datetime.now().isoformat(timespec="seconds")
+        for n in range(20):
+            store.set_meta(f"collab.prompt_last_injected.old-{n}", stale)
+        store.set_meta("collab.prompt_last_injected.busy", fresh)
+        store.set_meta("collab_prompt_last_injected_lookalike", stale)
+
+        assert _collab_prompt_lines(store, collab_config, "conv-1")
+        keys = {row[0] for row in store.conn.execute(
+            "SELECT key FROM meta WHERE key LIKE 'collab%'")}
+        assert keys == {"collab.prompt_last_injected.conv-1",
+                        "collab.prompt_last_injected.busy",
+                        "collab_prompt_last_injected_lookalike"}
 
     def test_zero_cooldown_never_suppresses(self, store, collab_config):
         from kindex.cli import _collab_prompt_lines

@@ -260,7 +260,7 @@ def prime_context(
                     target_id = str(entry.get("target_id") or "")
                     if not target_id or action.startswith("delete"):
                         continue
-                    target_node = store.get_node(target_id)
+                    target_node = store.peek_node(target_id)
                     if (target_node is None
                             or (target_node.get("status") or "active") != "active"
                             or node_expired(target_node)):
@@ -366,8 +366,9 @@ def prime_context(
                 if len(collabs) > 3:
                     lines.append(f"- +{len(collabs) - 3} more")
                 lines.append("")
-    except Exception:
-        pass  # Don't break priming
+    except Exception as error:
+        # Don't break priming, but leave a record of the skipped section.
+        _record_section_degraded("prime-collabs", error, config)
 
     # -- Due/upcoming reminders --
     try:

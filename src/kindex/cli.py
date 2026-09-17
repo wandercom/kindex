@@ -4425,6 +4425,9 @@ def cmd_coord(args):
     store = _store(args)
     action = getattr(args, "coord_action", "list")
     agent = getattr(args, "agent", "") or resolve_agent_id(cfg)
+    # The operator may end a conversation or clear a standing message that is
+    # not theirs; an agent acts only on conversations it belongs to.
+    force = bool(getattr(args, "force", False))
 
     if action == "start":
         from .coordination import create_conversation
@@ -4529,12 +4532,14 @@ def cmd_coord(args):
             if sub == "set":
                 text = " ".join(words[1:])
                 entry = set_inject_message(store, ref, text, agent,
-                                           to=getattr(args, "to", None))
+                                           to=getattr(args, "to", None),
+                                           authorize=not force)
                 print(f"Set inject message #{entry['id']}"
                       + (f" -> {entry['to']}" if entry.get("to") else ""))
             elif sub == "clear":
                 count = clear_inject_messages(
-                    store, ref, message_id=getattr(args, "id", None))
+                    store, ref, message_id=getattr(args, "id", None),
+                    actor=None if force else agent)
                 print(f"Cleared {count} inject message(s)")
             else:
                 msgs = list_inject_messages(store, ref)
@@ -4568,7 +4573,13 @@ def cmd_coord(args):
             print("Usage: kin coord end <name-or-id>", file=sys.stderr)
             store.close()
             return
-        result = end_conversation(store, ref, summary=getattr(args, "summary", "") or "")
+        try:
+            result = end_conversation(store, ref, summary=getattr(args, "summary", "") or "",
+                                      actor=None if force else agent)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            store.close()
+            sys.exit(1)
         if result:
             print(f"Ended coordination conversation: {ref}")
         else:
@@ -5003,7 +5014,7 @@ def _collab_unread_messages(store, collab: dict, agent: str) -> list[dict]:
     """New messages in a collab for an agent: id > their read cursor,
     targeted to them or broadcast. Does NOT advance the cursor (only an
     explicit coord_read marks messages as read)."""
-    node = store.get_node(collab.get("node_id", ""))
+    node = store.peek_node(collab.get("node_id", ""))
     if not node:
         return []
     extra = node.get("extra") or {}
@@ -5083,6 +5094,13 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
         lines.append(f"  +{len(collabs) - 3} more collabs")
 
     store.set_meta(key, now.isoformat(timespec="seconds"))
+    # One cooldown row per host session: a row older than the window no longer
+    # suppresses anything, so drop it rather than keep one per session forever.
+    cutoff = (now - datetime.timedelta(minutes=max(cooldown_min, 1))).isoformat(timespec="seconds")
+    store.conn.execute(
+        "DELETE FROM meta WHERE key LIKE 'collab.prompt\\_last\\_injected.%' ESCAPE '\\' "
+        "AND value < ? AND key != ?", (cutoff, key))
+    store.conn.commit()
     return lines
 
 
@@ -5274,8 +5292,10 @@ def cmd_prompt_check(args):
     collab_lines: list[str] = []
     try:
         collab_lines = _collab_prompt_lines(store, cfg, conversation_id)
-    except Exception:
+    except Exception as exc:
         collab_lines = []
+        from .config import record_degraded
+        record_degraded("prompt-check-collab", exc, config=cfg)
 
     due = []
     if cfg.reminders.enabled:
@@ -7784,6 +7804,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary", help="End summary retained after clearing messages")
     s.add_argument("--to", help="Target agent (post / inject set)")
     s.add_argument("--id", type=int, help="Inject message id (inject clear)")
+    s.add_argument("--force", action="store_true",
+                   help="Act as the operator: end, set or clear on a conversation you do not belong to")
     _common(s)
     s.set_defaults(func=cmd_coord)
 

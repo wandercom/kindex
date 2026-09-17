@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import datetime
 import re
+import sqlite3
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .store import Store
 
 _DEFAULT_TTL_MINUTES = 240
+
+#: The longest a conversation or a standing inject may live. Every post slides
+#: a conversation's expiry, so without a ceiling a poster could keep one (and
+#: its standing injects) in every member's context indefinitely.
+MAX_TTL_MINUTES = 7 * 24 * 60
 
 
 def _now_dt() -> datetime.datetime:
@@ -25,15 +31,23 @@ def _now() -> str:
     return _now_dt().isoformat(timespec="seconds")
 
 
+def _checked_ttl(ttl_minutes: int) -> int:
+    if isinstance(ttl_minutes, bool) or not isinstance(ttl_minutes, int):
+        raise ValueError("ttl_minutes must be a whole number of minutes")
+    if ttl_minutes > MAX_TTL_MINUTES:
+        raise ValueError(f"ttl_minutes cannot exceed {MAX_TTL_MINUTES} (7 days)")
+    return ttl_minutes
+
+
 def _expires_at(ttl_minutes: int | None) -> str:
-    ttl = _DEFAULT_TTL_MINUTES if ttl_minutes is None else ttl_minutes
+    ttl = _DEFAULT_TTL_MINUTES if ttl_minutes is None else min(ttl_minutes, MAX_TTL_MINUTES)
     return (_now_dt() + datetime.timedelta(minutes=ttl)).isoformat(timespec="seconds")
 
 
 def _ttl_from_extra(extra: dict) -> int:
     ttl = extra.get("ttl_minutes")
-    if isinstance(ttl, int):
-        return ttl
+    if isinstance(ttl, int) and not isinstance(ttl, bool):
+        return min(ttl, MAX_TTL_MINUTES)
 
     # Legacy conversations did not store ttl_minutes. Preserve the configured
     # lifetime when it can be inferred from the original timestamps.
@@ -42,7 +56,7 @@ def _ttl_from_extra(extra: dict) -> int:
         expires = datetime.datetime.fromisoformat(extra.get("expires_at", ""))
         inferred = int((expires - created).total_seconds() / 60)
         if inferred > 0:
-            return inferred
+            return min(inferred, MAX_TTL_MINUTES)
     except (TypeError, ValueError):
         pass
     return _DEFAULT_TTL_MINUTES
@@ -80,6 +94,29 @@ def _members_of(extra: dict) -> list[dict]:
     return [m for m in (extra.get("members") or []) if isinstance(m, dict)]
 
 
+def _participants(extra: dict) -> set[str]:
+    """The creator and every member: the agents a conversation belongs to."""
+    names = {str(m.get("agent") or "").strip() for m in _members_of(extra)}
+    names.add(str(extra.get("created_by") or "").strip())
+    names.discard("")
+    return names
+
+
+def _require_participant(extra: dict, actor: str, verb: str) -> None:
+    """Refuse an actor who is neither the creator nor a member. A conversation
+    that records no participants (created without an agent) has nobody to
+    check against, so anyone may act on it."""
+    participants = _participants(extra)
+    if participants and (actor or "").strip() not in participants:
+        raise ValueError(
+            f"Only the conversation's creator or members may {verb} it "
+            f"({actor or 'an unnamed agent'} is neither; join it first)")
+
+
+def _inject_live(entry: dict) -> bool:
+    return not _is_expired(entry.get("expires_at"))
+
+
 def create_conversation(
     store: Store,
     name: str,
@@ -93,6 +130,11 @@ def create_conversation(
     conv_name = _slug(name)
     if not conv_name:
         raise ValueError("Conversation name cannot be empty")
+    ttl_minutes = _checked_ttl(ttl_minutes)
+    # Starting a conversation is a write anyway, so it also archives expired
+    # ones; without it only the daemon did, and a machine without the cron job
+    # kept every expired room active.
+    cleanup_expired_conversations(store)
 
     extra = {
         "coord_kind": "conversation",
@@ -192,23 +234,47 @@ def list_conversations(
     task_id: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """List coordination conversations."""
-    node_status = "active" if status == "active" else None
-    rows = store.all_nodes(node_type="coordination", status=node_status, limit=500)
-    result = []
-    for row in rows:
-        extra = row.get("extra") or {}
-        if extra.get("coord_kind") != "conversation":
-            continue
-        if status != "all" and extra.get("coord_status") != status:
-            continue
-        if project_path and extra.get("project_path") != project_path:
-            continue
-        if task_id and extra.get("task_id") != task_id:
-            continue
-        result.append(row)
-    result.sort(key=lambda r: (r.get("updated_at") or ""), reverse=True)
-    return result[:limit]
+    """List coordination conversations, newest first.
+
+    Filtered in the database rather than from a window of rows, so a large
+    store cannot hide one. An expired conversation is not listed as active,
+    whether or not it has been archived yet.
+    """
+    rows = _conversation_rows(
+        store, status=status, project_path=project_path, task_id=task_id)
+    if status == "active":
+        rows = [row for row in rows if _is_live(row)]
+    return rows[:limit]
+
+
+def _conversation_rows(
+    store: Store,
+    *,
+    status: str = "active",
+    project_path: str | None = None,
+    task_id: str | None = None,
+    member: str | None = None,
+) -> list[dict]:
+    q = ("SELECT * FROM nodes WHERE type = 'coordination' AND json_valid(extra) "
+         "AND json_extract(extra, '$.coord_kind') = 'conversation'")
+    params: list = []
+    if status == "active":
+        q += " AND status = 'active'"
+    if status != "all":
+        q += " AND json_extract(extra, '$.coord_status') = ?"
+        params.append(status)
+    if project_path:
+        q += " AND json_extract(extra, '$.project_path') = ?"
+        params.append(project_path)
+    if task_id:
+        q += " AND json_extract(extra, '$.task_id') = ?"
+        params.append(task_id)
+    if member:
+        q += (" AND EXISTS (SELECT 1 FROM json_each(extra, '$.members') AS m "
+              "WHERE json_valid(m.value) AND json_extract(m.value, '$.agent') = ?)")
+        params.append(member)
+    q += " ORDER BY updated_at DESC, id"
+    return [store._row_to_dict(row) for row in store.conn.execute(q, params).fetchall()]
 
 
 def join_conversation(store: Store, conversation: str, agent: str) -> dict:
@@ -259,6 +325,8 @@ def post_message(
         raise ValueError("Message author is required")
     if not body.strip():
         raise ValueError("Message body is required")
+    if ttl_minutes is not None:
+        ttl_minutes = _checked_ttl(ttl_minutes)
     node = get_conversation(store, conversation)
     if not node:
         raise ValueError(f"Conversation not found: {conversation}")
@@ -409,11 +477,21 @@ def set_inject_message(
     text: str,
     set_by: str,
     to: str | None = None,
+    *,
+    ttl_minutes: int | None = None,
+    authorize: bool = False,
 ) -> dict:
-    """Set a standing inject message — surfaced into member sessions by hooks."""
+    """Set a standing inject message — surfaced into member sessions by hooks.
+
+    It expires after ``ttl_minutes`` (the conversation's TTL by default, at
+    most ``MAX_TTL_MINUTES``). With ``authorize``, ``set_by`` must be the
+    creator or a member.
+    """
     text = (text or "").strip()
     if not text:
         raise ValueError("Inject message text is required")
+    if ttl_minutes is not None:
+        ttl_minutes = _checked_ttl(ttl_minutes)
     node = get_conversation(store, conversation)
     if not node:
         raise ValueError(f"Conversation not found: {conversation}")
@@ -421,15 +499,23 @@ def set_inject_message(
     created: dict = {}
 
     def _mutate(extra: dict) -> None:
+        if extra.get("coord_status") != "active":
+            raise ValueError(f"Conversation is not active: {conversation}")
+        if authorize:
+            _require_participant(extra, set_by, "set standing messages on")
         msgs = [m for m in (extra.get("inject_messages") or [])
                 if isinstance(m, dict)]
+        ttl = ttl_minutes if ttl_minutes is not None else _ttl_from_extra(extra)
         entry = {
             "id": max((int(m.get("id", 0)) for m in msgs), default=0) + 1,
             "text": text,
             "to": (to or "").strip(),
             "set_by": (set_by or "").strip(),
             "created_at": _now(),
+            "expires_at": _expires_at(ttl),
         }
+        # Expired entries are dropped when the list is next written.
+        msgs = [m for m in msgs if _inject_live(m)]
         msgs.append(entry)
         extra["inject_messages"] = msgs
         created["entry"] = entry
@@ -439,9 +525,15 @@ def set_inject_message(
 
 
 def clear_inject_messages(
-    store: Store, conversation: str, message_id: int | None = None
+    store: Store, conversation: str, message_id: int | None = None,
+    *, actor: str | None = None,
 ) -> int:
-    """Clear one (by id) or all standing inject messages. Returns count cleared."""
+    """Clear one (by id) or all standing inject messages. Returns count cleared.
+
+    With ``actor``, only a participant may clear, and only the creator may
+    clear another agent's message: clearing "all" as anyone else clears that
+    agent's own messages. Without ``actor`` (the operator) nothing is checked.
+    """
     node = get_conversation(store, conversation)
     if not node:
         raise ValueError(f"Conversation not found: {conversation}")
@@ -451,10 +543,24 @@ def clear_inject_messages(
     def _mutate(extra: dict) -> None:
         msgs = [m for m in (extra.get("inject_messages") or [])
                 if isinstance(m, dict)]
-        if message_id is None:
-            kept: list[dict] = []
-        else:
+        mine = None
+        if actor is not None:
+            _require_participant(extra, actor, "clear standing messages on")
+            creator = str(extra.get("created_by") or "").strip()
+            if not creator or creator != actor.strip():
+                mine = actor.strip()
+        if message_id is not None:
+            target = [m for m in msgs if int(m.get("id", 0)) == int(message_id)]
+            if mine is not None and any(
+                    (m.get("set_by") or "").strip() != mine for m in target):
+                raise ValueError(
+                    f"Standing message #{message_id} was set by another agent; "
+                    "only it or the conversation's creator may clear it")
             kept = [m for m in msgs if int(m.get("id", 0)) != int(message_id)]
+        elif mine is not None:
+            kept = [m for m in msgs if (m.get("set_by") or "").strip() != mine]
+        else:
+            kept = []
         cleared["count"] = len(msgs) - len(kept)
         extra["inject_messages"] = kept
 
@@ -463,12 +569,13 @@ def clear_inject_messages(
 
 
 def list_inject_messages(store: Store, conversation: str) -> list:
-    """List standing inject messages for a conversation."""
+    """List a conversation's standing inject messages that have not expired."""
     node = get_conversation(store, conversation)
     if not node:
         raise ValueError(f"Conversation not found: {conversation}")
     extra = node.get("extra") or {}
-    return [m for m in (extra.get("inject_messages") or []) if isinstance(m, dict)]
+    return [m for m in (extra.get("inject_messages") or [])
+            if isinstance(m, dict) and _inject_live(m)]
 
 
 def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
@@ -487,14 +594,16 @@ def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
         return []
 
     collabs = []
-    rows = store.all_nodes(node_type="coordination", status="active", limit=500)
+    try:
+        rows = _conversation_rows(store, status="active", member=agent)
+    except sqlite3.Error as error:
+        # A members field that is not an array fails json_each for the whole
+        # query; fall back to reading every active conversation.
+        _record_collab_degraded(store, error)
+        rows = _conversation_rows(store, status="active")
     for row in rows:
         try:
             extra = row.get("extra") or {}
-            if extra.get("coord_kind") != "conversation":
-                continue
-            if extra.get("coord_status") != "active":
-                continue
             if _is_expired(extra.get("expires_at")):
                 continue
             members = _members_of(extra)
@@ -516,13 +625,15 @@ def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
 
             injects = [
                 m for m in (extra.get("inject_messages") or [])
-                if isinstance(m, dict)
+                if isinstance(m, dict) and _inject_live(m)
                 and (not (m.get("to") or "").strip() or m.get("to") == agent)
             ]
 
+            # Hook paths only display these nodes, so they are read without
+            # get_node's last_accessed write.
             locked_resources = []
             for rid in extra.get("resources") or []:
-                resource = store.get_node(rid)
+                resource = store.peek_node(rid)
                 if not resource:
                     continue
                 lock = active_lock(resource)
@@ -536,7 +647,7 @@ def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
             task_id = extra.get("task_id") or ""
             focus = ""
             if task_id:
-                task = store.get_node(task_id)
+                task = store.peek_node(task_id)
                 focus = task["title"] if task else task_id
 
             collabs.append({
@@ -549,31 +660,67 @@ def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
                 "locked_resources": locked_resources,
                 "members": [m.get("agent", "") for m in members],
             })
-        except Exception:
-            continue  # malformed conversation — never break the hook path
+        except Exception as error:
+            # A malformed conversation never breaks the hook path, but it is
+            # recorded rather than silently dropped.
+            _record_collab_degraded(store, error, row.get("id"))
+            continue
     collabs.sort(key=lambda c: c["name"])
     return collabs
 
 
-def end_conversation(store: Store, conversation: str, *, summary: str = "") -> dict | None:
-    """Archive a coordination conversation and clear transient message bodies."""
+def _record_collab_degraded(store: Store, error: Exception,
+                            conversation_id: str | None = None) -> None:
+    try:
+        from .config import record_degraded
+        where = f" in conversation {conversation_id}" if conversation_id else ""
+        record_degraded("collab", RuntimeError(
+            f"{type(error).__name__}{where}: {error}"), config=store.config)
+    except Exception:
+        pass
+
+
+def end_conversation(store: Store, conversation: str, *, summary: str = "",
+                     actor: str | None = None) -> dict | None:
+    """Archive a coordination conversation and clear transient message bodies.
+
+    Ending one that has already ended changes nothing (its retained
+    ``message_count`` stays). With ``actor``, only the creator or a member may
+    end a live conversation; an expired one may be ended by anyone. Without
+    ``actor`` (the operator, or expiry) nothing is checked.
+    """
     node = get_conversation(store, conversation)
     if not node:
         return None
-    extra = dict(node.get("extra") or {})
-    extra["coord_status"] = "ended"
-    extra["ended_at"] = _now()
-    extra["message_count"] = len(extra.get("messages") or [])
-    extra["messages"] = []
-    content = summary or node.get("content") or "Ended coordination conversation."
-    store.update_node(node["id"], status="archived", content=content, extra=extra)
-    return store.get_node(node["id"])
+    if (node.get("extra") or {}).get("coord_status") == "ended":
+        return node
+
+    ended: dict = {}
+
+    def _mutate(extra: dict) -> None:
+        if extra.get("coord_status") == "ended":
+            return
+        if actor is not None and _is_live({"extra": extra}):
+            _require_participant(extra, actor, "end")
+        extra["coord_status"] = "ended"
+        extra["ended_at"] = _now()
+        if actor:
+            extra["ended_by"] = actor.strip()
+        extra["message_count"] = len(extra.get("messages") or [])
+        extra["messages"] = []
+        ended["now"] = True
+
+    store.atomic_extra_update(node["id"], _mutate)
+    if ended:
+        content = summary or node.get("content") or "Ended coordination conversation."
+        store.update_node(node["id"], status="archived", content=content)
+    return store.peek_node(node["id"])
 
 
 def cleanup_expired_conversations(store: Store) -> int:
     """Archive expired coordination conversations and clear messages."""
     count = 0
-    for node in list_conversations(store, status="active", limit=500):
+    for node in _conversation_rows(store, status="active"):
         extra = node.get("extra") or {}
         if _is_expired(extra.get("expires_at")):
             end_conversation(store, node["id"], summary="Expired coordination conversation.")

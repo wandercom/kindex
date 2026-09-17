@@ -307,7 +307,12 @@ class TestMCPCoordLegacy:
         result = coord_list()
         assert "build-plan" in result
 
+        # The resolved agent (mcp-agent) did not start or join it.
         result = coord_end("build-plan", summary="done")
+        assert "Could not end coordination conversation" in result
+        assert "build-plan" in coord_list()
+
+        result = coord_end("build-plan", summary="done", agent="agent-a")
         assert "Ended coordination conversation" in result
         assert "build-plan" not in coord_list()
 
@@ -403,6 +408,11 @@ class TestMCPCoordCollab:
         assert "Cleared 1" in coord_inject("crew", action="clear", message_id=1)
         assert "Cleared 1" in coord_inject("crew", action="clear")
         assert "No inject messages" in coord_inject("crew", action="list")
+
+        # A non-member neither sets nor clears.
+        result = coord_inject("crew", action="set", text="hi", agent="outsider")
+        assert "Could not manage inject messages" in result
+        assert "creator or members" in result
 
     def test_inject_unknown_action(self, patch_store, agent_env):
         from kindex.mcp_server import coord_inject, coord_start

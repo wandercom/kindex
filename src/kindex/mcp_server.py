@@ -2573,18 +2573,21 @@ def coord_attach(name: str, node_id: str) -> str:
 
 @_tool()
 def coord_inject(name: str, action: str = "list", text: str = "",
-                 to: str = "", message_id: int = 0) -> str:
+                 to: str = "", message_id: int = 0, agent: str = "") -> str:
     """Manage standing inject messages on a coordination conversation.
 
     Inject messages are pushed into member agents' session context by the
-    prime/prompt hooks until cleared.
+    prime/prompt hooks until cleared or expired. Only the conversation's
+    creator or members may set or clear them, and only the creator may clear
+    another agent's message.
 
     Args:
         name: Conversation ID or name.
         action: set, clear, or list.
         text: Message text (for set).
         to: Optional target agent (for set); broadcast when empty.
-        message_id: Specific inject message id to clear (0 = clear all).
+        message_id: Specific inject message id to clear (0 = clear all you may).
+        agent: Acting agent name (default: resolved agent id).
     """
     store, _ = _get_store()
     from .coordination import (
@@ -2594,13 +2597,14 @@ def coord_inject(name: str, action: str = "list", text: str = "",
     )
     try:
         if action == "set":
-            entry = set_inject_message(store, name, text, _default_agent(),
-                                       to=to or None)
+            entry = set_inject_message(store, name, text, _default_agent(agent),
+                                       to=to or None, authorize=True)
             target = f" -> {entry['to']}" if entry.get("to") else ""
             return f"Set inject message #{entry['id']}{target} on {name}"
         if action == "clear":
             count = clear_inject_messages(
-                store, name, message_id=message_id or None)
+                store, name, message_id=message_id or None,
+                actor=_default_agent(agent))
             return f"Cleared {count} inject message(s) on {name}"
         if action == "list":
             msgs = list_inject_messages(store, name)
@@ -2636,16 +2640,23 @@ def coord_list(status: str = "active", task_id: str = "") -> str:
 
 
 @_tool()
-def coord_end(conversation: str, summary: str = "") -> str:
+def coord_end(conversation: str, summary: str = "", agent: str = "") -> str:
     """End a coordination conversation and clear transient messages.
+
+    Only the conversation's creator or members may end it while it is live.
 
     Args:
         conversation: Conversation ID or name.
         summary: Optional retained summary.
+        agent: Ending agent name (default: resolved agent id).
     """
     store, _ = _get_store()
     from .coordination import end_conversation
-    result = end_conversation(store, conversation, summary=summary)
+    try:
+        result = end_conversation(store, conversation, summary=summary,
+                                  actor=_default_agent(agent))
+    except ValueError as e:
+        return f"Could not end coordination conversation: {e}"
     if not result:
         return f"Conversation not found: {conversation}"
     return f"Ended coordination conversation: {conversation}"

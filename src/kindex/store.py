@@ -1924,6 +1924,17 @@ class Store:
         self.conn.commit()
         return self._row_to_dict(row)
 
+    def peek_node(self, node_id: str) -> dict | None:
+        """Fetch a node by ID without touching last_accessed.
+
+        For hook paths that only display a node: a read there is not use, and
+        get_node's write would commit on every SessionStart and prompt.
+        """
+        if not node_id:
+            return None
+        row = self.conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        return None if row is None else self._row_to_dict(row)
+
     def get_node_domains(self, node_id: str) -> list[str]:
         """Read a node's domains/tags without touching last_accessed (non-mutating).
 
