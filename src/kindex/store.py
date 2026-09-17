@@ -3676,14 +3676,16 @@ class Store:
                     row_prev, true_weight, valid = prev, float(row["weight"]), False
                     if snapshot is not None:
                         try:
-                            row_prev = datetime.fromisoformat(snapshot["ts"])
-                            # A row written since (reinforcement) starts again
-                            # from its stored weight.
                             if float(snapshot["w_stored"]) == float(row["weight"]):
+                                row_prev = datetime.fromisoformat(snapshot["ts"])
                                 true_weight = float(snapshot["w_true"])
                                 valid = True
                         except (ValueError, TypeError, KeyError):
-                            row_prev, true_weight = prev, float(row["weight"])
+                            pass
+                    # A row written since its snapshot (reinforcement) starts
+                    # again from its stored weight at the last run: every run
+                    # rewrites an invalid snapshot, so the write came after
+                    # `prev`, not at the snapshot's (possibly old) time.
                     days_since = (now - max(base, row_prev)).total_seconds() / 86400.0
                     if days_since <= 0:
                         continue

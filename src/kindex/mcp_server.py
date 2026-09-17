@@ -2317,7 +2317,8 @@ def task_execute(operation: str, arguments: dict, project_path: str,
     if include_global:
         return {"ok": False, "error": {"code": "invalid_scope", "message": "Modern task_execute is repo-local; use explicit legacy task tools for global tasks"}}
     store_errors = (ProfileMismatchError, UnsupportedSchemaVersionError,
-                    SchemaMigrationError, OSError, subprocess.CalledProcessError)
+                    SchemaMigrationError, OSError, sqlite3.Error,
+                    subprocess.CalledProcessError, subprocess.TimeoutExpired)
     # The repo-local lane never needs the legacy store; resolving the agent
     # through it made one unreadable home scope fail every task call.
     requested = {

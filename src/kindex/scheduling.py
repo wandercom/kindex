@@ -182,6 +182,13 @@ def repack_schedule(store: "Store", config: "Config") -> dict:
     return result
 
 
+def scheduler_writes_disabled() -> bool:
+    """``KIN_NO_SCHEDULER_WRITES`` set to 1, true or yes."""
+    import os
+
+    return os.environ.get("KIN_NO_SCHEDULER_WRITES", "").strip() in ("1", "true", "yes")
+
+
 def apply_schedule(interval: int, config: "Config") -> dict:
     """Apply a new cron interval to the system scheduler (launchd or crontab).
 
@@ -192,7 +199,7 @@ def apply_schedule(interval: int, config: "Config") -> dict:
     from .config import _bound_root
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
-    if os.environ.get("KIN_NO_SCHEDULER_WRITES", "").strip() in ("1", "true", "yes"):
+    if scheduler_writes_disabled():
         return {"action": "skipped", "reason": "scheduler writes disabled"}
     if platform.system() == "Darwin":
         return _apply_launchd(interval, config)

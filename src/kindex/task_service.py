@@ -42,7 +42,12 @@ def claim_holder(scope: dict) -> str:
     free to release or refresh each other's claims."""
     agent = _identifier(scope.get("agent"), "scope.agent")
     session = scope.get("session_id")
-    return f"{agent}:{session}" if isinstance(session, str) and session else agent
+    if not (isinstance(session, str) and session):
+        return agent
+    # The first unescaped colon ends the agent, so ("a:b", "c") and
+    # ("a", "b:c") are different holders.
+    escaped = agent.replace("%", "%25").replace(":", "%3A")
+    return f"{escaped}:{session}"
 
 
 def _json(value: Any) -> str:

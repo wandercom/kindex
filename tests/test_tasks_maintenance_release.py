@@ -219,3 +219,131 @@ def test_a_suppressed_decay_run_rewrites_no_accounting(store):
     store.delete_node("n0")
     store.apply_weight_decay()
     assert "_wtr.node.n0" not in keys()
+
+
+def test_claim_holders_cannot_collide_through_a_colon():
+    from kindex.task_service import claim_holder
+
+    assert claim_holder({"agent": "a:b", "session_id": "c"}) != \
+        claim_holder({"agent": "a", "session_id": "b:c"})
+    assert claim_holder({"agent": "claude", "session_id": "s-1"}) == "claude:s-1"
+
+
+def test_a_crashed_drain_leaves_its_jobs_for_the_next(tmp_path, monkeypatch):
+    from kindex import reinforce
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    cfg = _reinforce_config(tmp_path)
+    graph = Store(cfg)
+    try:
+        reinforce.enqueue_reinforce(graph, "conv-1", trace="a trace")
+
+        def crash(*args, **kwargs):
+            raise RuntimeError("process killed mid-grade")
+
+        monkeypatch.setattr(reinforce, "reinforce_session", crash)
+        with pytest.raises(RuntimeError):
+            reinforce.drain_reinforce_queue(graph, cfg)
+        queue = json.loads(graph.get_meta(reinforce.REINFORCE_QUEUE_META))
+        assert [job["conversation_id"] for job in queue] == ["conv-1"]
+        # Leased, so a concurrent drain leaves it alone ...
+        monkeypatch.setattr(reinforce, "reinforce_session",
+                            lambda *a, **k: {"status": "ok", "outcomes": []})
+        assert reinforce.drain_reinforce_queue(graph, cfg)["status"] == "empty"
+        # ... until the lease of the dead process runs out.
+        monkeypatch.setattr(reinforce, "REINFORCE_LEASE_SECONDS", 0)
+        result = reinforce.drain_reinforce_queue(graph, cfg)
+        assert result["graded"] == 1 and result["pending"] == 0
+    finally:
+        graph.close()
+
+
+def test_an_oversized_job_cannot_starve_the_queue(tmp_path, monkeypatch):
+    from kindex import reinforce
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    cfg = _reinforce_config(tmp_path)
+    graph = Store(cfg)
+    graded = []
+
+    def grade(store, config, conv, trace, client=None):
+        if conv == "huge":
+            return {"status": "estimate_exceeds_budget", "outcomes": []}
+        graded.append(conv)
+        return {"status": "ok", "outcomes": []}
+
+    monkeypatch.setattr(reinforce, "reinforce_session", grade)
+    try:
+        for conv in ("huge", "small-1", "small-2"):
+            reinforce.enqueue_reinforce(graph, conv, trace="a trace")
+        for _ in range(3):
+            reinforce.drain_reinforce_queue(graph, cfg, max_jobs=1)
+        # The retried job went behind the others, so both were graded.
+        assert graded == ["small-1", "small-2"]
+        for _ in range(2):
+            reinforce.drain_reinforce_queue(graph, cfg, max_jobs=1)
+        # The third oversized attempt sets it aside, visibly.
+        assert json.loads(graph.get_meta(reinforce.REINFORCE_QUEUE_META)) == []
+        letters = json.loads(graph.get_meta(reinforce.REINFORCE_DEAD_LETTER_META))
+        assert [(entry["conversation_id"], entry["attempts"]) for entry in letters] == [("huge", 3)]
+    finally:
+        graph.close()
+
+
+def test_maintenance_picks_the_populated_repo_local_layout(tmp_path, store):
+    from kindex.project_store import existing_local_store
+
+    repo = _git_repo(tmp_path / "service")
+    legacy = repo / ".kin" / "local"
+    legacy.mkdir(parents=True)
+    populated = Store(Config(data_dir=str(legacy)))
+    populated.add_node("Deploy rule", "body", node_id="rule")
+    populated.close()
+    empty = legacy / "kindex"
+    empty.mkdir()
+    Store(Config(data_dir=str(empty))).conn
+    assert existing_local_store(repo) == legacy.resolve()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", " yes "])
+def test_every_spelling_of_no_scheduler_writes_keeps_the_registry(tmp_path, monkeypatch, value):
+    from kindex.project_store import project_graph_registry_path, register_project_graph
+
+    monkeypatch.setenv("KIN_NO_SCHEDULER_WRITES", value)
+    register_project_graph(tmp_path / "repo", tmp_path / "repo" / ".kin" / "local" / "kindex")
+    assert not project_graph_registry_path().exists()
+
+
+def test_a_row_written_after_suppressed_days_decays_from_the_last_run(store):
+    from datetime import datetime, timedelta
+
+    store.add_node("note", "body", node_id="n", weight=0.5)
+    old = (datetime.now() - timedelta(days=30)).isoformat()
+    store.conn.execute("UPDATE nodes SET last_accessed = ?", (old,))
+    store.conn.commit()
+    store.apply_weight_decay()  # cold start
+    # A snapshot twenty days old, and a run a day ago.
+    snap_ts = (datetime.now() - timedelta(days=20)).isoformat()
+    store.set_meta("_wtr.node.n", json.dumps({"ts": snap_ts, "w_true": 0.5, "w_stored": 0.5}))
+    store.set_meta("decay.last_run", (datetime.now() - timedelta(days=1)).isoformat())
+    # Reinforcement wrote the row after that run.
+    store.conn.execute("UPDATE nodes SET weight = 0.8 WHERE id = 'n'")
+    store.conn.commit()
+    store.apply_weight_decay()
+    weight = store.get_node("n")["weight"]
+    assert weight == pytest.approx(0.8 * 0.5 ** (1 / 90), abs=2e-4), weight
+
+
+def test_task_execute_answers_a_database_failure_in_its_own_shape(tmp_path, monkeypatch):
+    import sqlite3
+
+    from kindex import integrations, mcp_server
+
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(integrations, "execute_task", broken)
+    result = mcp_server.task_execute("list", {}, str(_git_repo(tmp_path / "repo")),
+                                     "session-1", agent="claude")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "store_unavailable"

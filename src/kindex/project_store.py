@@ -1,9 +1,11 @@
 """Resolve the two historical repo-local layouts without moving graph data."""
+import json
 import os
 from pathlib import Path
 import shlex
 import sqlite3
 import subprocess
+import tempfile
 
 
 class ProjectStoreConflict(ValueError):
@@ -168,50 +170,64 @@ def project_graph_registry_path() -> Path:
 
 
 def existing_local_store(root: Path) -> Path | None:
-    """The repo-local graph directory under ``root`` that holds a database."""
+    """The repo-local graph directory under ``root``, chosen as the store
+    itself chooses it (the populated layout wins over an empty database), or
+    None when there is no database or the layouts conflict."""
     local = root / ".kin" / "local"
-    for directory in (local / "kindex", local):
-        if any((directory / name).is_file() for name in ("kindex.db", "conv.db")):
-            return directory
-    return None
+    if not any((directory / name).is_file()
+               for directory in (local, local / "kindex")
+               for name in ("kindex.db", "conv.db")):
+        return None
+    try:
+        return project_data_path(root)
+    except ValueError:  # a conflict or a refused layout is not maintained blind
+        return None
 
 
 def register_project_graph(root: Path, data_dir: Path) -> None:
     """Record a repo-local graph so scheduled maintenance can find it.
     Best effort: an unwritable state directory never blocks the store."""
-    import fcntl
-    import json
-    import tempfile
+    from .budget import _lock_file, _unlock_file
+    from .scheduling import scheduler_writes_disabled
 
     # Whoever keeps kindex away from the machine's scheduler (a test run)
     # keeps it away from the scheduler's registry too.
-    if os.environ.get("KIN_NO_SCHEDULER_WRITES") == "1":
+    if scheduler_writes_disabled():
         return
     path = project_graph_registry_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path.with_name(path.name + ".lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        # The budget ledger's portable lock: flock, or msvcrt on Windows.
+        fd = os.open(str(path.with_name(path.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            _lock_file(fd)
             try:
-                current = json.loads(path.read_text()) if path.exists() else {}
-            except (OSError, ValueError):
-                current = {}
-            if not isinstance(current, dict):
-                current = {}
-            if current.get(str(root)) == str(data_dir):
-                return
-            current[str(root)] = str(data_dir)
-            with tempfile.NamedTemporaryFile(
-                    "w", dir=path.parent, delete=False, prefix=".project-graphs.") as out:
-                json.dump(current, out, sort_keys=True)
-            os.replace(out.name, path)
+                _merge_project_graph(path, root, data_dir)
+            finally:
+                _unlock_file(fd)
+        finally:
+            os.close(fd)
     except OSError:
         return
 
 
-def registered_project_graphs() -> dict[str, str]:
-    import json
+def _merge_project_graph(path: Path, root: Path, data_dir: Path) -> None:
+    try:
+        current = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    if current.get(str(root)) == str(data_dir):
+        return
+    current[str(root)] = str(data_dir)
+    with tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, delete=False, prefix=".project-graphs.") as out:
+        json.dump(current, out, sort_keys=True)
+    os.replace(out.name, path)
 
+
+def registered_project_graphs() -> dict[str, str]:
     try:
         current = json.loads(project_graph_registry_path().read_text())
     except (OSError, ValueError):

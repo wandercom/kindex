@@ -61,6 +61,13 @@ REINFORCE_QUEUE_META = "reinforce.queue"
 # from a process that died holds the conversation
 REINFORCE_INFLIGHT_PREFIX = "reinforce.inflight."
 REINFORCE_INFLIGHT_SECONDS = 1800
+# A drain leases its jobs in the queue; a lease older than this belongs to a
+# process that died, and the job is claimable again.
+REINFORCE_LEASE_SECONDS = 3600
+# A job whose trace never fits the per-call estimate is set aside after this
+# many drains, under REINFORCE_DEAD_LETTER_META, instead of retrying forever.
+REINFORCE_MAX_ATTEMPTS = 3
+REINFORCE_DEAD_LETTER_META = "reinforce.dead_letter"
 
 
 def _read_queue(conn) -> list[dict]:
@@ -164,23 +171,40 @@ def drain_reinforce_queue(store: "Store", config: Config, *, max_jobs: int = 5,
     """
     if not config.attention.reinforce_enabled:
         return {"status": "disabled", "graded": 0, "pending": 0}
+    import time
+    import uuid
+
     from .tasks import transaction
 
-    # Claim this drain's jobs out of the queue up front, in one write
-    # transaction. The queue used to be read, graded for minutes, then
-    # overwritten, dropping every session a Stop hook enqueued meanwhile.
+    # Lease this drain's jobs in the queue, in one write transaction. The
+    # queue used to be read, graded for minutes, then overwritten, dropping
+    # every session a Stop hook enqueued meanwhile; and a job taken out of
+    # the queue before grading was lost if the process died.
+    lease = uuid.uuid4().hex
     try:
         with transaction(store) as conn:
             queue = _read_queue(conn)
-            claimed, rest = queue[:max_jobs], queue[max_jobs:]
+            now = time.time()
+            claimed: list[dict] = []
+            for job in queue:
+                if len(claimed) >= max_jobs:
+                    break
+                try:
+                    held = now - float(job.get("leased_at") or 0) < REINFORCE_LEASE_SECONDS
+                except (TypeError, ValueError):
+                    held = False
+                if job.get("lease") and held:
+                    continue
+                job["lease"], job["leased_at"] = lease, now
+                claimed.append(dict(job))
             if claimed:
-                _write_queue(conn, rest)
+                _write_queue(conn, queue)
     except Exception:
         return {"status": "unavailable", "graded": 0, "pending": 0}
     if not claimed:
         return {"status": "empty", "graded": 0, "pending": 0}
 
-    retry: list[dict] = []
+    retry: dict[str, str] = {}
     graded = 0
     results: list[dict] = []
     for job in claimed:
@@ -192,23 +216,63 @@ def drain_reinforce_queue(store: "Store", config: Config, *, max_jobs: int = 5,
         res = reinforce_session(store, config, conv, trace, client=client)
         status = res.get("status")
         if status in ("over_global_budget", "llm_unavailable", "estimate_exceeds_budget"):
-            retry.append(job)  # transient — retry next cron
+            retry[conv] = status  # retry on a later cron
             continue
         if status == "ok":
             graded += 1
         results.append({"conversation_id": conv, "status": status})
 
+    # Settle only the entries this drain leased: a conversation enqueued
+    # again meanwhile replaced its entry and stays for a later drain.
     try:
         with transaction(store) as conn:
             queue = _read_queue(conn)
-            queued = {job.get("conversation_id") for job in queue}
-            # A retried job goes back ahead of what arrived meanwhile, unless
-            # its conversation was enqueued again (the newer entry wins).
-            queue = [job for job in retry if job.get("conversation_id") not in queued] + queue
+            kept: list[dict] = []
+            retried: list[dict] = []
+            dead: list[dict] = []
+            for job in queue:
+                if job.get("lease") != lease:
+                    kept.append(job)
+                    continue
+                status = retry.get(job.get("conversation_id"))
+                if status is None:
+                    continue  # graded or dropped
+                job.pop("lease", None)
+                job.pop("leased_at", None)
+                if status == "estimate_exceeds_budget":
+                    job["attempts"] = int(job.get("attempts") or 0) + 1
+                    if job["attempts"] >= REINFORCE_MAX_ATTEMPTS:
+                        dead.append(job)
+                        continue
+                # Behind everything else, so a job that keeps failing
+                # cannot hold the head of the queue.
+                retried.append(job)
+            queue = kept + retried
             _write_queue(conn, queue)
+            if dead:
+                row = conn.execute("SELECT value FROM meta WHERE key = ?",
+                                   (REINFORCE_DEAD_LETTER_META,)).fetchone()
+                try:
+                    letters = json.loads(row[0]) if row and row[0] else []
+                except (TypeError, ValueError):
+                    letters = []
+                letters = (letters if isinstance(letters, list) else []) + [
+                    {"conversation_id": job.get("conversation_id"),
+                     "reason": "estimate_exceeds_budget", "attempts": job["attempts"],
+                     "at": _now()}
+                    for job in dead
+                ]
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                             (REINFORCE_DEAD_LETTER_META, json.dumps(letters[-50:])))
             pending = len(queue)
     except Exception:
+        dead = []
         pending = len(retry)
+    for job in dead:
+        log.warning("reinforce: set aside %s after %d oversized attempts",
+                    job.get("conversation_id"), job["attempts"])
+        results.append({"conversation_id": job.get("conversation_id"),
+                        "status": "dead_lettered"})
     return {"status": "ok", "graded": graded, "pending": pending, "results": results}
 
 
