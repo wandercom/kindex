@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-17
+
 ### Changed
 - A task claim is held by a host session (`<agent>:<session_id>` on the
   modern lane, with `%` and `:` escaped in the agent): completing,
