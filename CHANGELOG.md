@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-09-17
+
 ### Fixed
 - The Stop/PreCompact capture hook extracts only transcript text it has not
   extracted before. It read the transcript from the top on every turn, paying
