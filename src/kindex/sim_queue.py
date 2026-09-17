@@ -151,12 +151,21 @@ def flush_receipts(store) -> None:
         receipt = ReviewReceipt.model_validate_json(row["value"])
         if not receipt.health_pending:
             continue
-        for discarded in receipt.discarded:
-            record_health(discarded.scope, "review", state="discarded", reason="superseded",
-                          source="worker", review_id=discarded.review_id,
-                          event_id=discarded.review_id + ":discarded:superseded")
-        record_health(receipt.scope, "review", state=receipt.health_state, reason=receipt.health_reason,
-                      source="worker", review_id=receipt.review_id,
-                      event_id=str(receipt.review_id or receipt.attempt_id) + ":result")
+        outcomes = [
+            record_health(
+                discarded.scope, "review", state="discarded", reason="superseded",
+                source="worker", review_id=discarded.review_id,
+                event_id=discarded.review_id + ":discarded:superseded")
+            for discarded in receipt.discarded
+        ]
+        outcomes.append(record_health(
+            receipt.scope, "review", state=receipt.health_state, reason=receipt.health_reason,
+            source="worker", review_id=receipt.review_id,
+            event_id=str(receipt.review_id or receipt.attempt_id) + ":result"))
+        settled = all(outcome is not False for outcome in outcomes)
+        # A receipt whose health record did not land stays pending; the
+        # event ids make a later replay idempotent.
+        if not settled:
+            continue
         receipt.health_pending = False
         store.set_meta(row["key"], receipt.model_dump_json())

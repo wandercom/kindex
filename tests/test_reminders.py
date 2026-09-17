@@ -1010,4 +1010,8 @@ class TestPromptCheckCLI:
         result = _run_cli("prompt-check", tmp_path=tmp_path)
         assert result.returncode == 0
         assert "Action reminder" in result.stdout
-        assert "echo hello" in result.stdout
+        # Summarised as the prime does: mode, sizes, digest and a preview of
+        # what an agent would act on (the instructions), never a call to run it.
+        assert "Action (claude, instructions" in result.stdout
+        assert "Run the echo command" in result.stdout
+        assert "kin remind exec" not in result.stdout

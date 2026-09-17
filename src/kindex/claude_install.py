@@ -36,7 +36,7 @@ PLUGIN_NAME = "kindex-modern"
 def legacy_manifest(config, kin_path: str) -> dict:
     """One command manifest for installs and generated plugin distribution.
 
-    Claude timeouts are seconds, unlike Codex's millisecond hook timeouts.
+    Claude timeouts are seconds, as Codex hook timeouts are.
     """
     from .setup import _kin_hook_command, _kin_stop_hook_command
     def command(args, seconds, stop=False):

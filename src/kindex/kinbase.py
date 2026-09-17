@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -157,7 +158,8 @@ def _identity(repo, identity):
     return "kinbase-" + hashlib.sha256((repo + "\x00" + identity).encode()).hexdigest()
 
 
-def _reduced(root, binary, documents):
+def _reduced(root, binary, documents, budget_s=None):
+    deadline = None if budget_s is None else time.monotonic() + budget_s
     by_event = {}
     by_unknown = {}
     for digest, doc in documents:
@@ -169,6 +171,10 @@ def _reduced(root, binary, documents):
             by_unknown.setdefault((fact_id, doc["logical_key"]), []).append((digest, doc))
     rows = []
     for key in sorted({doc["logical_key"] for _, doc in documents}):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Kinbase explain budget exhausted; sync not applied. "
+                "Run `kin kinbase sync` from a shell for a full reduced sync.")
         try:
             result = subprocess.run(
                 [binary, "explain", key, "--repo", str(root), "--decision",
@@ -258,7 +264,8 @@ def _node(repo, identity, doc, mode, receipt):
                    "prov_source": "kinbase:" + repo, "extra": {"kinbase": metadata}})
 
 
-def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase") -> dict:
+def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase",
+                 explain_budget_s: float | None = None) -> dict:
     """Refresh source-scoped evidence atomically; never write signed source files.
 
     Reduced coverage is all keys in the verified local event inventory, not the
@@ -273,7 +280,7 @@ def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase") -> d
     if mode == "reduced" and not executable:
         raise RuntimeError("Kinbase binary unavailable; use --mode raw or install Kinbase")
     documents, quarantine = _read_events(root)
-    inputs = (_reduced(root, executable, documents) if mode == "reduced"
+    inputs = (_reduced(root, executable, documents, explain_budget_s) if mode == "reduced"
               else [(digest, doc, None) for digest, doc in documents])
     rows = [_node(str(root), identity, doc, mode, receipt) for identity, doc, receipt in inputs]
     desired = {row["id"]: row for row in rows}
@@ -287,7 +294,8 @@ def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase") -> d
     conn.execute("BEGIN IMMEDIATE")
     try:
         previous = {row["id"]: store._row_to_dict(row) for row in conn.execute(
-            "SELECT * FROM nodes WHERE json_extract(extra, '$.kinbase.repo') = ?", (str(root),))}
+            "SELECT * FROM nodes WHERE json_valid(extra) "
+            "AND json_extract(extra, '$.kinbase.repo') = ?", (str(root),))}
         for node_id, old in previous.items():
             if node_id not in desired and old["status"] != "archived":
                 metadata = old["extra"]["kinbase"]
@@ -351,7 +359,7 @@ def attach_unknowns(store, node):
     node["kinbase_unknowns"] = []
     rows = store.conn.execute(
         "SELECT * FROM nodes WHERE type='question' AND status='active' "
-        "AND json_extract(extra,'$.kinbase.repo')=? "
+        "AND json_valid(extra) AND json_extract(extra,'$.kinbase.repo')=? "
         "AND json_extract(extra,'$.kinbase.logical_key')=? AND id != ? ORDER BY id",
         (metadata["repo"], metadata["logical_key"], node["id"]))
     for row in rows:

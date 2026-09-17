@@ -535,3 +535,34 @@ def test_shared_roundtrip_preserves_source_identity_without_leaking_paths(store,
         assert question["question"] not in b_context
     finally:
         restored.close()
+
+
+def test_mcp_sync_runs_only_the_path_binary_and_answers_refusals(store, repo, monkeypatch):
+    import inspect
+
+    mcp = importlib.import_module("kindex.mcp_server")
+    assert "binary" not in inspect.signature(mcp.kinbase_sync).parameters
+    monkeypatch.setattr(mcp, "_get_store", lambda: (store, store.config))
+    refused = json.loads(mcp.kinbase_sync(str(repo), mode="sideways"))
+    assert refused["ok"] is False
+    assert refused["error"]["code"] == "kinbase_sync_refused"
+
+
+def test_reduced_sync_stops_at_its_explain_budget(store, repo, monkeypatch):
+    from kindex import kinbase as kb
+
+    doc = fact()
+    write_doc(repo, sign(doc))
+    monkeypatch.setattr(kb.shutil, "which", lambda name: "/usr/bin/true")
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        kb.sync_kinbase(store, repo, mode="reduced", explain_budget_s=0)
+
+
+def test_a_malformed_extra_row_does_not_break_sync(store, repo):
+    from kindex import kinbase as kb
+
+    store.conn.execute("INSERT INTO nodes (id, title, type, extra) VALUES ('bad', 'bad', 'concept', 'not json')")
+    store.conn.commit()
+    doc = fact()
+    write_doc(repo, sign(doc))
+    assert kb.sync_kinbase(store, repo, mode="raw")["imported"] == 1

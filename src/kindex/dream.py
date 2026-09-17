@@ -50,6 +50,8 @@ DEFAULT_SUGGEST_THRESHOLD = 0.85
 DEFAULT_MAX_NEW_SUGGESTIONS = 100
 DEFAULT_MAX_DOMAIN_LINK_SUGGESTIONS = 50
 DOMAIN_SUGGESTION_SOURCE = "dream-cycle-domain"
+# Fuzzy near-miss pairs staged by dedup: weaker links kept for review.
+DEDUP_SUGGESTION_SOURCE = "dream-cycle"
 
 # Runaway-merge guards.
 #
@@ -254,6 +256,45 @@ def find_duplicates(
     return {"merge": merge_pairs, "suggest": suggest_pairs}
 
 
+def merge_refusal(source: dict, target: dict) -> str | None:
+    """Why merging `source` into `target` would be refused, or None."""
+    source_content = source.get("content", "") or ""
+    target_content = target.get("content", "") or ""
+    absorptions = target_content.count(MERGE_MARKER)
+    would_be = len(target_content) + len(source_content)
+    if absorptions >= MAX_MERGE_ABSORPTIONS:
+        return (f"target has already absorbed {absorptions} merges "
+                f"(cap {MAX_MERGE_ABSORPTIONS})")
+    if would_be > MAX_MERGE_RESULT_CHARS:
+        return (f"merged content would be {would_be} chars "
+                f"(cap {MAX_MERGE_RESULT_CHARS})")
+    return None
+
+
+_REFUSED_PAIRS_META = "dream.refused_merge_pairs"
+
+
+def _note_refused_pair(store: Store, source_id: str, target_id: str, refusal: str) -> None:
+    """Count a refused pair once. The same pair is found on every cycle; it
+    inflated the doctor counter each time."""
+    import json
+
+    key = f"{source_id}->{target_id}"
+    try:
+        seen = json.loads(store.get_meta(_REFUSED_PAIRS_META) or "[]")
+    except (TypeError, ValueError):
+        seen = []
+    if key in seen:
+        return
+    seen = (seen + [key])[-500:]
+    try:
+        store.set_meta(_REFUSED_PAIRS_META, json.dumps(seen))
+        store.bump_meta_counter(MERGE_REFUSAL_COUNTER)
+    except Exception:
+        pass
+    logger.warning("dream merge refused: %s -> %s: %s", source_id, target_id, refusal)
+
+
 def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
     """Merge source into target: move edges, merge content, archive source.
 
@@ -261,7 +302,7 @@ def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
     """
     source = store.get_node(source_id)
     target = store.get_node(target_id)
-    if not source or not target:
+    if not source or not target or source["id"] == target["id"]:
         return False
     # Defense in depth: never merge protected types even if a caller bypasses
     # find_duplicates' filter — subsystem-owned/history-bearing nodes survive.
@@ -274,15 +315,7 @@ def merge_nodes(store: Store, source_id: str, target_id: str) -> bool:
     # path goes through, so the caps hold no matter which caller asked.
     source_content = source.get("content", "") or ""
     target_content = target.get("content", "") or ""
-    absorptions = target_content.count(MERGE_MARKER)
-    would_be = len(target_content) + len(source_content)
-    refusal = None
-    if absorptions >= MAX_MERGE_ABSORPTIONS:
-        refusal = (f"target has already absorbed {absorptions} merges "
-                   f"(cap {MAX_MERGE_ABSORPTIONS})")
-    elif would_be > MAX_MERGE_RESULT_CHARS:
-        refusal = (f"merged content would be {would_be} chars "
-                   f"(cap {MAX_MERGE_RESULT_CHARS})")
+    refusal = merge_refusal(source, target)
     if refusal:
         try:
             store.bump_meta_counter(MERGE_REFUSAL_COUNTER)
@@ -344,10 +377,12 @@ def auto_apply_suggestions(store: Store) -> int:
     applied = 0
 
     for s in suggestions:
-        # Domain co-membership is a weak, derived signal. Full Dream stages
-        # those pairs for review; a later lightweight run must not turn them
-        # back into automatic edges.
-        if s.get("source") == DOMAIN_SUGGESTION_SOURCE:
+        # Domain co-membership is a weak, derived signal, and a dedup
+        # near-miss is a pair that fell short of merging. Dream stages both
+        # for review; auto-apply must not turn them into edges (every
+        # near-miss cleared the 0.7 title bar, so all were applied in the run
+        # that staged them).
+        if s.get("source") in (DOMAIN_SUGGESTION_SOURCE, DEDUP_SUGGESTION_SOURCE):
             continue
         concept_a = s.get("concept_a", "")
         concept_b = s.get("concept_b", "")
@@ -535,7 +570,20 @@ def dream_lightweight(
     # unprotected.
     merged = 0
     merges_skipped_unprotected = 0
-    merge_pairs = dupes["merge"]
+    # A pair the guards would refuse is set aside before the snapshot: a
+    # whole-database copy and integrity check only to learn that no merge
+    # could happen ran on every cycle.
+    merge_pairs = []
+    merges_refused = 0
+    for source_id, target_id, score in dupes["merge"]:
+        source, target = store.get_node(source_id), store.get_node(target_id)
+        refusal = merge_refusal(source, target) if source and target else None
+        if refusal and not dry_run:
+            _note_refused_pair(store, source_id, target_id, refusal)
+            merges_refused += 1
+            continue
+        merge_pairs.append((source_id, target_id, score))
+    results["merges_refused"] = merges_refused
     snapshot_ok = True
     if merge_pairs and not dry_run:
         try:
@@ -590,7 +638,7 @@ def dream_lightweight(
         store.add_suggestion(
             concept_a=a_id, concept_b=b_id,
             reason=f"Fuzzy match (score={score:.3f})",
-            source="dream-cycle",
+            source=DEDUP_SUGGESTION_SOURCE,
             identity_kind="node_id",
         )
         suggested += 1

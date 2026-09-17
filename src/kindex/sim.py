@@ -74,6 +74,8 @@ if TYPE_CHECKING:
 
 SIM_PURPOSE = "sim"
 SIM_QUEUE_META = "sim.queue"          # pending reviews awaiting a drain (LLM spend)
+# The most output one Sim or Advocate command may hand back per stream.
+COMMAND_OUTPUT_LIMIT = 1024 * 1024
 SIM_PENDING_META = "sim.pending"      # graded injections awaiting a cheap pickup
 
 _TAIL_CHARS = 700  # the recent slice Sim is most likely reacting to (used for staleness)
@@ -578,19 +580,20 @@ def call_sim(
         try:
             import os
 
-            proc = subprocess.run(
-                os.path.expanduser(sc.command),
-                shell=True,
-                input=redact_text(prompt),
-                capture_output=True,
-                text=True,
-                timeout=sc.command_timeout,
+            from .actions import _run_process
+
+            code, stdout, stderr = _run_process(
+                os.path.expanduser(sc.command), shell=True,
+                input_text=redact_text(prompt), timeout=sc.command_timeout,
+                max_bytes=COMMAND_OUTPUT_LIMIT,
             )
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except OSError as exc:
             return None, {"status": "sim_command_error", "error": safe_error(exc)}
-        if proc.returncode != 0:
-            return None, {"status": "sim_command_failed", "error": redact_text(proc.stderr)[:200]}
-        parsed = _parse_sim(redact_text(proc.stdout))
+        if code is None:
+            return None, {"status": "sim_command_error", "error": "timed out"}
+        if code != 0:
+            return None, {"status": "sim_command_failed", "error": redact_text(stderr)[:200]}
+        parsed = _parse_sim(redact_text(stdout))
         result = _result_from_parsed(parsed)
         return result, {"status": "ok" if result is not None else "invalid_output", "via": "command"}
 
@@ -725,8 +728,20 @@ def enqueue_sim_review(
         store.set_meta(SIM_QUEUE_META, json.dumps(retained))
         retained_ids = {(j.get("conversation_id"), j.get("review_id")) for j in retained}
         for previous in previous_queue:
-            if (previous.get("conversation_id"), previous.get("review_id")) not in retained_ids:
+            if (previous.get("conversation_id"), previous.get("review_id")) in retained_ids:
+                continue
+            evicted = previous.get("conversation_id")
+            if evicted == conversation_id:
                 _record_advisory_discard(previous, reason="superseded", source="hook")
+                continue
+            # Another conversation pushed out by max_queue: its state no longer
+            # says queued, and its admission key is released so the same
+            # window can queue again.
+            _record_advisory_discard(previous, reason="evicted", source="hook")
+            if isinstance(evicted, str) and evicted:
+                store.conn.execute("DELETE FROM meta WHERE key = ?", ("sim.admission." + evicted,))
+                store.conn.commit()
+                write_state(store, evicted, "skipped", reason="evicted")
         write_state(store, conversation_id, "queued", reason="cadence", review_tick=tick)
         from .supervisor import record_health
         record_health(scope, "review", state="queued", source="hook", event_id=subject + ":queued", review_id=subject)
@@ -767,7 +782,7 @@ def drain_sim_queue(
 
 def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
     from dataclasses import asdict
-    from .supervisor import restore_config, write_state
+    from .supervisor import read_state, restore_config, write_state
     from .sim_queue import (CLAIM_META, SavedSim, acknowledge, claim_next,
                             flush_receipts, save_claim)
     flush_receipts(store)
@@ -860,7 +875,9 @@ def _drain_claimed(store, config, *, client=None, ledger=None, max_jobs=5):
                     _mark_advocate_run(store, conv, int(job.get("tick", 0)))
                     if survivors:
                         item["advocate"] = survivors
-                    else:
+                    elif read_state(store, conv).get("advocate_state") == "failed":
+                        # A clean run whose verification kept nothing is
+                        # not a failure; only a failed command is.
                         _bump_counter(store, "escalation_failures")
             claim.pending = item
             claim.phase = "ready"
@@ -1194,21 +1211,25 @@ def maybe_escalate_to_advocate(
     try:
         import os
 
-        proc = subprocess.run(
-            os.path.expanduser(ac.command),
-            shell=True, input=redact_text(prompt), capture_output=True, text=True,
-            timeout=ac.timeout,
+        from .actions import _run_process
+
+        code, stdout, _stderr = _run_process(
+            os.path.expanduser(ac.command), shell=True,
+            input_text=redact_text(prompt), timeout=ac.timeout,
+            max_bytes=COMMAND_OUTPUT_LIMIT,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except OSError:
+        code, stdout = None, ""
+    if code is None:
         write_state(store, conversation_id, None, advocate_state="failed", advocate_reason="command_error")
         return True, []  # A timed-out subprocess may already have spent: consume cooldown.
     # From here Advocate executed and spent on its persona calls: ran=True even if
     # the exit code is non-zero (partial persona failure still writes findings) or
     # verification later drops everything.
-    if proc.returncode:
+    if code:
         write_state(store, conversation_id, None, advocate_state="failed", advocate_reason="command_failed")
         return True, []
-    findings = _parse_advocate_findings(redact_text(proc.stdout))
+    findings = _parse_advocate_findings(redact_text(stdout))
     if not findings:
         write_state(store, conversation_id, None, advocate_state="reviewed_quiet", advocate_reason="no_findings")
         return True, []

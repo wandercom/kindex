@@ -1453,12 +1453,27 @@ class Store:
 
     # ── Temporal queries ───────────────────────────────────────────────
 
+    @staticmethod
+    def _activity_bound(since_iso: str) -> str:
+        """A caller's ISO time in the log's own form (SQLite `datetime('now')`,
+        UTC, space-separated). A local `T`-separated bound compared as text
+        against it dropped every entry of the boundary day and was off by the
+        UTC offset; a naive time is local."""
+        try:
+            parsed = datetime.fromisoformat(since_iso.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return since_iso
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
     def activity_counts_since(self, since_iso: str) -> dict[str, int]:
         """Activity entries since a timestamp, counted per action."""
         try:
             return {row[0]: row[1] for row in self.conn.execute(
                 "SELECT action, COUNT(*) FROM activity_log WHERE timestamp >= ? "
-                "GROUP BY action ORDER BY COUNT(*) DESC, action", (since_iso,))}
+                "GROUP BY action ORDER BY COUNT(*) DESC, action",
+                (self._activity_bound(since_iso),))}
         except sqlite3.Error:
             return {}
 
@@ -1467,7 +1482,7 @@ class Store:
         """Get activity log entries since a timestamp, optionally filtered by action type."""
         try:
             q = "SELECT * FROM activity_log WHERE timestamp >= ? "
-            params: list = [since_iso]
+            params: list = [self._activity_bound(since_iso)]
             if action:
                 q += "AND action = ? "
                 params.append(action)
@@ -2526,11 +2541,17 @@ class Store:
         invalidated_by: str,
         disposition_code: str,
         invalid_at: str | None = None,
+        asserted_by: str | None = None,
     ) -> dict:
-        """Record an exclusive valid-time end without deleting the node."""
+        """Record an exclusive valid-time end without deleting the node.
+
+        `invalidated_by` is the actor the log names; `asserted_by`, when a
+        caller claimed a different one, is recorded beside it."""
         from .trust import normalize_rfc3339, validate_interval
 
         actor = _clean_audit_text(invalidated_by, field="invalidated_by")
+        claimed = (_clean_audit_text(asserted_by, field="asserted_by")
+                   if asserted_by else None)
         code = _clean_audit_text(disposition_code, field="disposition_code")
         invalid = normalize_rfc3339(
             invalid_at or _utc_now(), field="invalid_at"
@@ -2556,7 +2577,8 @@ class Store:
                 node_id,
                 row["title"],
                 actor,
-                {"disposition_code": code, "invalid_at": invalid},
+                {"disposition_code": code, "invalid_at": invalid,
+                 **({"asserted_by": claimed} if claimed and claimed != actor else {})},
             )
             result_row = conn.execute(
                 "SELECT * FROM nodes WHERE id = ?", (node_id,)

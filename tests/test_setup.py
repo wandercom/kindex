@@ -289,6 +289,13 @@ class TestSetupCodex:
             args = parser.parse_args([sub, "--adapter", "opencode"])
             assert args.adapter == "opencode", sub
 
+    def test_codex_hook_timeouts_are_seconds(self):
+        from kindex.setup import _codex_hook_manifest
+
+        timeouts = [handler["timeout"] for entry in _codex_hook_manifest("kin").values()
+                    for handler in entry["hooks"]]
+        assert timeouts and all(1 <= timeout <= 30 for timeout in timeouts), timeouts
+
     def test_setup_codex_hooks_idempotent(self, tmp_path):
         """Installing twice should not duplicate Codex prompt hook."""
         from kindex.setup import install_codex_hooks

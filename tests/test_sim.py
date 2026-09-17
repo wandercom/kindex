@@ -636,7 +636,40 @@ def test_advocate_run_marks_cooldown_even_with_no_survivors(tmp_path, monkeypatc
     assert "advocate" not in p  # nothing survived
     # ...but the cooldown advanced because Advocate actually RAN — no re-pay next tick.
     assert _advocate_gate_open(store, cfg, "c1", 7) is False
+    # A clean run whose verification kept nothing is not a failed escalation.
+    assert sim_counters(store)["escalation_failures"] == 0
+    store.close()
+
+
+def test_a_failed_advocate_command_counts_as_an_escalation_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    from kindex.config import AdvocateConfig
+    from kindex.sim import sim_counters
+
+    adv = AdvocateConfig(enabled=True, command="false", cooldown_ticks=30, max_cost=0.1)
+    cfg = _config(tmp_path, advocate=adv)
+    store = Store(cfg)
+    enqueue_sim_review(store, cfg, "c1", _WINDOW, tick=6)
+    review = {"rating": 0.9, "note": "n", "basis": "b", "dimension": "reversibility",
+              "stakes": "high", "escalate": True, "escalate_reason": "r"}
+    drain_sim_queue(store, cfg, client=_RoutingClient(review, keep_entries=[]))
     assert sim_counters(store)["escalation_failures"] == 1
+    store.close()
+
+
+def test_an_evicted_review_is_no_longer_queued(tmp_path, monkeypatch):
+    from kindex.supervisor import read_state
+
+    cfg = _config(tmp_path)
+    cfg.sim.max_queue = 1
+    store = Store(cfg)
+    assert enqueue_sim_review(store, cfg, "c1", _WINDOW, tick=6)
+    assert enqueue_sim_review(store, cfg, "c2", _WINDOW + " more", tick=6)
+    assert read_state(store, "c1")["state"] == "skipped"
+    assert read_state(store, "c1")["reason"] == "evicted"
+    assert store.get_meta("sim.admission.c1") is None
+    # The same window may queue again.
+    assert enqueue_sim_review(store, cfg, "c1", _WINDOW, tick=6)
     store.close()
 
 
@@ -718,3 +751,12 @@ def test_verify_fails_closed_without_client(tmp_path):
     ledger = BudgetLedger(cfg.ledger_path, cfg.budget)
     # no client and no real LLM -> return nothing rather than surface unverified claims
     assert _verify_findings(cfg, ledger, _WINDOW, "", ["some finding"], "c1", client=None) == []
+
+
+def test_command_output_is_bounded():
+    from kindex.actions import _run_process
+
+    code, stdout, stderr = _run_process(
+        "head -c 300000 /dev/zero | tr '\\0' x", shell=True, timeout=30, max_bytes=1000)
+    assert code == 0
+    assert len(stdout) == 1000 and set(stdout) == {"x"}

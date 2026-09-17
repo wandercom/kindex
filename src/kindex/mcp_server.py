@@ -11,10 +11,25 @@ import atexit
 import functools
 import json
 import os
+import re
 import sqlite3
 import sys
 from typing import Any
 from .privacy import redact, redact_serialized, safe_error, redacting_print as print
+
+#: How long a reduced Kinbase sync may run inside one MCP tool call.
+KINBASE_SYNC_BUDGET_S = 60.0
+#: The most rows one tool call or resource renders; a caller's limit is
+#: clamped to it (the host's context is the bound, not the graph's size).
+MAX_TOOL_ROWS = 200
+
+
+def _bounded(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return MAX_TOOL_ROWS
+    return max(1, min(value, MAX_TOOL_ROWS))
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -142,15 +157,49 @@ class MemoryUnavailableError(RuntimeError):
 
 
 def _safe_output(fn):
-    """Project historical data at model egress without rewriting stored bytes."""
+    """Project historical data at model egress without rewriting stored bytes.
+
+    Resources and prompts get the tools' memory-unavailable answer here (they
+    have no `_tool` guard), and a failure while redacting is reported like
+    any other, never as the raw exception."""
     @functools.wraps(fn)
     def projected(*args, **kwargs):
         try:
             result = fn(*args, **kwargs)
+            return redact_serialized(result) if isinstance(result, str) else redact(result)
+        except MemoryUnavailableError as error:
+            if error.remedy:
+                return f"Error: memory unavailable ({error.error_class}): {error.remedy}"
+            return f"Error: memory unavailable ({error.error_class})"
+        except sqlite3.Error as error:
+            return f"Error: memory unavailable ({type(error).__name__})"
         except Exception as error:
             raise RuntimeError(safe_error(error)) from None
-        return redact_serialized(result) if isinstance(result, str) else redact(result)
     return projected
+
+
+# Leading phrases of the plain-text refusals tools return.
+_FAILURE_TEXT = re.compile(
+    r"^(Error\b|(?:\w+ )?not found:|Unknown \w+|Invalid JSON\b|No such\b)",
+)
+
+
+def _health_outcome(result) -> str:
+    """Whether a tool result is a refusal. Only an `Error:` prefix counted,
+    so "Node not found: ..." and a JSON `{"ok": false}` string were successes."""
+    if isinstance(result, dict):
+        failed = result.get("ok") is False or "error" in result
+    elif isinstance(result, str):
+        failed = bool(_FAILURE_TEXT.match(result.lstrip()))
+        if not failed and result.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(result)
+            except ValueError:
+                parsed = None
+            failed = isinstance(parsed, dict) and parsed.get("ok") is False
+    else:
+        failed = False
+    return "failed" if failed else "success"
 
 
 def _tool(*dargs, **dkwargs):
@@ -162,10 +211,7 @@ def _tool(*dargs, **dkwargs):
             health_outcome = "failed"
             try:
                 result = fn(*a, **kw)
-                health_outcome = "failed" if (
-                    isinstance(result, str) and result.startswith("Error:")
-                    or isinstance(result, dict) and result.get("ok") is False
-                ) else "success"
+                health_outcome = _health_outcome(result)
                 return result
             except MemoryUnavailableError as e:
                 if e.remedy:
@@ -397,15 +443,26 @@ def _node_detail(store, node: dict) -> str:
 
 
 @_tool()
-def kinbase_sync(repo: str, mode: str = "auto", binary: str = "kinbase") -> str:
+def kinbase_sync(repo: str, mode: str = "auto") -> str:
     """Refresh signed Kinbase evidence; raw verifies bytes, reduced retains governance snapshots.
 
     The source events are never modified. Reduced covers local event keys and
     invokes exact-key explain, never project (which may submit questions).
+    The `kinbase` executable is the one on PATH: a tool caller does not name
+    what runs. A reduced sync that would outlast KINBASE_SYNC_BUDGET_S is
+    refused; the CLI has no such bound.
     """
     from .kinbase import sync_kinbase
     store, _ = _get_store()
-    return json.dumps(sync_kinbase(store, repo, mode=mode, binary=binary), indent=2)
+    try:
+        result = sync_kinbase(store, repo, mode=mode,
+                              explain_budget_s=KINBASE_SYNC_BUDGET_S)
+    except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+        # The CLI twin reports these as errors; here they were raised as
+        # untyped tool failures.
+        return json.dumps({"ok": False, "error": {
+            "code": "kinbase_sync_refused", "message": safe_error(exc)}}, indent=2)
+    return json.dumps(result, indent=2)
 
 
 @_tool()
@@ -433,6 +490,7 @@ def search(query: str, top_k: int = 10, tags: str = "",
 
     fence_stats: dict = {}
     grounding: dict = {}
+    top_k = _bounded(top_k)
     fetch_k = top_k * 3 if tags else top_k
     evaluation_time = operation_now() if trusted_only else None
     results = hybrid_search(store, query, top_k=fetch_k,
@@ -550,7 +608,11 @@ def add(
     """
     store, config = _get_store()
     from .extract import keyword_extract
+    from .schema import ADDABLE_NODE_TYPES
 
+    if node_type not in ADDABLE_NODE_TYPES:
+        return (f"Error: node_type must be one of {', '.join(ADDABLE_NODE_TYPES)} "
+                f"(tasks, sessions and projects have their own tools)")
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     domain_list = [d.strip() for d in domains.split(",") if d.strip()] if domains else []
 
@@ -957,15 +1019,23 @@ def invalidate(
     invalidated_by: str,
     disposition_code: str,
     invalid_at: str = "",
+    force: bool = False,
 ) -> Any:
     """Set a node's exclusive valid-time end without deleting it.
+
+    A foreign advisory lock on the node refuses the change unless force=True.
+    The activity log names this server's agent identity as the actor; the
+    caller's `invalidated_by` is kept beside it as an assertion.
 
     Args:
         node_id: Durable node ID or exact title.
         invalidated_by: Asserted invalidating actor.
         disposition_code: Bounded machine invalidation reason.
         invalid_at: Optional timezone-aware RFC 3339 exclusive end time.
+        force: Override a foreign advisory lock.
     """
+    from .store import LockHeldError
+
     store, _ = _get_store()
     operation_instant = operation_now()
     node, error = _node_for_write(store, node_id)
@@ -973,10 +1043,16 @@ def invalidate(
         return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
+    actor = _default_agent()
+    try:
+        store._check_lock(node, actor, force)
+    except LockHeldError as exc:
+        return f"Error: {exc}"
     try:
         return store.invalidate_node(
             node["id"],
-            invalidated_by=invalidated_by,
+            invalidated_by=actor,
+            asserted_by=invalidated_by,
             disposition_code=disposition_code,
             invalid_at=invalid_at or operation_instant,
         )
@@ -1066,7 +1142,7 @@ def list_nodes(
         status=status or None,
         audience=audience or None,
         tags=tag_list,
-        limit=limit,
+        limit=_bounded(limit),
     )
     if not nodes:
         return "No nodes found matching filters."
@@ -1100,6 +1176,10 @@ def status() -> str:
     from .archive import archive_failures
     archive_failed_count, archive_failed = archive_failures(store)
 
+    # The version check runs when the store opens; a database another
+    # process migrated since then is only visible here.
+    from .schema import SCHEMA_VERSION
+    stored_version = store.get_meta("schema_version")
     lines = [
         "# Kindex Status\n",
         f"Nodes: {stats['semantic_nodes']} semantic",
@@ -1107,6 +1187,10 @@ def status() -> str:
         f"Orphans: {stats['orphans']} semantic",
         f"Metrics schema: {stats['metrics_schema']}",
     ]
+    if stored_version and stored_version != str(SCHEMA_VERSION):
+        lines.append(
+            f"Schema drift: the database is v{stored_version}; this server "
+            f"expects v{SCHEMA_VERSION}. Restart kin-mcp.")
     if recovery_path:
         display_path = "".join(
             char if char.isprintable() else "?" for char in recovery_path
@@ -1261,6 +1345,7 @@ def learn(text: str) -> str:
     store, config = _get_store()
     from .budget import BudgetLedger
     from .extract import extract
+    from .schema import ADDABLE_NODE_TYPES
 
     ledger = BudgetLedger(config.ledger_path, config.budget)
     existing = [n["title"] for n in store.all_nodes(limit=200)]
@@ -1282,10 +1367,12 @@ def learn(text: str) -> str:
         if existing_node:
             grounded_ids.append(existing_node["id"])
             continue
+        # Extraction proposes a type; one outside the addable set is a concept.
+        proposed = concept.get("type", "concept")
         nid = store.add_node(
             title=concept["title"],
             content=concept.get("content", ""),
-            node_type=concept.get("type", "concept"),
+            node_type=proposed if proposed in ADDABLE_NODE_TYPES else "concept",
             domains=concept.get("domains", []),
             prov_activity="mcp-learn",
         )
@@ -1561,6 +1648,10 @@ def graph_merge(source_id: str, target_id: str, keep: str = "target",
         return f"Source node not found: {source_id}"
     if not target:
         return f"Target node not found: {target_id}"
+    if source["id"] == target["id"]:
+        # Merging a node into itself rewrote its own edges' provenance and
+        # archived it, and reported success.
+        return f"Error: {source['id']} cannot be merged into itself"
 
     # Edit-policy chokepoint: graph_merge rewrites target content and
     # archives the source, so it honors the same class policy as edit.
@@ -1656,9 +1747,14 @@ def dream(
     consolidating memory — replay, strengthen, prune.
 
     Args:
-        mode: 'lightweight' (fast, <5s), 'full' (non-LLM), or 'deep' (LLM clusters).
+        mode: 'lightweight' (fast, <5s) or 'full' (non-LLM). The LLM 'deep'
+            mode spends on model calls and runs only from a shell
+            (`kin dream --deep`), not from a tool call.
         dry_run: If True, report what would happen without making changes.
     """
+    if mode == "deep" and not dry_run:
+        return ("Error: deep dream spends on model calls; run `kin dream --deep` "
+                "from a shell (or pass dry_run=True)")
     store, config = _get_store()
 
     from .dream import dream_cycle
@@ -1827,7 +1923,9 @@ def resource_orphans() -> str:
     orphans = store.orphans()
     if not orphans:
         return "No orphan nodes."
-    lines = [_node_summary(n) for n in orphans]
+    lines = [_node_summary(n) for n in orphans[:MAX_TOOL_ROWS]]
+    if len(orphans) > MAX_TOOL_ROWS:
+        lines.append(f"... {len(orphans) - MAX_TOOL_ROWS} more (use graph_heal or list_nodes)")
     return f"{len(orphans)} orphan(s):\n" + "\n".join(lines)
 
 
@@ -1860,7 +1958,7 @@ def prime(topic: str = "") -> str:
     stats = store.stats()
     header = (
         f"# Kindex Context\n\n"
-        f"Graph: {stats.get('node_count', 0)} nodes, {stats.get('edge_count', 0)} edges\n\n"
+        f"Graph: {stats['nodes']} nodes, {stats['edges']} edges\n\n"
     )
     block = format_context_block(store, results, query=topic, level="full", adapter=client)
     return header + block

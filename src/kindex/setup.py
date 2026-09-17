@@ -124,7 +124,9 @@ def _codex_hook_manifest(kin_path: str) -> dict[str, dict]:
             "hooks": [{
                 "type": "command",
                 "command": _kin_hook_command(kin_path, ["prime", "--for", "hook", "--adapter", "codex"]),
-                "timeout": 5000,
+                # Seconds, as every Codex hook timeout is: 5000 held a
+                # session start for over an hour on a stuck prime.
+                "timeout": 10,
                 "statusMessage": "Loading Kindex context",
             }],
         },

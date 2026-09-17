@@ -3960,6 +3960,9 @@ def cmd_cron(args):
 
     for p in passes:
         results = p["results"]
+        if results.get("skipped") == "cron_already_running":
+            print("Cron maintenance skipped: another run is in progress.")
+            continue
         if p["profile"]:
             print(f"Cron maintenance complete (profile: {p['profile']}):")
         else:
@@ -5282,6 +5285,7 @@ def cmd_prompt_check(args):
     # Also check tasks that are urgent/overdue
     task_lines = []
     try:
+        from .retrieve import graph_text
         from .scoping import item_matches_conversation
         from .tasks import list_tasks
         urgent_tasks = list_tasks(store, status="open", limit=5)
@@ -5298,7 +5302,8 @@ def cmd_prompt_check(args):
             due_date = extra.get("due", "")
             if p <= 2 or (due_date and due_date[:10] <= datetime.date.today().isoformat()):
                 p_label = {1: "URGENT", 2: "HIGH"}.get(p, "")
-                task_lines.append(f"  - [{p_label}] {t['title']} (id: {t['id']})")
+                task_lines.append(
+                    f"  - [{p_label}] {graph_text(t['title'], 200, single_line=True)} (id: {t['id']})")
     except Exception:
         pass
 
@@ -5307,35 +5312,33 @@ def cmd_prompt_check(args):
         store.close()
         return
 
-    # ANSI codes for visual distinction
-    BOLD = "\033[1m"
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    CYAN = "\033[96m"
-    RESET = "\033[0m"
-    BEL = "\a"
+    # Plain text: this block is model context, where terminal colour codes
+    # and a bell were only noise. Graph text is neutralised and an action is
+    # summarised, never shown beside a call to run it (as in the prime).
+    from .hooks import reminder_action_summary
+    from .privacy import redact
+    from .retrieve import graph_text
 
     lines = []
-    lines.append(f"{BEL}<system-reminder>")
+    lines.append("<system-reminder>")
     if due:
-        lines.append(f"{BOLD}{RED}{'=' * 50}")
+        lines.append("=" * 50)
         lines.append(f"  KINDEX REMINDERS DUE ({len(due)})")
-        lines.append(f"{'=' * 50}{RESET}")
-        for r in due[:5]:
+        lines.append("=" * 50)
+        for r in redact(due[:5]):
             priority = r.get("priority", "normal")
-            p_color = RED if priority in ("urgent", "high") else YELLOW
-            p_marker = f" {p_color}[{priority.upper()}]{RESET}" if priority != "normal" else ""
+            p_marker = f" [{str(priority).upper()}]" if priority != "normal" else ""
             extra = r.get("extra") or {}
-            lines.append(f"  {BOLD}{CYAN}-{RESET}{p_marker} {r['title']} (due: {r['next_due'][:16]}, id: {r['id']})")
-            if extra.get("action_instructions"):
-                lines.append(f"    Instructions: {extra['action_instructions'][:100]}")
-            if extra.get("action_command"):
-                lines.append(f"    Action: `{extra['action_command']}`")
+            lines.append(
+                f"  -{p_marker} {graph_text(r['title'], 200, single_line=True)} "
+                f"(due: {r['next_due'][:16]}, id: {r['id']})")
+            if extra.get("action_command") or extra.get("action_instructions"):
+                lines.append("    " + reminder_action_summary(extra))
+                lines.append(f"    Review it with `kin remind show --reminder-id {r['id']} --json`")
         lines.append("")
-        lines.append(f"{BOLD}Act on these NOW:{RESET}")
-        lines.append(f"  - `kin remind done <id>` to complete")
-        lines.append(f"  - `kin remind snooze <id>` to defer")
-        lines.append(f"  - `kin remind exec <id>` to run action")
+        lines.append("Act on these now:")
+        lines.append("  - `kin remind done --reminder-id <id>` to complete")
+        lines.append("  - `kin remind snooze --reminder-id <id>` to defer")
 
     if attention_lines:
         if due:
@@ -5354,7 +5357,7 @@ def cmd_prompt_check(args):
 
     if task_lines:
         lines.append("")
-        lines.append(f"{BOLD}{RED}URGENT TASKS:{RESET}")
+        lines.append("URGENT TASKS:")
         lines.extend(task_lines)
 
     lines.append("</system-reminder>")
@@ -6893,6 +6896,8 @@ def _common(p):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .schema import ADDABLE_NODE_TYPES
+
     p = _ArgumentParser(prog="kin",
                                 description="Knowledge graph that learns from your conversations")
     p.add_argument("--version", action="store_true")
@@ -6991,9 +6996,7 @@ def build_parser() -> argparse.ArgumentParser:
     # add
     s = sub.add_parser("add", help="Quick capture with auto-linking")
     s.add_argument("note", nargs="+")
-    s.add_argument("--type", choices=["concept", "document", "decision",
-                                       "question", "skill", "artifact", "person",
-                                       "constraint", "directive", "checkpoint", "watch"])
+    s.add_argument("--type", choices=list(ADDABLE_NODE_TYPES))
     # Operational node metadata
     s.add_argument("--trigger", help="Trigger event (pre-commit, pre-deploy, etc.)")
     s.add_argument("--action", choices=["verify", "warn", "block"], help="Constraint action")

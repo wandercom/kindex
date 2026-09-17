@@ -2,7 +2,7 @@
 
 import json
 import os
-import subprocess
+import urllib.request
 from typing import TYPE_CHECKING
 
 from .base import AdapterMeta, AdapterOption, IngestResult
@@ -10,6 +10,9 @@ from ..privacy import redacting_print as print
 
 if TYPE_CHECKING:
     from ..store import Store
+
+
+LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 
 
 def is_linear_available() -> bool:
@@ -23,22 +26,20 @@ def _linear_query(query: str, variables: dict | None = None) -> dict | None:
     if not api_key:
         return None
 
-    payload = json.dumps({"query": query, "variables": variables or {}})
-
+    payload = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+    # In-process: the key travels in a request header, never on a curl
+    # command line where every local process can read it.
+    request = urllib.request.Request(
+        LINEAR_GRAPHQL_URL,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json", "Authorization": api_key},
+    )
     try:
-        result = subprocess.run(
-            ["curl", "-s", "-X", "POST",
-             "https://api.linear.app/graphql",
-             "-H", "Content-Type: application/json",
-             "-H", f"Authorization: {api_key}",
-             "-d", payload],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
     except Exception:
-        pass
-    return None
+        return None
 
 
 def ingest_issues(store: "Store", team: str | None = None,

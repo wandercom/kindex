@@ -202,7 +202,8 @@ def _details(kind, raw):
     # Reasons are deliberately closed; unknown provider strings are not retained.
     reasons = {"llm_unavailable", "worker_unavailable", "transcript_unavailable", "review_failed",
                "budget_exhausted", "timeout", "invalid_response", "no_findings", "advisory",
-               "missing_credentials", "disabled", "provider_error", "stale", "superseded", "invalid_scope"}
+               "missing_credentials", "disabled", "provider_error", "stale", "superseded", "evicted",
+               "invalid_scope"}
     if raw.get("reason") in reasons:
         clean["reason"] = raw["reason"]
     return clean
@@ -273,10 +274,10 @@ def _summarize(scope, rows, now, cfg, *, reviewer=False):
                # it settles missing_hooks but is not a healthy hook.
                "hook_state": (by_kind["hook"][-1]["details"].get("state", "ok") if by_kind["hook"] else None)}
     found = []
-    def issue(code):
+    def issue(code, **evidence):
         found.append({"id": scope["id"] + ":" + code, "code": code, "reason": REASONS[code],
                       "scope": {k: summary[k] for k in ("project_path", "agent", "session_id")},
-                      "evidence": {"last": summary["last"], "counts": summary["counts"]},
+                      "evidence": {"last": summary["last"], "counts": summary["counts"], **evidence},
                       "diagnostic": _diagnostic()})
     # Reported activity can accompany real review/queue/feedback failures.
     # Only independently observed activity supports missed-hook/use claims.
@@ -308,6 +309,7 @@ def _summarize(scope, rows, now, cfg, *, reviewer=False):
     # per-conversation allowance and every later hook call re-recorded it.
     failures = 0
     budget_exhausted = False
+    failure_reasons: dict[str, int] = {}
     for event in reversed(outcomes):
         state = event["details"]["state"]
         if state in {"completed", "quiet"}:
@@ -316,9 +318,12 @@ def _summarize(scope, rows, now, cfg, *, reviewer=False):
             budget_exhausted = True
             continue
         failures += 1
+        reason = str(event["details"].get("reason") or "unknown")[:64]
+        if reason in failure_reasons or len(failure_reasons) < 8:
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
     summary["budget_exhausted"] = budget_exhausted
     if failures >= cfg["failure_threshold"] and active:
-        issue("review_failures")
+        issue("review_failures", failure_reasons=failure_reasons)
     deliveries = by_kind["delivery"]
     def settled(event, candidates):
         review_id = event["details"].get("review_id")

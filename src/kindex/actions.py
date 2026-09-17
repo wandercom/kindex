@@ -237,6 +237,7 @@ def _run_process(
     input_text: str | None = None,
     timeout: int = 300,
     grace: float = 2.0,
+    max_bytes: int | None = None,
 ) -> tuple[int | None, str, str]:
     """Run ``cmd`` and return ``(returncode, stdout, stderr)``; the return
     code is None when the run timed out and its process group was killed.
@@ -245,6 +246,8 @@ def _run_process(
     The run ends when the command exits, not when every descendant has
     closed its pipes, so a command that starts a background service
     finishes; output that follows within ``grace`` seconds is kept.
+    With ``max_bytes`` each stream keeps only its first ``max_bytes`` (the
+    rest is still drained, so the child never blocks on a full pipe).
     """
     import selectors
     import signal
@@ -262,6 +265,7 @@ def _run_process(
             pass
 
     chunks: dict = {proc.stdout: [], proc.stderr: []}
+    held: dict = {proc.stdout: 0, proc.stderr: 0}
     deadline = time.monotonic() + timeout
     timed_out = False
     try:
@@ -303,7 +307,11 @@ def _run_process(
                 except BlockingIOError:
                     continue
                 if data:
-                    chunks[key.fileobj].append(data)
+                    room = None if max_bytes is None else max_bytes - held[key.fileobj]
+                    if room is None or room > 0:
+                        kept = data if room is None else data[:room]
+                        chunks[key.fileobj].append(kept)
+                        held[key.fileobj] += len(kept)
                 else:
                     selector.unregister(key.fileobj)
         selector.close()
