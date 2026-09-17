@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -14,6 +14,33 @@ import yaml
 
 from .config import BudgetConfig
 from .privacy import redact
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
+
+def _lock_file(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            continue  # LK_LOCK gives up after ten seconds; keep waiting
+
+
+def _unlock_file(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
 def _today() -> str:
@@ -48,6 +75,7 @@ class BudgetLedger:
         self.entries: list[dict] = []
         self._seen: tuple | None = None
         self._lock_depth = 0
+        self._preserved = True
         self._load()
 
     # Many processes share this file: cron drains, background attention and
@@ -57,45 +85,66 @@ class BudgetLedger:
     # torn rewrite left YAML nobody could read. Writes now re-read under a
     # lock and replace the file atomically; reads follow the file.
 
+    # A ledger that could not be read: spending stays stopped for the day
+    # without re-reading (and re-reporting) it on every check.
+    _UNREADABLE = ("unreadable",)
+
     def _stamp(self) -> tuple | None:
+        """The file's identity, or None when there is no ledger. Any other
+        failure to look at it raises: an unreadable ledger is not an empty one."""
         try:
             stat = self.path.stat()
-        except OSError:
+        except FileNotFoundError:
             return None
         return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
-    def _load(self) -> None:
+    def _read(self) -> tuple[list[dict], tuple | None]:
+        """The entries on disk and their stamp (``([], None)`` without a
+        ledger); raises when the ledger exists but cannot be read."""
         stamp = self._stamp()
         if stamp is None:
-            self.entries = []
-            self._seen = None
-            return
+            return [], None
         try:
-            data = yaml.safe_load(self.path.read_text()) or {}
-            entries = data.get("entries", []) if isinstance(data, dict) else None
-            if not isinstance(entries, list):
-                raise ValueError("budget ledger has no entry list")
+            text = self.path.read_text()
+        except FileNotFoundError:
+            return [], None
+        data = yaml.safe_load(text) or {}
+        entries = data.get("entries", []) if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("budget ledger has no entry list")
+        return entries, stamp
+
+    def _load(self) -> None:
+        try:
+            self.entries, self._seen = self._read()
+            self._preserved = True
         except (OSError, ValueError, yaml.YAMLError) as error:
-            self.entries = self._recover(error)
-            self._seen = self._stamp()
-            return
-        self.entries = entries
-        self._seen = stamp
+            self.entries, self._seen = self._recover(error)
 
     def _refresh(self) -> None:
-        if self._stamp() != self._seen:
+        try:
+            current = self._stamp()
+        except OSError:
+            current = self._UNREADABLE
+        if current != self._seen:
             self._load()
 
-    def _recover(self, error: BaseException) -> list[dict]:
-        """An unreadable ledger is set aside, never overwritten, and spending
+    def _recover(self, error: BaseException) -> tuple[list[dict], tuple | None]:
+        """An unreadable ledger is kept, never overwritten, and spending
         stops for the rest of the day: the lost history might have used the
         allowance, and a fresh ledger that assumed nothing was spent could
-        spend it again. Tomorrow's allowance is untouched."""
+        spend it again. Tomorrow's allowance is untouched.
+
+        The canonical file stays in place throughout (a reader that found it
+        missing would spend freely), and is replaced only once its content is
+        kept beside it. If it cannot be kept, it is left alone and this
+        ledger stops spending without persisting anything.
+        """
         from .config import record_degraded
 
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
         kept = self.path.with_name(f"{self.path.name}.unreadable-{stamp}")
-        entries = [{
+        blocked = [{
             "date": _today(),
             "amount": round(float(self.limits.daily), 6),
             "model": "",
@@ -106,13 +155,35 @@ class BudgetLedger:
         }]
         try:
             with self._locked():
-                if self._stamp() is not None:
-                    os.replace(self.path, kept)
-                self._write(entries)
+                # Another process may have repaired it, and spent, meanwhile.
+                try:
+                    entries, current = self._read()
+                except (OSError, ValueError, yaml.YAMLError):
+                    pass
+                else:
+                    self._preserved = True
+                    return entries, current
+                try:
+                    os.link(self.path, kept)
+                except OSError:
+                    shutil.copyfile(self.path, kept)
+                self._write(blocked)
+                self._preserved = True
+            record_degraded("budget", error)
+            try:
+                return blocked, self._stamp()
+            except OSError:
+                return blocked, None
         except OSError:
             pass
+        self._preserved = False
         record_degraded("budget", error)
-        return entries
+        # Tried again only once the file changes.
+        try:
+            seen = self._stamp()
+        except OSError:
+            seen = None
+        return blocked, seen or self._UNREADABLE
 
     @contextmanager
     def _locked(self):
@@ -127,9 +198,9 @@ class BudgetLedger:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(self.path.name + ".lock")
-        fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_file(fd)
             self._lock_depth = 1
             try:
                 yield
@@ -137,7 +208,7 @@ class BudgetLedger:
                 self._lock_depth = 0
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                _unlock_file(fd)
             finally:
                 os.close(fd)
 
@@ -160,6 +231,8 @@ class BudgetLedger:
 
     def _save(self) -> None:
         with self._locked():
+            if not self._preserved:
+                return  # never overwrite a ledger that could not be kept
             self._write(self.entries)
             self._seen = self._stamp()
 
@@ -189,9 +262,17 @@ class BudgetLedger:
         if cache_read_tokens:
             entry["cache_read_tokens"] = cache_read_tokens
         with self._locked():
-            # Append to what is on disk now, not to this ledger's snapshot.
-            self._load()
+            # Append to what is on disk now, not to this ledger's snapshot
+            # (a ledger that could not be kept is re-read once it changes).
+            if self._preserved:
+                self._load()
+            else:
+                self._refresh()
             self.entries.append(redact(entry))
+            if not self._preserved:
+                # The ledger could not be read or kept; the spend is counted
+                # here (spending is already stopped) but not written over it.
+                return
             self._write(self.entries)
             self._seen = self._stamp()
 
@@ -224,9 +305,12 @@ class BudgetLedger:
 
     def can_spend(self) -> bool:
         """Check if any budget remains under all limits."""
-        return (self.today_spend < self.limits.daily
-                and self.week_spend < self.limits.weekly
-                and self.month_spend < self.limits.monthly)
+        within = (self.today_spend < self.limits.daily
+                  and self.week_spend < self.limits.weekly
+                  and self.month_spend < self.limits.monthly)
+        # A ledger that exists but could not be read or kept holds history
+        # this process cannot see, on any day.
+        return within and self._preserved
 
     @property
     def remaining_today(self) -> float:
