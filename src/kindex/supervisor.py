@@ -216,15 +216,34 @@ def _allowance_notice(store, config, conversation, *, deliver=True):
         return "", {"state": "unavailable", "reason": "review_accounting_unavailable"}
 
 
+def record_hook_receipt(scope: dict, launch_path=None, **details) -> None:
+    """The hook ran: a receipt under the repository scope, and under the
+    directory the session was launched from when that differs.
+
+    Native activity is observed under the transcript's own cwd, while hook
+    scopes are normalized to the Git toplevel; a session started in a
+    subdirectory otherwise looked like one whose hooks never fired.
+    """
+    record_health(scope, "hook", source="hook", **details)
+    if not launch_path:
+        return
+    try:
+        launched = str(Path(launch_path).resolve())
+    except (OSError, TypeError, ValueError):
+        return
+    if launched != scope.get("project_path"):
+        record_health({**scope, "project_path": launched}, "hook", source="hook", **details)
+
+
 def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial_goal=None,
                     event_id=None, transcript_path=None, deliver: bool = True,
-                    text_is_goal: bool = True) -> dict:
+                    text_is_goal: bool = True, launch_path=None) -> dict:
     if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
         return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "review_worker"}}
     from .sim import (enqueue_sim_review, pop_pending_sim_injection, format_sim_injection,
                       sim_effective_enabled, spawn_background_drain)
     conversation = session_key(scope)
-    record_health(scope, "hook", source="hook")
+    record_hook_receipt(scope, launch_path)
     diagnostics = {"data_dir": str(config.data_path), "db_path": str(store.db_path),
                    "session_id": scope["session_id"], "agent": scope.get("agent", "")}
     if not sim_effective_enabled(store, config):
@@ -339,6 +358,8 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
             # this event supplies the MCP server provenance that it omits.
             record_health(receipt_scope, "hook", source="hook")
             return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "use_receipt"}}
+    launch_path = str(Path(project_path or payload.get("cwd") or
+                           payload.get("project_path") or os.getcwd()).resolve())
     preliminary = config or trusted_supervisor_config(root, str(project_data_path(root)))
     if not preliminary.sim.enabled:
         enabled = False
@@ -355,12 +376,10 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
         if not enabled:
             if sid:
                 disabled_scope = {"project_path": str(root), "agent": adapter, "session_id": sid}
-                record_health(disabled_scope, "hook", source="hook", state="disabled")
+                record_hook_receipt(disabled_scope, launch_path, state="disabled")
                 record_health(disabled_scope, "review", source="hook", state="disabled", reason="disabled", event_id="disabled")
             return {"ok": True, "context": "", "supervisor": {"state": "disabled"}}
-    scope = project_scope({"session_id": sid, "agent": adapter,
-                           "project_path": str(Path(project_path or payload.get("cwd") or
-                                                    payload.get("project_path") or os.getcwd()).resolve())})
+    scope = project_scope({"session_id": sid, "agent": adapter, "project_path": launch_path})
     store = Store(config) if config is not None else open_project_store(scope)
     try:
         instance_key = resolve_agent_instance_key(adapter, explicit=sid)
@@ -376,7 +395,8 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
                                goal=payload.get("goal") or payload.get("focus"), initial_goal=payload.get("initial_goal"),
                                event_id=event_id, deliver=deliver,
                                text_is_goal=adapter != "cursor" or cursor_event == "beforeSubmitPrompt",
-                               transcript_path=payload.get("transcript_path") or payload.get("transcriptPath"))
+                               transcript_path=payload.get("transcript_path") or payload.get("transcriptPath"),
+                               launch_path=launch_path)
     finally:
         store.close()
 

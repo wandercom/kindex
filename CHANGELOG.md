@@ -101,6 +101,24 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   the old top-level shape), and session scans skip subagent and workflow
   transcripts, which were titled after their directory and crowded real
   sessions out of every scan.
+- `verify`, `invalidate`, `edit`, `supersede`, `link`, `lock`/`unlock` and
+  `coord_attach` (MCP and CLI) resolve a title to the one active node that
+  carries it and refuse a title that names more than one
+  (`title_collision`); a verification by title could land on an archived
+  twin while the live node stayed unverified. An id still names its node,
+  and title lookups prefer an active node, then the most recently updated.
+- cron no longer re-suggests a cross-component pair that was already raised,
+  in any state (once 100 newer suggestions existed it re-inserted the same
+  pairs every pass, and it re-suggested rejected pairs); accepted
+  suggestions older than 90 days are pruned.
+- The session prime shows an imported Kinbase node's governance label and
+  open Unknowns on the node's own entry, as context blocks already did.
+- A session launched from a repository subdirectory no longer reports
+  `missing_hooks`: the hook receipt is also recorded under the launch
+  directory, where native activity is observed.
+- The stale-embedding reindex applies its limit to stale nodes; it took the
+  limit first, re-selected the same fresh top rows every pass, and never
+  reached the rest.
 
 ### Security
 - Collab text from peers (authors, lock holders, standing-message setters,

@@ -236,6 +236,15 @@ def _get_config():
     return config
 
 
+def _node_for_write(store, ref: str):
+    """``(node, error)`` for a mutating tool: a title must name one node."""
+    from .store import AmbiguousTitleError
+    try:
+        return store.resolve_node_for_write(ref), ""
+    except AmbiguousTitleError as error:
+        return None, f"Error: title_collision: {error}"
+
+
 def _default_agent(agent: str = "") -> str:
     """Explicit agent name, or the resolved stable agent identity."""
     if agent and agent.strip():
@@ -635,7 +644,9 @@ def edit(node_id: str, title: str = "", content: str = "", append: str = "",
     store, config = _get_store()
     from .store import EditPolicyError, LockHeldError
 
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
 
@@ -687,7 +698,9 @@ def supersede(node_id: str, new_text: str, expires: str = "", reason: str = "") 
     store, config = _get_store()
     from .store import LockHeldError
 
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
 
@@ -920,7 +933,9 @@ def verify(
     """
     store, _ = _get_store()
     operation_instant = operation_now()
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
     try:
@@ -953,7 +968,9 @@ def invalidate(
     """
     store, _ = _get_store()
     operation_instant = operation_now()
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
     try:
@@ -1011,8 +1028,10 @@ def link(
         reason: Why this connection exists (stored as provenance — always provide this).
     """
     store, _ = _get_store()
-    a = store.get_node(node_a) or store.get_node_by_title(node_a)
-    b = store.get_node(node_b) or store.get_node_by_title(node_b)
+    a, error_a = _node_for_write(store, node_a)
+    b, error_b = _node_for_write(store, node_b)
+    if error_a or error_b:
+        return error_a or error_b
     if not a:
         return f"Source node not found: {node_a}"
     if not b:
@@ -2400,7 +2419,9 @@ def coord_attach(name: str, node_id: str) -> str:
     """
     store, _ = _get_store()
     from .coordination import attach_resource
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     try:
         resources = attach_resource(store, name,
                                     node["id"] if node else node_id)
@@ -2509,7 +2530,9 @@ def lock_acquire(node_id: str, ttl_minutes: int = 60, note: str = "",
     store, _ = _get_store()
     from .locks import lock_node
     from .store import LockHeldError
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
     try:
@@ -2532,7 +2555,9 @@ def lock_release(node_id: str, force: bool = False) -> str:
     store, _ = _get_store()
     from .locks import unlock_node
     from .store import LockHeldError
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
     try:

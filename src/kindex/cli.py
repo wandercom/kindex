@@ -445,8 +445,22 @@ def cmd_candidate(args):
         store.close()
 
 
+def _node_for_write_or_exit(store, ref: str):
+    """The node a mutating command means, or None; a title that names more
+    than one node is refused (exit 1) instead of editing an arbitrary one."""
+    from .store import AmbiguousTitleError
+    try:
+        return store.resolve_node_for_write(ref)
+    except AmbiguousTitleError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        store.close()
+        sys.exit(1)
+
+
 def _resolve_cli_node(store, identity: str) -> dict:
-    node = store.get_node(identity) or store.get_node_by_title(identity)
+    """The node a mutating command means (AmbiguousTitleError, a ValueError,
+    when a title names more than one)."""
+    node = store.resolve_node_for_write(identity)
     if node is None:
         raise ValueError(f"Node not found: {identity}")
     return node
@@ -771,8 +785,8 @@ def cmd_link(args):
     """Create an edge between two nodes."""
     store = _store(args)
 
-    node_a = store.get_node(args.node_a) or store.get_node_by_title(args.node_a)
-    node_b = store.get_node(args.node_b) or store.get_node_by_title(args.node_b)
+    node_a = _node_for_write_or_exit(store, args.node_a)
+    node_b = _node_for_write_or_exit(store, args.node_b)
 
     if not node_a:
         print(f"Error: '{args.node_a}' not found.", file=sys.stderr)
@@ -1609,7 +1623,7 @@ def cmd_doctor(args):
 def cmd_set_audience(args):
     """Set the audience scope of a node (private/team/org/public)."""
     store = _store(args)
-    node = store.get_node(args.node_id) or store.get_node_by_title(args.node_id)
+    node = _node_for_write_or_exit(store, args.node_id)
 
     if not node:
         print(f"Error: '{args.node_id}' not found.", file=sys.stderr)
@@ -1625,7 +1639,7 @@ def cmd_set_audience(args):
 def cmd_set_state(args):
     """Set a key-value pair in a node's current_state (mutable directive state)."""
     store = _store(args)
-    node = store.get_node(args.node_id) or store.get_node_by_title(args.node_id)
+    node = _node_for_write_or_exit(store, args.node_id)
 
     if not node:
         print(f"Error: '{args.node_id}' not found.", file=sys.stderr)
@@ -1689,7 +1703,7 @@ def cmd_edit(args):
     cfg = _config(args)
     store = _store(args)
     ref = args.node_id
-    node = store.get_node(ref) or store.get_node_by_title(ref)
+    node = _node_for_write_or_exit(store, ref)
     if not node:
         print(f"Error: '{ref}' not found.", file=sys.stderr)
         store.close()
@@ -1721,7 +1735,7 @@ def cmd_supersede(args):
     cfg = _config(args)
     store = _store(args)
     ref = args.node_id
-    node = store.get_node(ref) or store.get_node_by_title(ref)
+    node = _node_for_write_or_exit(store, ref)
     if not node:
         print(f"Error: '{ref}' not found.", file=sys.stderr)
         store.close()
@@ -3139,7 +3153,7 @@ def cmd_alias(args):
     kin alias <node> list           — show all aliases
     """
     store = _store(args)
-    node = store.get_node(args.node_id) or store.get_node_by_title(args.node_id)
+    node = _node_for_write_or_exit(store, args.node_id)
 
     if not node:
         print(f"Error: '{args.node_id}' not found.", file=sys.stderr)
@@ -4558,7 +4572,7 @@ def cmd_lock(args):
     store = _store(args)
     agent = getattr(args, "agent", "") or resolve_agent_id(cfg)
     ref = args.node_id
-    node = store.get_node(ref) or store.get_node_by_title(ref)
+    node = _node_for_write_or_exit(store, ref)
     if not node:
         print(f"Error: '{ref}' not found.", file=sys.stderr)
         store.close()
@@ -4588,7 +4602,7 @@ def cmd_unlock(args):
     store = _store(args)
     agent = getattr(args, "agent", "") or resolve_agent_id(cfg)
     ref = args.node_id
-    node = store.get_node(ref) or store.get_node_by_title(ref)
+    node = _node_for_write_or_exit(store, ref)
     if not node:
         print(f"Error: '{ref}' not found.", file=sys.stderr)
         store.close()

@@ -152,6 +152,10 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
 
     # 6. Suggest cross-component links
     suggestion_count = _suggest_links(store, verbose=verbose)
+    try:
+        results["suggestions_pruned"] = store.prune_suggestions()
+    except Exception:
+        results["suggestions_pruned"] = 0
     results["link_suggestions"] = suggestion_count
 
     # 7. Graph hygiene — archive stale orphans, auto-link viable ones
@@ -501,14 +505,11 @@ def _suggest_links(store: "Store", verbose: bool = False) -> int:
         suggestions = suggest_cross_component_links(store, max_suggestions=5)
         count = 0
         for s in suggestions:
-            # Check if this suggestion already exists
-            existing = store.pending_suggestions(limit=100)
-            already = any(
-                (e["concept_a"] == s["concept_a"] and e["concept_b"] == s["concept_b"])
-                or (e["concept_a"] == s["concept_b"] and e["concept_b"] == s["concept_a"])
-                for e in existing
-            )
-            if not already:
+            # Any earlier suggestion of the pair, in any state, answers it:
+            # checking only the 100 newest pending rows re-inserted the same
+            # pairs every pass once other sources had written 100 more, and
+            # re-suggested pairs the user had rejected.
+            if not store.suggestion_exists(s["concept_a"], s["concept_b"], status=None):
                 store.add_suggestion(
                     concept_a=s["concept_a"],
                     concept_b=s["concept_b"],

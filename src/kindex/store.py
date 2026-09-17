@@ -123,6 +123,10 @@ class TitleCollisionError(ValueError):
     """Automated promotion would collide with an existing durable title."""
 
 
+class AmbiguousTitleError(ValueError):
+    """A title or alias names more than one node where exactly one is meant."""
+
+
 class InvalidIntervalError(ValueError):
     """A valid-time or evaluation-time value violates the UTC contract."""
 
@@ -1519,6 +1523,18 @@ class Store:
                   details={"reason": reason, "source": source})
         return cur.lastrowid
 
+    def prune_suggestions(self, *, accepted_after_days: int = 90) -> int:
+        """Delete accepted suggestions older than ``accepted_after_days``:
+        the edge they asked for exists, so they decide nothing. Rejected and
+        pending rows stay, as the record that the pair was already raised."""
+        cutoff = (datetime.now(tz=None) - timedelta(days=accepted_after_days)
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.execute(
+            "DELETE FROM suggestions WHERE status = 'accepted' AND created_at < ?",
+            (cutoff,))
+        self.conn.commit()
+        return cursor.rowcount
+
     def pending_suggestions(self, limit: int = 20) -> list[dict]:
         """Get pending suggestions (bridge opportunities)."""
         try:
@@ -1770,21 +1786,49 @@ class Store:
             return []
 
     def get_node_by_title(self, title: str) -> dict | None:
-        """Match by title or AKA (case-insensitive)."""
-        # Exact title match
-        row = self.conn.execute(
-            "SELECT * FROM nodes WHERE lower(title) = lower(?)", (title,)).fetchone()
-        if row:
-            return self._row_to_dict(row)
-        # AKA match: search JSON array for alias
+        """Match by title or AKA (case-insensitive); an active node first,
+        then the most recently updated."""
+        matches = self._nodes_named(title)
+        return matches[0] if matches else None
+
+    def _nodes_named(self, title: str) -> list[dict]:
+        """Every node whose title, else whose alias, is ``title``
+        (case-insensitive), active first, then most recently updated."""
+        order = ("ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, "
+                 "updated_at DESC, id")
+        rows = self.conn.execute(
+            f"SELECT * FROM nodes WHERE lower(title) = lower(?) {order}", (title,)
+        ).fetchall()
+        if rows:
+            return [self._row_to_dict(row) for row in rows]
         lower = title.lower()
         rows = self.conn.execute(
-            "SELECT * FROM nodes WHERE aka != '[]' AND aka != ''").fetchall()
-        for r in rows:
-            d = self._row_to_dict(r)
-            if any(a.lower() == lower for a in (d.get("aka") or [])):
-                return d
-        return None
+            f"SELECT * FROM nodes WHERE aka != '[]' AND aka != '' {order}").fetchall()
+        return [
+            d for d in (self._row_to_dict(r) for r in rows)
+            if any(isinstance(a, str) and a.lower() == lower for a in (d.get("aka") or []))
+        ]
+
+    def resolve_node_for_write(self, ref: str) -> dict | None:
+        """The node a mutating or trust operation means by ``ref``.
+
+        An id names its node. Otherwise the title or alias must name one
+        active node (or, with none active, exactly one node): a verification
+        asserted by title used to land on whichever duplicate SQLite
+        returned, possibly an archived twin, while the live one stayed
+        unverified. Raises AmbiguousTitleError naming the candidates.
+        """
+        node = self.get_node(ref)
+        if node is not None:
+            return node
+        matches = self._nodes_named(ref)
+        active = [m for m in matches if m.get("status") == "active"]
+        pool = active or matches
+        if len(pool) > 1:
+            raise AmbiguousTitleError(
+                f"'{ref}' names {len(pool)} nodes "
+                f"({', '.join(m['id'] for m in pool[:10])}); use a node id")
+        return pool[0] if pool else None
 
     def update_node(self, node_id: str, _log_activity: bool = True,
                     **fields) -> None:
