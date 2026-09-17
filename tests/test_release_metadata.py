@@ -96,12 +96,28 @@ def test_documented_migration_snapshots_are_outside_merge_rotation():
         assert "ten-file" in text
 
 
+def _tracked_files(directory: str) -> list[Path]:
+    """The files Git tracks under `directory`; every file when this is not a
+    Git checkout (an unpacked sdist)."""
+    import subprocess
+
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", directory], cwd=ROOT,
+            capture_output=True, check=True, timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return list((ROOT / directory).rglob("*"))
+    return [ROOT / name for name in listed.decode().split("\0") if name]
+
+
 def test_published_pages_leave_out_internal_reviews_and_home_paths():
     workflow = (ROOT / ".github" / "workflows" / "pages.yml").read_text()
     assert 'rm -rf "$RUNNER_TEMP/site/reviews"' in workflow
     assert "path: docs\n" not in workflow
     # Examples name a made-up user; no tracked doc carries a real home path.
-    for path in (ROOT / "docs").rglob("*"):
+    # Untracked and ignored files (a local review draft) are not published.
+    for path in _tracked_files("docs"):
         if path.is_file() and path.suffix in {".md", ".html", ".json", ".txt"}:
             homes = set(re.findall(r"/Users/([A-Za-z0-9._-]+)/", path.read_text(errors="replace")))
             assert homes <= {"alice"}, (path, homes)
