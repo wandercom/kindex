@@ -159,12 +159,18 @@ def get_conversation(store: Store, ref: str) -> dict | None:
 
 
 def _named(store: Store, name: str) -> list[dict]:
-    rows = store.all_nodes(node_type="coordination", status="active", limit=500)
-    return [
-        row for row in rows
-        if (row.get("extra") or {}).get("coord_kind") == "conversation"
-        and (row.get("extra") or {}).get("name") == name
-    ]
+    """Every active conversation row with this name, newest first. Asked of
+    the database by name: a window of recent rows could miss a live
+    namesake behind newer expired ones."""
+    rows = store.conn.execute(
+        "SELECT * FROM nodes WHERE type = 'coordination' AND status = 'active' "
+        "AND json_valid(extra) "
+        "AND json_extract(extra, '$.coord_kind') = 'conversation' "
+        "AND json_extract(extra, '$.name') = ? "
+        "ORDER BY updated_at DESC, id",
+        (name,),
+    ).fetchall()
+    return [store._row_to_dict(row) for row in rows]
 
 
 def _is_live(row: dict) -> bool:
@@ -362,6 +368,12 @@ def read_messages(
         "remaining": total - len(returned),
         "remaining_kind": "newer" if mine is not None else "older",
         "already_read": (len(all_messages) - total) if cursor_read else 0,
+        # An explicit read does not move the cursor, so it names where the
+        # next page starts.
+        "next_since_id": (
+            max(int(m.get("id", 0)) for m in returned)
+            if mine is not None and not cursor_read and returned else None
+        ),
     }
 
 
@@ -585,13 +597,15 @@ def format_conversations(conversations: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_messages(payload: dict) -> str:
+def format_messages(payload: dict, *, since_flag: str = "since_id=") -> str:
+    """Render a read. ``since_flag`` is how the caller names the since id
+    ("since_id=" for the MCP tool, "--since-id " for the CLI)."""
     messages = payload.get("messages") or []
     if not messages:
         earlier = int(payload.get("already_read") or 0)
         if earlier:
             return (f"No new messages ({earlier} already read; "
-                    "pass since_id=0 to read them again).")
+                    f"pass {since_flag}0 to read them again).")
         return "No messages."
     lines = [
         f"Conversation: {payload.get('name')} ({payload.get('status')})",
@@ -605,8 +619,12 @@ def format_messages(payload: dict) -> str:
     remaining = int(payload.get("remaining") or 0)
     if remaining > 0:
         kind = payload.get("remaining_kind") or "more"
-        hint = ("read again to continue" if kind == "newer"
-                else "pass since_id or a larger limit to see them")
+        if payload.get("next_since_id") is not None:
+            hint = f"pass {since_flag}{payload['next_since_id']} to continue"
+        elif kind == "newer":
+            hint = "read again to continue"
+        else:
+            hint = f"pass {since_flag.rstrip('= ')} or a larger limit to see them"
         lines.append(
             f"  (showing {len(messages)} of {payload.get('total', len(messages))}"
             f" — {remaining} {kind} message(s) not shown; {hint})"

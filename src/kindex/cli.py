@@ -4441,7 +4441,8 @@ def cmd_coord(args):
                 limit=getattr(args, "limit", 50) or 50,
                 agent=agent,
             )
-            print(_dumps(payload) if getattr(args, "json", False) else format_messages(payload))
+            print(_dumps(payload) if getattr(args, "json", False)
+                  else format_messages(payload, since_flag="--since-id "))
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
 
