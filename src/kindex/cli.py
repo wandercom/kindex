@@ -1017,14 +1017,8 @@ def cmd_status(args):
         archive_duplicate_ids = []
     if not isinstance(archive_duplicate_ids, list):
         archive_duplicate_ids = []
-    from .archive import ARCHIVE_FAILED_COUNT_META, ARCHIVE_FAILED_IDS_META
-    try:
-        archive_failed_count = int(store.get_meta(ARCHIVE_FAILED_COUNT_META) or 0)
-        archive_failed = json.loads(store.get_meta(ARCHIVE_FAILED_IDS_META) or "[]")
-    except (TypeError, ValueError):
-        archive_failed_count, archive_failed = 0, []
-    if not isinstance(archive_failed, list):
-        archive_failed = []
+    from .archive import archive_failures
+    archive_failed_count, archive_failed = archive_failures(store)
 
     cfg = _config(args)
     from .config import read_degraded_events
@@ -1051,7 +1045,7 @@ def cmd_status(args):
         if archive_failed_count:
             stats["archive_failed"] = {
                 "count": archive_failed_count,
-                "samples": archive_failed,
+                "samples": [failure.model_dump() for failure in archive_failed],
             }
         print(_dumps(stats, indent=2))
     else:
@@ -1077,9 +1071,7 @@ def cmd_status(args):
                 f"{archive_duplicate_count} duplicate ID(s) need review"
             )
         if archive_failed_count:
-            sample = ", ".join(
-                str(item.get("id")) for item in archive_failed[:5] if isinstance(item, dict)
-            )
+            sample = ", ".join(failure.id for failure in archive_failed[:5])
             print(
                 "Archive:   "
                 f"{archive_failed_count} node(s) could not be archived last cycle ({sample})"

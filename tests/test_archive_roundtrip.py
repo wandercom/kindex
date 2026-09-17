@@ -183,3 +183,63 @@ def test_restore_never_overwrites_a_live_node(world):
     with sqlite3.connect(_current_archive_path(cfg)) as conn:
         assert conn.execute(
             "SELECT 1 FROM archived_nodes WHERE id = 'twin'").fetchone() is not None
+
+
+def test_a_legacy_archive_row_with_a_structured_secret_is_not_restored(world):
+    """A sensitive field inside JSON text is found once the text is decoded;
+    text matching alone does not recognise a short value under `token`."""
+    cfg, store = world
+    archive = _open_archive(_current_archive_path(cfg))
+    archive.execute(
+        """INSERT INTO archived_nodes (id, title, content, type, status, weight, domains,
+               extra, created_at, updated_at, archived_at, prov_source, prov_activity,
+               prov_who, prov_why)
+           VALUES ('leaky', 'Deploy notes', '', 'concept', 'archived', 0.01, '[]',
+               '{"token": "hunter2"}', '2024-01-01T00:00:00', '2024-01-01T00:00:00',
+               '2025-01-01T00:00:00', '', '', '[]', '')"""
+    )
+    archive.commit()
+    archive.close()
+    with pytest.raises(ValueError, match="credential remediation"):
+        restore_node(cfg, store, "leaky")
+    assert stored_row(store, "leaky") == {}
+    with sqlite3.connect(_current_archive_path(cfg)) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM archived_nodes WHERE id = 'leaky'").fetchone() is not None
+
+
+def test_an_archive_that_cannot_be_written_stops_the_cycle(world):
+    """A failing archive is not one node's problem; the cycle reports it."""
+    cfg, store = world
+    store.add_node("Stays", node_id="stays")
+    _open_archive(_current_archive_path(cfg)).close()
+    _current_archive_path(cfg).chmod(0o444)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            archive_nodes(cfg, store, ["stays"])
+    finally:
+        _current_archive_path(cfg).chmod(0o644)
+    assert stored_row(store, "stays")["id"] == "stays"
+
+
+def test_a_cycle_with_nothing_to_move_clears_the_last_report(world):
+    from kindex.archive import archive_cycle
+    cfg, store = world
+    store.set_meta("archive_failed_count", "3")
+    store.set_meta("archive_failed_ids", json.dumps([{"id": "old", "error": "stale"}]))
+    assert archive_cycle(cfg, store) == 0
+    assert store.get_meta("archive_failed_count") == "0"
+    assert json.loads(store.get_meta("archive_failed_ids")) == []
+
+
+def test_mcp_status_reports_archive_failures_like_the_cli(world, monkeypatch):
+    import kindex.mcp_server as mcp_server
+    cfg, store = world
+    store.add_node("Fine", node_id="fine")
+    store.add_node("Blocked", node_id="blocked")
+    store.conn.execute("CREATE TABLE pinned (node_id TEXT NOT NULL REFERENCES nodes(id))")
+    store.conn.execute("INSERT INTO pinned VALUES ('blocked')")
+    store.conn.commit()
+    assert archive_nodes(cfg, store, ["blocked", "fine"]) == 1
+    monkeypatch.setattr(mcp_server, "_get_store", lambda: (store, cfg))
+    assert "1 node(s) could not be archived last cycle (blocked)" in mcp_server.status()

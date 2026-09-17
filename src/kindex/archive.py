@@ -19,6 +19,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
+
 from .privacy import redact, safe_error
 from .privacy import redacting_print as print
 
@@ -32,6 +34,47 @@ ARCHIVE_DUPLICATE_COUNT_META = "archive_duplicate_count"
 ARCHIVE_DUPLICATE_IDS_META = "archive_duplicate_ids"
 ARCHIVE_FAILED_COUNT_META = "archive_failed_count"
 ARCHIVE_FAILED_IDS_META = "archive_failed_ids"
+_ARCHIVE_FAILURE_SAMPLES = 20
+# Node columns stored as JSON text; credential checks read them decoded, as
+# Store._row_to_dict does, so a sensitive field inside one is recognised.
+_JSON_NODE_COLUMNS = ("aka", "domains", "prov_who", "extra", "referent")
+
+
+class ArchiveFailure(BaseModel):
+    """A node the last archive cycle could not move, and why."""
+
+    id: str
+    error: str
+
+
+def _record_archive_failures(store: "Store", failures: list[ArchiveFailure]) -> None:
+    store.set_meta(ARCHIVE_FAILED_COUNT_META, str(len(failures)))
+    store.set_meta(
+        ARCHIVE_FAILED_IDS_META,
+        json.dumps([failure.model_dump() for failure in failures[:_ARCHIVE_FAILURE_SAMPLES]]),
+    )
+
+
+def archive_failures(store: "Store") -> tuple[int, list[ArchiveFailure]]:
+    """The last cycle's failure count and samples, for status surfaces."""
+    try:
+        count = int(store.get_meta(ARCHIVE_FAILED_COUNT_META) or 0)
+        raw = json.loads(store.get_meta(ARCHIVE_FAILED_IDS_META) or "[]")
+        samples = [ArchiveFailure.model_validate(item) for item in raw]
+    except (TypeError, ValueError):
+        return 0, []
+    return count, samples
+
+
+def _decoded(row: dict) -> dict:
+    decoded = dict(row)
+    for key in _JSON_NODE_COLUMNS:
+        if isinstance(decoded.get(key), str):
+            try:
+                decoded[key] = json.loads(decoded[key])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return decoded
 
 # Archive schema — flat snapshot, no FTS, no triggers
 _ARCHIVE_SCHEMA = """
@@ -167,6 +210,8 @@ def archive_nodes(
     Returns count of nodes archived.
     """
     if not node_ids:
+        # A cycle with nothing to move still replaces the last cycle's report.
+        _record_archive_failures(store, [])
         return 0
 
     # Check rotation first
@@ -179,7 +224,7 @@ def archive_nodes(
     archive_conn = _open_archive(_current_archive_path(config))
     now = datetime.datetime.now(tz=None).isoformat(timespec="seconds")
     count = 0
-    failures: list[dict] = []
+    failures: list[ArchiveFailure] = []
 
     try:
         for nid in node_ids:
@@ -317,12 +362,14 @@ def archive_nodes(
                 source.execute("DELETE FROM nodes WHERE id = ?", (nid,))
                 archive_conn.commit()
                 source.commit()
-            except Exception as error:
-                # One node that cannot move is reported and skipped; it does
-                # not stop the batch behind it.
+            except (ValueError, sqlite3.IntegrityError) as error:
+                # A node the store refuses to move (a credential to remediate,
+                # a row something still references) is reported and skipped;
+                # it does not stop the batch behind it. Anything else is the
+                # archive or the store failing, and the cycle stops on it.
                 source.rollback()
                 archive_conn.rollback()
-                failures.append({"id": nid, "error": safe_error(error)})
+                failures.append(ArchiveFailure(id=nid, error=safe_error(error)))
                 if verbose:
                     print(f"  Could not archive {nid}: {safe_error(error)}")
                 continue
@@ -343,8 +390,7 @@ def archive_nodes(
                 print(f"  Archived to slow graph: {node.get('title', nid)}")
     finally:
         archive_conn.close()
-        store.set_meta(ARCHIVE_FAILED_COUNT_META, str(len(failures)))
-        store.set_meta(ARCHIVE_FAILED_IDS_META, json.dumps(failures[:20]))
+        _record_archive_failures(store, failures)
 
     return count
 
@@ -493,11 +539,9 @@ def archive_cycle(
     Designed to be called from cron_run.
     """
     node_ids = find_archivable_nodes(store)
-    archived = (
-        archive_nodes(config, store, node_ids, verbose=verbose)
-        if node_ids
-        else 0
-    )
+    # archive_nodes also replaces the last cycle's failure report when there
+    # is nothing to move.
+    archived = archive_nodes(config, store, node_ids, verbose=verbose)
     _record_archive_duplicate_state(config, store, verbose=verbose)
     return archived
 
@@ -645,22 +689,22 @@ def restore_node(
             conn.close()
             continue
         try:
-            if store.conn.execute(
-                "SELECT 1 FROM nodes WHERE id = ?", (node_id,)
-            ).fetchone():
-                raise ValueError(
-                    f"{node_id} is already in the fast graph; the archived copy in "
-                    f"{db_file.name} was left in place for review")
             node = _stored(row, "node_row") or _legacy_node_row(row)
             node.update(id=node_id, status="active", weight=0.3, updated_at=_now())
-            if redact(node) != node:
+            decoded = _decoded(node)
+            if redact(decoded) != decoded:
                 raise ValueError("Archived node requires explicit credential remediation")
 
             source = store.conn
             source.execute("BEGIN IMMEDIATE")
             restored_edges: dict[Path, list[str]] = {}
             try:
-                _insert(store, "nodes", node)
+                # Decided under the write lock: a node that became live since
+                # the archive was read is never overwritten or silently kept.
+                if _insert(store, "nodes", node) != 1:
+                    raise ValueError(
+                        f"{node_id} is already in the fast graph; the archived copy in "
+                        f"{db_file.name} was left in place for review")
                 for edge_file in files:
                     edge_conn = sqlite3.connect(str(edge_file))
                     edge_conn.row_factory = sqlite3.Row
