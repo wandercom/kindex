@@ -734,6 +734,13 @@ def _fire_one(store: Store, config: Config, r: dict) -> bool:
                 else:
                     store.settle_reminder(r["id"], "completed")
                 return True
+            if result.get("status") == "failed":
+                # Retried on this occurrence, after the automatic snooze,
+                # until it succeeds or its attempts run out; advancing a
+                # recurring reminder here started a new occurrence (and a
+                # fresh attempt count) on every failure.
+                store.settle_reminder(r["id"], "fired", last_fired=_now())
+                return True
 
     if r["reminder_type"] == "recurring":
         # Advance to next occurrence

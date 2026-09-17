@@ -982,6 +982,7 @@ class TestSchedulerCommandShape:
 
         self._install_home(tmp_path, monkeypatch)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_launchd(config)
 
@@ -995,6 +996,7 @@ class TestSchedulerCommandShape:
 
         self._install_home(tmp_path, monkeypatch)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_reminder_daemon(config)
 
@@ -1036,6 +1038,7 @@ class TestSchedulerCommandShape:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_crontab(config)
 
@@ -1103,6 +1106,7 @@ class TestSchedulerCommandShape:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         actions = ksetup.install_crontab(config)
 
@@ -1149,6 +1153,7 @@ class TestSchedulerCommandShape:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         actions = ksetup.install_crontab(config)
 
@@ -1178,6 +1183,7 @@ class TestSchedulerCommandShape:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_crontab(config)
 
@@ -1207,6 +1213,7 @@ class TestSchedulerCommandShape:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         actions = ksetup.install_crontab(config)
 
@@ -1230,6 +1237,7 @@ class TestSchedulerCommandShape:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_crontab(config)
 
@@ -1245,6 +1253,7 @@ class TestSchedulerCommandShape:
 
         self._install_home(tmp_path, monkeypatch)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
         cfg = Config(data_dir=str(tmp_path / "data"))
         cfg.reminders.check_interval = 3600
 
@@ -1268,6 +1277,7 @@ class TestSchedulerCommandShape:
 
         self._install_home(tmp_path, monkeypatch)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
         monkeypatch.setattr(kcli, "_config", lambda args: config)
 
         agents = tmp_path / "Library" / "LaunchAgents"
@@ -1372,6 +1382,7 @@ class TestSchedulerLogLocation:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_crontab(cfg)
 
@@ -1392,6 +1403,7 @@ class TestSchedulerLogLocation:
 
         monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_crontab(cfg)
 
@@ -1410,6 +1422,7 @@ class TestSchedulerLogLocation:
             lambda *a, **kw: type("P", (), {"returncode": 0, "stdout": ""})(),
         )
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         ksetup.install_launchd(cfg)
         ksetup.install_reminder_daemon(cfg)
@@ -1439,6 +1452,7 @@ class TestSchedulerLogLocation:
 
         monkeypatch.setattr("kindex.scheduling.subprocess.run", fake_run)
         monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+        monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
 
         result = scheduling._apply_crontab(420, cfg)
 

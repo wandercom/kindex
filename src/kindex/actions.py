@@ -85,7 +85,6 @@ def resolve_mode(fields: dict) -> str:
 # A failing action is retried on later sweeps, but not forever: each
 # occurrence gets this many attempts before it is set aside as exhausted.
 MAX_ACTION_ATTEMPTS = 3
-_SWEEP_SKIPS = ("completed", "paused", "exhausted")
 
 
 def execute_action(
@@ -180,6 +179,13 @@ def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int)
         if extra.get("action_attempt_occurrence") != occurrence or manual:
             extra["action_attempts"] = 0
             extra["action_attempt_occurrence"] = occurrence
+        if int(extra.get("action_attempts") or 0) >= MAX_ACTION_ATTEMPTS:
+            # A worker that died mid-run (a stale "running") used its
+            # attempt; a sweep does not start one past the cap.
+            extra["action_status"] = "exhausted"
+            store.update_reminder(reminder_id, extra=extra)  # commits
+            return {"skipped": "attempts exhausted for this occurrence; "
+                               "run kin remind exec to retry"}
         extra["action_attempts"] = int(extra.get("action_attempts") or 0) + 1
         extra["action_status"] = "running"
         extra["action_executed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
@@ -248,64 +254,86 @@ def _run_process(
         stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    chunks: dict = {proc.stdout: [], proc.stderr: []}
-    selector = selectors.DefaultSelector()
-    for stream in chunks:
-        os.set_blocking(stream.fileno(), False)
-        selector.register(stream, selectors.EVENT_READ)
-    # The prompt is fed as the child reads it, alongside its output: writing
-    # it all first deadlocks a child that fills its output pipe before
-    # reading its input.
-    pending = memoryview(input_text.encode("utf-8", errors="replace")) if input_text is not None else None
-    if pending is not None:
-        os.set_blocking(proc.stdin.fileno(), False)
-        selector.register(proc.stdin, selectors.EVENT_WRITE)
-    deadline = time.monotonic() + timeout
-    exited_at = None
-    timed_out = False
-    while selector.get_map():
-        now = time.monotonic()
-        if exited_at is None and proc.poll() is not None:
-            exited_at = now
-        if exited_at is not None and now - exited_at > grace:
-            break  # a descendant still holds the pipes
-        if now >= deadline:
-            timed_out = exited_at is None
-            break
-        for key, _ in selector.select(timeout=min(0.1, max(0.0, deadline - now))):
-            if key.fileobj is proc.stdin:
-                try:
-                    pending = pending[os.write(proc.stdin.fileno(), pending[:65536]):]
-                except BlockingIOError:
-                    continue
-                except (BrokenPipeError, OSError):
-                    pending = pending[:0]
-                if not pending:
-                    selector.unregister(proc.stdin)
-                    proc.stdin.close()
-                continue
-            try:
-                data = os.read(key.fileobj.fileno(), 65536)
-            except BlockingIOError:
-                continue
-            if data:
-                chunks[key.fileobj].append(data)
-            else:
-                selector.unregister(key.fileobj)
-    selector.close()
-    if proc.stdin is not None and not proc.stdin.closed:
-        proc.stdin.close()
-    if timed_out:
+
+    def kill_group() -> None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+
+    chunks: dict = {proc.stdout: [], proc.stderr: []}
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    try:
+        selector = selectors.DefaultSelector()
+        for stream in chunks:
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ)
+        # The prompt is fed as the child reads it, alongside its output:
+        # writing it all first deadlocks a child that fills its output pipe
+        # before reading its input.
+        pending = memoryview(input_text.encode("utf-8", errors="replace")) if input_text is not None else None
+        if pending is not None:
+            os.set_blocking(proc.stdin.fileno(), False)
+            selector.register(proc.stdin, selectors.EVENT_WRITE)
+        exited_at = None
+        while selector.get_map():
+            now = time.monotonic()
+            if exited_at is None and proc.poll() is not None:
+                exited_at = now
+            if exited_at is not None and now - exited_at > grace:
+                break  # a descendant still holds the pipes
+            if now >= deadline:
+                timed_out = exited_at is None
+                break
+            for key, _ in selector.select(timeout=min(0.1, max(0.0, deadline - now))):
+                if key.fileobj is proc.stdin:
+                    try:
+                        pending = pending[os.write(proc.stdin.fileno(), pending[:65536]):]
+                    except BlockingIOError:
+                        continue
+                    except (BrokenPipeError, OSError):
+                        pending = pending[:0]
+                    if not pending:
+                        selector.unregister(proc.stdin)
+                        proc.stdin.close()
+                    continue
+                try:
+                    data = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if data:
+                    chunks[key.fileobj].append(data)
+                else:
+                    selector.unregister(key.fileobj)
+        selector.close()
+        if proc.stdin is not None and not proc.stdin.closed:
+            proc.stdin.close()
+        if not timed_out and proc.poll() is None:
+            # The command closed its output but is still running: the
+            # deadline still applies.
+            try:
+                proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+    except BaseException:
+        # Interrupted (Ctrl-C) or failed: the detached group must not
+        # outlive the runner.
+        kill_group()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        for stream in chunks:
+            stream.close()
+    if timed_out:
+        kill_group()
     try:
         returncode = proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         returncode = None
-    for stream in chunks:
-        stream.close()
     decode = lambda parts: b"".join(parts).decode("utf-8", errors="replace")  # noqa: E731
     return (None if timed_out else returncode,
             decode(chunks[proc.stdout]), decode(chunks[proc.stderr]))

@@ -4562,9 +4562,11 @@ class Store:
         """Park an action whose stored row cannot be rewritten through the
         normal path (a legacy command the credential guard now refuses): the
         command is left exactly as stored and only the action state changes
-        (an unparseable ``extra`` is kept verbatim under ``unparsed_extra``)."""
+        (an ``extra`` that is not a JSON object is kept verbatim under
+        ``unparsed_extra``)."""
         self.conn.execute(
-            "UPDATE reminders SET extra = CASE WHEN json_valid(extra) "
+            "UPDATE reminders SET extra = CASE "
+            "WHEN json_valid(extra) AND json_type(extra) = 'object' "
             "THEN json_set(extra, '$.action_status', 'paused', '$.action_result', ?1) "
             "ELSE json_object('action_status', 'paused', 'action_result', ?1, "
             "'unparsed_extra', extra) END, updated_at = ?2 "

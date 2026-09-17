@@ -260,3 +260,132 @@ def test_quarantine_keeps_an_unparseable_extra(store):
         "SELECT extra FROM reminders WHERE id = ?", (rid,)).fetchone()[0])
     assert extra == {"action_status": "paused", "action_result": "set aside",
                      "unparsed_extra": "{not json"}
+
+
+def test_rerunning_setup_refreshes_the_path_and_keeps_the_schedule(monkeypatch, config):
+    from kindex import setup as ksetup
+    logs = str(config.scheduler_log_path)
+    existing = (
+        f"*/7 * * * * PATH=/old/bin /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
+        f"*/5 * * * * PATH=/old/bin /usr/local/bin/kin remind check --all-profiles "
+        f">> {logs}/reminders.log 2>&1\n"
+    )
+    written = {}
+
+    def fake_run(cmd, **kw):
+        if cmd[:2] == ["crontab", "-l"]:
+            return type("P", (), {"returncode": 0, "stdout": existing, "stderr": ""})()
+        written["crontab"] = kw.get("input", "")
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr("kindex.setup.subprocess.run", fake_run)
+    monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+    monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/new/50%/bin:/usr/bin")
+    ksetup.install_crontab(config)
+    lines = [line for line in written["crontab"].splitlines() if line]
+    assert lines[0].startswith("*/7 * * * * PATH=/new/50\\%/bin:/usr/bin /usr/local/bin/kin cron")
+    assert lines[1].startswith("*/5 * * * * PATH=/new/50\\%/bin:/usr/bin ")
+    assert "/old/bin" not in written["crontab"]
+
+
+def test_a_failing_recurring_action_is_retried_on_its_occurrence(config, store, monkeypatch):
+    from kindex import actions
+    from kindex.actions import MAX_ACTION_ATTEMPTS
+    from kindex.reminders import check_and_fire
+
+    rid = store.add_reminder("hourly", past(), reminder_type="recurring",
+                             schedule="FREQ=HOURLY", extra={"action_command": "boom"})
+    due = store.get_reminder(rid)["next_due"]
+    runs: list[str] = []
+    monkeypatch.setattr(actions, "_run_shell",
+                        lambda command, **kw: runs.append(command) or {"ok": False, "output": "no"})
+    for attempt in range(MAX_ACTION_ATTEMPTS):
+        check_and_fire(store, config)
+        reminder = store.get_reminder(rid)
+        if attempt < MAX_ACTION_ATTEMPTS - 1:
+            assert reminder["next_due"] == due, "a failure started a new occurrence"
+            assert reminder["status"] == "fired"
+            store.conn.execute("UPDATE reminders SET status = 'active' WHERE id = ?", (rid,))
+            store.conn.commit()
+    assert len(runs) == MAX_ACTION_ATTEMPTS
+    reminder = store.get_reminder(rid)
+    assert reminder["next_due"] > due, "an exhausted occurrence moves on"
+    assert "action_attempts" not in (reminder.get("extra") or {})
+
+
+def test_a_dead_worker_does_not_buy_an_extra_attempt(config, store, monkeypatch):
+    from kindex import actions
+    from kindex.actions import MAX_ACTION_ATTEMPTS, execute_action
+
+    rid = store.add_reminder("flaky", past(), extra={"action_command": "boom"})
+    reminder = store.get_reminder(rid)
+    extra = dict(reminder["extra"])
+    extra.update(action_status="running", action_attempts=MAX_ACTION_ATTEMPTS,
+                 action_attempt_occurrence=reminder["next_due"],
+                 action_executed_at="2000-01-01T00:00:00")
+    store.update_reminder(rid, extra=extra)
+    runs: list[str] = []
+    monkeypatch.setattr(actions, "_run_shell",
+                        lambda command, **kw: runs.append(command) or {"ok": False, "output": "no"})
+    result = execute_action(store, store.get_reminder(rid), config)
+    assert result["status"] == "skipped" and runs == []
+    assert store.get_reminder(rid)["extra"]["action_status"] == "exhausted"
+
+
+def test_quarantine_wraps_an_extra_that_is_not_an_object(store):
+    rid = store.add_reminder("legacy", past(), extra={"action_command": "true"})
+    store.conn.execute("UPDATE reminders SET extra = '[1]' WHERE id = ?", (rid,))
+    store.conn.commit()
+    store.quarantine_reminder_action(rid, "set aside")
+    extra = json.loads(store.conn.execute(
+        "SELECT extra FROM reminders WHERE id = ?", (rid,)).fetchone()[0])
+    assert extra == {"action_status": "paused", "action_result": "set aside",
+                     "unparsed_extra": "[1]"}
+
+
+def test_a_command_that_closes_its_output_still_times_out(tmp_path):
+    from kindex.actions import _run_shell
+    pidfile = tmp_path / "pid"
+    started = time.monotonic()
+    result = _run_shell(f"exec >&- 2>&-; echo $$ > {pidfile}; sleep 60", timeout=1)
+    assert result == {"ok": False, "output": "Timed out after 1s"}
+    assert time.monotonic() - started < 10
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the timed-out command is still alive")
+
+
+def test_an_interrupted_runner_takes_its_group_with_it(tmp_path, monkeypatch):
+    import selectors
+
+    from kindex.actions import _run_process
+    pidfile = tmp_path / "pid"
+    real_select = selectors.DefaultSelector.select
+    calls = {"n": 0}
+
+    def interrupting_select(self, timeout=None):
+        calls["n"] += 1
+        if calls["n"] > 5 and pidfile.exists():
+            raise KeyboardInterrupt
+        return real_select(self, timeout)
+
+    monkeypatch.setattr(selectors.DefaultSelector, "select", interrupting_select)
+    with pytest.raises(KeyboardInterrupt):
+        _run_process(f"echo $$ > {pidfile}; sleep 60", shell=True, timeout=30)
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the interrupted command is still alive")

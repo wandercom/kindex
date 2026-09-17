@@ -970,6 +970,14 @@ def _launchctl_reload(plist_path: Path) -> None:
                    capture_output=True, timeout=5)
 
 
+def cron_path_assignment() -> str:
+    """``PATH=...`` for a crontab line. cron turns an unescaped ``%`` into a
+    newline even inside shell quotes, which would split the command."""
+    import shlex
+
+    return "PATH=" + shlex.quote(scheduler_path()).replace("%", "\\%")
+
+
 def scheduler_path() -> str:
     """The PATH a scheduled kin job runs with.
 
@@ -1116,9 +1124,9 @@ def install_crontab(config: "Config", dry_run: bool = False) -> list[str]:
 
     # Maintenance runs at :02/:32 so it is never phase-locked with the
     # reminder checker's :00/:05/... schedule. Each job carries the PATH its
-    # actions need (cron's own PATH finds no agent CLI); a line without it is
-    # stale and is replaced.
-    env = f"PATH={shlex.quote(scheduler_path())}"
+    # actions need (cron's own PATH finds no agent CLI), refreshed on every
+    # install.
+    env = cron_path_assignment()
     wanted = [
         (f"{kin_path} cron >> {log_dir}/cron.log 2>&1",
          f"2-59/30 * * * * {env} {kin_path} cron >> {log_dir}/cron.log 2>&1"),
@@ -1127,10 +1135,12 @@ def install_crontab(config: "Config", dry_run: bool = False) -> list[str]:
          f">> {log_dir}/reminders.log 2>&1"),
     ]
 
-    def current(line: str, fingerprint: str) -> bool:
-        # The PATH value follows whichever shell installed it; its presence
-        # is what matters, like the schedule field a repack may change.
-        return fingerprint in line and "PATH=" in line.split(fingerprint, 1)[0]
+    def refreshed(line: str, default_line: str) -> str:
+        # Keep the schedule an adaptive repack may have chosen; everything
+        # after it (the PATH, the command) is rewritten, so a PATH from an
+        # earlier install cannot hide a newly installed CLI.
+        schedule = line.split()[:5]
+        return " ".join(schedule + default_line.split(None, 5)[5:])
 
     # Check existing crontab
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
@@ -1144,12 +1154,13 @@ def install_crontab(config: "Config", dry_run: bool = False) -> list[str]:
     final = []
     changed = False
     for fingerprint, default_line in wanted:
-        match = next((l for l in pool if current(l, fingerprint)), None)
+        match = next((l for l in pool if fingerprint in l), None)
         if match is not None:
-            # Current command + log target: keep as-is (preserves an
-            # adaptively repacked schedule).
+            # Current command + log target: keep its schedule.
             pool.remove(match)
-            final.append(match)
+            line = refreshed(match, default_line)
+            changed = changed or line != match
+            final.append(line)
         else:
             final.append(default_line)
             changed = True
