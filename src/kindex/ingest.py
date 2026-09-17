@@ -438,8 +438,10 @@ def _codex_message_texts(content) -> list[str]:
 
 def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
     """Extract human-readable text from a Claude Code JSONL session file."""
+    # A finished file is read to its end (or max_chars): the byte bound is
+    # for a hook reading a live transcript a turn at a time.
     return _extract_session_text_since(
-        jsonl_path, 0, max_chars=max_chars, complete_lines_only=False)[0]
+        jsonl_path, 0, max_chars=max_chars, max_bytes=None, complete_lines_only=False)[0]
 
 
 def _extract_session_text_since(
@@ -447,7 +449,7 @@ def _extract_session_text_since(
     start_offset: int,
     *,
     max_chars: int = 8000,
-    max_bytes: int = 4 * 1024 * 1024,
+    max_bytes: int | None = 4 * 1024 * 1024,
     complete_lines_only: bool = True,
 ) -> tuple[str, int, bool]:
     """Assistant text from ``start_offset`` on, the offset of the first line
@@ -465,7 +467,8 @@ def _extract_session_text_since(
     try:
         with open(jsonl_path, "rb") as f:
             f.seek(start_offset)
-            while total_len < max_chars and offset - start_offset < max_bytes:
+            while total_len < max_chars and (
+                    max_bytes is None or offset - start_offset < max_bytes):
                 raw = f.readline()
                 if not raw:
                     at_end = True

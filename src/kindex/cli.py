@@ -2186,15 +2186,18 @@ def cmd_compact_hook(args):
             # text), which is skipped rather than re-read every turn.
             if not at_end:
                 store.set_meta(read_state_key, json.dumps({"offset": next_offset}))
+            _emit_compact_context(store, args, tpath=tpath)
             store.close()
             return
         if text_digest == read_state.get("digest"):
             store.set_meta(read_state_key, json.dumps(
                 {"offset": next_offset, "digest": text_digest}))
+            _emit_compact_context(store, args, tpath=tpath)
             store.close()
             return
 
     if not text or len(text.strip()) < min_len:
+        _emit_compact_context(store, args, tpath=tpath if is_envelope else "")
         store.close()
         return
 
@@ -2211,6 +2214,7 @@ def cmd_compact_hook(args):
             record_degraded("compact-hook-extract", exc, config=cfg)
         except Exception:
             pass
+        _emit_compact_context(store, args, topic_text=text)
         store.close()
         return
 
@@ -2270,16 +2274,34 @@ def cmd_compact_hook(args):
     count = len(staged_ids)
 
     # Output context at executive level for re-injection after compaction
-    if count > 0 or args.emit_context:
-        if count > 0:
-            print(f"# Kindex: staged {count} capture candidate(s) for review.")
-        from .retrieve import format_context_block, hybrid_search
-        topic = text[:100].split("\n")[0]
-        results = hybrid_search(store, topic, top_k=5)
-        block = format_context_block(store, results, query=topic, level="executive")
-        print(block)
+    if count > 0:
+        print(f"# Kindex: staged {count} capture candidate(s) for review.")
+    _emit_compact_context(store, args, topic_text=text, force=count > 0)
 
     store.close()
+
+
+def _emit_compact_context(store, args, *, topic_text: str = "", tpath: str = "",
+                          force: bool = False) -> None:
+    """Print the executive context block when it was asked for.
+
+    Requested context does not depend on whether this run extracted
+    anything: a Stop hook may already have consumed the transcript. With no
+    new text, the topic comes from the transcript's opening.
+    """
+    if not (force or getattr(args, "emit_context", False)):
+        return
+    if not topic_text.strip() and tpath:
+        from .ingest import _extract_session_text_since
+        topic_text = _extract_session_text_since(
+            Path(tpath), 0, max_chars=200, max_bytes=256 * 1024,
+            complete_lines_only=False)[0]
+    topic = topic_text[:100].split("\n")[0]
+    if not topic.strip():
+        return
+    from .retrieve import format_context_block, hybrid_search
+    results = hybrid_search(store, topic, top_k=5)
+    print(format_context_block(store, results, query=topic, level="executive"))
 
 
 # ── prime ─────────────────────────────────────────────────────────────
@@ -5112,6 +5134,8 @@ def cmd_prompt_check(args):
                 conversation_id,
                 force=getattr(args, "force_attention", False),
                 adapter=scope_adapter(adapter),
+                client=adapter,
+                agent_instance=agent_instance,
             )
             job = prepared.get("job") or {}
             if job and time.monotonic() < deadline:
@@ -5383,6 +5407,8 @@ def cmd_attention_hook(args):
             conversation_id,
             force=getattr(args, "force", False),
             adapter=scope_adapter(adapter),
+            client=adapter,
+            agent_instance=agent_instance,
         )
         job = prepared.get("job") or {}
         if job and time.monotonic() < deadline:

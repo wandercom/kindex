@@ -229,3 +229,92 @@ def test_task_execute_needs_no_legacy_store(ambiguous_mcp, monkeypatch):
     result = ambiguous_mcp["mcp"].task_execute(
         "list", {}, project_path=str(ambiguous_mcp["project"]), session_id="s1", agent="")
     assert result.get("ok") is True, result
+
+
+def test_a_finished_transcript_is_read_past_the_live_byte_bound(tmp_path):
+    from kindex.ingest import _extract_session_text
+    transcript = tmp_path / "t.jsonl"
+    tool_output = json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": "x" * 60000}]}})
+    with transcript.open("w") as handle:
+        for _ in range(80):  # about 4.8 MiB of tool output before any assistant text
+            handle.write(tool_output + "\n")
+        handle.write(assistant_line(turn(9)) + "\n")
+    assert transcript.stat().st_size > 4 * 1024 * 1024
+    assert turn(9) in _extract_session_text(transcript)
+
+
+def test_requested_context_survives_a_transcript_the_stop_hook_consumed(
+        monkeypatch, tmp_path, capsys):
+    isolate_global_config(monkeypatch, tmp_path)
+    import kindex.retrieve as retrieve
+    from kindex.cli import build_parser, cmd_compact_hook
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(assistant_line(turn(n)) for n in range(3)) + "\n")
+    calls: list = []
+    run_compact_hook(monkeypatch, tmp_path, transcript, calls)
+    assert len(calls) == 1
+    capsys.readouterr()
+
+    topics: list[str] = []
+    monkeypatch.setattr(retrieve, "hybrid_search",
+                        lambda store, topic, top_k=5: topics.append(topic) or [])
+    monkeypatch.setattr(retrieve, "format_context_block",
+                        lambda store, results, query, level: "CONTEXT BLOCK")
+    envelope = json.dumps({"hook_event_name": "PreCompact", "session_id": "s1",
+                           "transcript_path": str(transcript)})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(envelope))
+    args = build_parser().parse_args(
+        ["compact-hook", "--emit-context", "--data-dir", str(tmp_path / "data")])
+    cmd_compact_hook(args)
+    assert len(calls) == 1, "the consumed turns were extracted again"
+    assert "CONTEXT BLOCK" in capsys.readouterr().out
+    assert topics and "Turn 0" in topics[0]
+
+
+def test_the_drain_judges_with_the_hooks_client_overrides(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import kindex.attention as attention
+    from kindex.agent_settings import apply_agent_overrides
+    from kindex.config import AttentionConfig, BudgetConfig, LLMConfig
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(attention, "spawn_background_attention_drain", lambda config: True)
+    base = Config(
+        data_dir=str(tmp_path),
+        llm=LLMConfig(enabled=True),
+        budget=BudgetConfig(daily=1.0, weekly=5.0, monthly=10.0),
+        attention=AttentionConfig(enabled=False, max_check_cost=0.05,
+                                  max_conversation_cost=0.5),
+        agents={"instances": {"claude:s1": {"client": "claude",
+                                            "attention": {"enabled": True}}}},
+    )
+    store = Store(base)
+    node_id = store.add_node("Deploy checklist", node_type="directive",
+                             extra={"attention_triggers": ["deploy"]})
+    hook_config = apply_agent_overrides(base, client="claude", instance_key="claude:s1")
+    prepared = attention.prepare_async_attention_review(
+        store, hook_config, "deploy this", "conv-1", force=True,
+        adapter="claude", client="claude", agent_instance="claude:s1")
+    assert prepared["status"] == "queued"
+
+    calls: list = []
+
+    class Messages:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            payload = {"inject": [{"id": f"node:{node_id}", "message": "Verify the deploy.",
+                                   "reason": "deploying", "confidence": 0.9}]}
+            return SimpleNamespace(
+                content=[SimpleNamespace(text=json.dumps(payload))],
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                      cache_creation_input_tokens=0,
+                                      cache_read_input_tokens=0))
+
+    drained = attention.drain_attention_queue(
+        store, base, client=SimpleNamespace(messages=Messages()))
+    assert calls, "the drain dropped a job its instance enabled"
+    assert drained["flagged"] == 1
+    store.close()
