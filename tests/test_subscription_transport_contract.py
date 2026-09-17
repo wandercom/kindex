@@ -288,15 +288,20 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
     executable.write_text("#!" + sys.executable + "\n" + source)
     executable.chmod(0o755)
     monkeypatch.setenv("PATH", str(binary_dir) + os.pathsep + os.environ.get("PATH", ""))
+    # The first turn must time out after init (the fixture then sleeps two
+    # minutes); a loaded runner can take a second just to start Python, so
+    # neither turn is held to one second.
     cfg = Config(data_dir=str(tmp_path / "data"), sim={
-        "enabled": True, "backend": "claude", "agent_timeout": 1,
+        "enabled": True, "backend": "claude", "agent_timeout": 5,
         "max_conversation_reviews": 5, "max_daily_reviews": 10,
     })
     try:
         first = native.run_review(cfg, "claude-interrupted-init", "First synthetic Claude review")
         assert first.get("status") != "ok", first
         assert (receipts / "provider.pid").exists(), "Fixture must emit init before timing out"
-        second = native.run_review(Config(**cfg.model_dump()), "claude-interrupted-init", "Fresh review after init timeout")
+        resumed_config = cfg.model_dump()
+        resumed_config["sim"]["agent_timeout"] = 60
+        second = native.run_review(Config(**resumed_config), "claude-interrupted-init", "Fresh review after init timeout")
         assert second.get("status") == "ok", second
         assert second.get("session_id") == expected_id
         calls = rows(receipts / "calls.jsonl")

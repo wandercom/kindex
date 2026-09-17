@@ -6,6 +6,8 @@ import json
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from kindex.agent_adapters import (
     adapter_scoped_out,
     permission_gate_output,
@@ -511,10 +513,30 @@ def test_async_attention_drops_stale_deferred_result(tmp_path, monkeypatch):
     store.close()
 
 
-def test_wait_for_pending_attention_returns_empty_at_deadline(tmp_path):
+class _ManualClock:
+    """The attention module's clock: monotonic time moves only when the code
+    under test sleeps, so a loaded runner cannot stretch the wait."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def test_wait_for_pending_attention_returns_empty_at_deadline(tmp_path, monkeypatch):
+    import kindex.attention as attention
+
     cfg = _config(tmp_path)
     store = Store(cfg)
-    start = time.monotonic()
+    clock = _ManualClock(100.0)
+    monkeypatch.setattr(attention, "time", clock)
     injections = wait_for_pending_attention(
         store,
         cfg,
@@ -522,10 +544,11 @@ def test_wait_for_pending_attention_returns_empty_at_deadline(tmp_path):
         "deploy this",
         tick=1,
         job_id="missing",
-        deadline=start + 0.05,
+        deadline=100.05,
     )
     assert injections == []
-    assert time.monotonic() - start < 0.2
+    # It waited until the deadline and no longer.
+    assert clock.now == pytest.approx(100.05)
     store.close()
 
 
