@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-09-17
+
 ### Fixed
 - Hook surfaces (`prime`, `prompt-check`, `attention-hook`, `stop-guard`,
   `compact-hook`, agent hooks, `cron`) degrade per R2.1 on a configuration or
