@@ -317,3 +317,101 @@ def test_scheduler_writes_can_be_switched_off_for_child_processes(monkeypatch, t
     monkeypatch.setattr(scheduling, "_apply_crontab", must_not_run)
     result = scheduling.apply_schedule(300, Config(data_dir=str(tmp_path)))
     assert result == {"action": "skipped", "reason": "scheduler writes disabled"}
+
+
+# ── launchd reload ───────────────────────────────────────────────
+
+
+def _cron_plist(home, interval):
+    plist = home / "Library" / "LaunchAgents" / "com.kindex.cron.plist"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(
+        "<plist><dict><key>StartInterval</key>\n"
+        f"<integer>{interval}</integer></dict></plist>\n"
+    )
+    return plist
+
+
+def test_a_repack_inside_the_job_reloads_it_only_once_it_is_idle(tmp_path, monkeypatch):
+    """The run that repacks is the job: unloading it synchronously ended the
+    run before the reload, and the job stayed unloaded."""
+    from pathlib import Path
+
+    from kindex import scheduling
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    plist = _cron_plist(tmp_path, 300)
+    ran, spawned = [], []
+    monkeypatch.setattr(scheduling.subprocess, "run", lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(
+        scheduling.subprocess, "Popen", lambda argv, **k: spawned.append((argv, k))
+    )
+
+    result = scheduling._apply_launchd(3600, Config(data_dir=str(tmp_path / "store")))
+
+    assert result["action"] == "updated"
+    assert "<integer>3600</integer>" in plist.read_text()
+    assert ran == [], "no synchronous launchctl call from inside the job"
+    ((argv, kwargs),) = spawned
+    assert kwargs["start_new_session"] is True
+    assert argv[-3:] == ["com.kindex.cron", str(plist), "reload"]
+
+
+@pytest.mark.parametrize("mode, expected", [
+    ("reload", ["list", "list", "unload", "load"]),
+    ("unload", ["list", "list", "unload"]),
+])
+def test_the_reload_helper_waits_for_the_running_job(tmp_path, mode, expected):
+    import os
+    import stat
+    import subprocess
+
+    from kindex.scheduling import RELOAD_WHEN_IDLE
+
+    calls = tmp_path / "calls"
+    running = tmp_path / "running-once"
+    running.write_text("")
+    fake = tmp_path / "bin" / "launchctl"
+    fake.parent.mkdir()
+    # Reports the job running on the first `list`, idle afterwards.
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'echo "$1" >> "{calls}"\n'
+        'if [ "$1" = list ]; then\n'
+        f'  if [ -e "{running}" ]; then rm "{running}"; echo \'\t"PID" = 4242;\'; fi\n'
+        'fi\n'
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    env = {**os.environ, "PATH": f"{fake.parent}:{os.environ['PATH']}"}
+
+    subprocess.run(
+        ["/bin/sh", "-c", RELOAD_WHEN_IDLE, "kindex-reload",
+         "com.kindex.cron", str(tmp_path / "job.plist"), mode],
+        env=env, check=True, timeout=30,
+    )
+
+    assert calls.read_text().split() == expected
+
+
+def test_setup_cron_keeps_the_repacked_interval(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from kindex import scheduling
+    from kindex import setup as ksetup
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ksetup.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(ksetup, "_find_kin_path", lambda: "/usr/local/bin/kin")
+    monkeypatch.setattr(ksetup, "scheduler_path", lambda: "/usr/bin:/bin")
+    config = Config(data_dir=str(tmp_path / "store"))
+    plist = tmp_path / "Library" / "LaunchAgents" / "com.kindex.cron.plist"
+
+    ksetup.install_launchd(config)
+    fresh = config.reminders.check_interval
+    assert f"<integer>{fresh}</integer>" in plist.read_text()
+
+    state = scheduling._scheduler_state_path(config)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    scheduling._write_state(state, scheduling.SchedulerState(applied=3600))
+    ksetup.install_launchd(config)
+    assert "<integer>3600</integer>" in plist.read_text()

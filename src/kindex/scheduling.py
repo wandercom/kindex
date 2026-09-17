@@ -182,6 +182,45 @@ def repack_schedule(store: "Store", config: "Config") -> dict:
     return result
 
 
+def applied_interval(config: "Config") -> int | None:
+    """The interval last applied to the machine scheduler, if one was."""
+    state = _read_state(_scheduler_state_path(config))
+    return state.applied if state.applied and state.applied > 0 else None
+
+
+CRON_LABEL = "com.kindex.cron"
+# Waits (at most an hour, the maintenance cadence) until launchd reports the
+# job not running, then reloads it, or only unloads it when "$3" is "unload".
+RELOAD_WHEN_IDLE = (
+    'label="$1"; plist="$2"; n=0; '
+    'while launchctl list "$label" 2>/dev/null | grep -q \'"PID" = \'; do '
+    'n=$((n + 1)); [ "$n" -ge 3600 ] && break; sleep 1; done; '
+    'launchctl unload "$plist" >/dev/null 2>&1; '
+    '[ "$3" = unload ] || launchctl load "$plist" >/dev/null 2>&1'
+)
+
+
+def _reload_when_idle(plist_path: Path, mode: str = "reload") -> None:
+    """Reload (or unload) the maintenance job once it is not running.
+
+    The maintenance run is this job, and it repacks at the end of the run:
+    ``launchctl unload`` from inside it ended the run before the ``load``
+    that followed, so the job was left unloaded, the applied interval was
+    never recorded, and every later load did both again. A helper in its own
+    session is not part of the job's process group, so it outlives the run
+    and reloads the job once launchd reports it idle.
+    """
+    subprocess.Popen(
+        ["/bin/sh", "-c", RELOAD_WHEN_IDLE, "kindex-reload",
+         CRON_LABEL, str(plist_path), mode],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
 def scheduler_writes_disabled() -> bool:
     """``KIN_NO_SCHEDULER_WRITES`` set to 1, true or yes."""
     import os
@@ -195,7 +234,6 @@ def apply_schedule(interval: int, config: "Config") -> dict:
     ``KIN_NO_SCHEDULER_WRITES=1`` leaves the machine scheduler untouched
     (test suites and sandboxes, whose child processes inherit it).
     """
-    import os
     from .config import _bound_root
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
@@ -217,12 +255,8 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
         return {"action": "skipped", "reason": "no plist installed"}
 
     if interval == 0:
-        # Disable: unload the plist
-        subprocess.run(
-            ["launchctl", "unload", str(plist_path)],
-            capture_output=True, timeout=5,
-        )
-        return {"action": "disabled"}
+        _reload_when_idle(plist_path, mode="unload")
+        return {"action": "disabled", "reload": "when-idle"}
 
     # Read current plist, update the interval
     content = plist_path.read_text()
@@ -237,17 +271,8 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
         return {"action": "skipped", "reason": "plist format unrecognized"}
 
     plist_path.write_text(new_content)
-
-    # Reload: unload + load
-    subprocess.run(
-        ["launchctl", "unload", str(plist_path)],
-        capture_output=True, timeout=5,
-    )
-    subprocess.run(
-        ["launchctl", "load", str(plist_path)],
-        capture_output=True, timeout=5,
-    )
-    return {"action": "updated"}
+    _reload_when_idle(plist_path)
+    return {"action": "updated", "reload": "when-idle"}
 
 
 def _apply_crontab(interval: int, config: "Config") -> dict:
