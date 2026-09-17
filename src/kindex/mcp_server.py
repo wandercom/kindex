@@ -1056,6 +1056,8 @@ def status() -> str:
         )
     except (TypeError, ValueError):
         archive_duplicate_count = 0
+    from .archive import archive_failures
+    archive_failed_count, archive_failed = archive_failures(store)
 
     lines = [
         "# Kindex Status\n",
@@ -1076,6 +1078,12 @@ def status() -> str:
         lines.append(
             "Archive warning: "
             f"{archive_duplicate_count} duplicate ID(s) need review"
+        )
+    if archive_failed_count:
+        sample = ", ".join(failure.id for failure in archive_failed[:5])
+        lines.append(
+            "Archive warning: "
+            f"{archive_failed_count} node(s) could not be archived last cycle ({sample})"
         )
     stored_nodes = stats["stored_nodes"]
     stored_edges = stats["stored_edges"]

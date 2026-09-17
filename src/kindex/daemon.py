@@ -164,8 +164,11 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         from .archive import archive_cycle
         archived_to_slow = archive_cycle(config, store, verbose=verbose)
         results["slow_graph_archived"] = archived_to_slow
-    except Exception:
+    except Exception as error:
+        # Not silence: the cycle as a whole failed (the archive file, not one
+        # node; archive_nodes reports those itself).
         results["slow_graph_archived"] = 0
+        results["slow_graph_error"] = safe_error(error)
 
     # 9. Watch hygiene — expire overdue watches
     watch_results = _check_watches(store, verbose=verbose)

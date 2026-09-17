@@ -22,6 +22,19 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - The degraded ledger keeps mode 0600 when its size cap rewrites it.
 - A supervisor review allowance that runs out is no longer reported as a
   sustained review failure.
+- The slow-graph archive keeps each node's and edge's whole stored row, and
+  `kin archive restore` puts it back: audience, standing, aka, intent,
+  referent, the clocks, verification and the original provenance survive a
+  round trip (the archive kept 15 of 28 node columns and deleted the rest).
+  Restore no longer turns `prov_who` into a string or mints a person node per
+  character, restores edges with their weight and provenance, keeps an edge
+  to a still-archived node until that node returns (from any archive file),
+  and refuses to overwrite a node that is already live. Archives written
+  before this change restore their preserved columns correctly.
+- Archival no longer fails on a node that has pheromone or co-activation
+  rows, and one node that cannot move is skipped and reported (`kin status`,
+  `kin archive run`) instead of stopping every later cycle; a failed cycle is
+  reported by `kin cron` instead of read as zero.
 
 ### Security
 - Content a `git clone` delivers is no longer authority for the legacy CLI,

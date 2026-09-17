@@ -1017,6 +1017,8 @@ def cmd_status(args):
         archive_duplicate_ids = []
     if not isinstance(archive_duplicate_ids, list):
         archive_duplicate_ids = []
+    from .archive import archive_failures
+    archive_failed_count, archive_failed = archive_failures(store)
 
     cfg = _config(args)
     from .config import read_degraded_events
@@ -1040,6 +1042,11 @@ def cmd_status(args):
                 "count": archive_duplicate_count,
                 "sample_ids": archive_duplicate_ids,
             }
+        if archive_failed_count:
+            stats["archive_failed"] = {
+                "count": archive_failed_count,
+                "samples": [failure.model_dump() for failure in archive_failed],
+            }
         print(_dumps(stats, indent=2))
     else:
         if cfg.active_profile:
@@ -1062,6 +1069,12 @@ def cmd_status(args):
             print(
                 "Archive:   "
                 f"{archive_duplicate_count} duplicate ID(s) need review"
+            )
+        if archive_failed_count:
+            sample = ", ".join(failure.id for failure in archive_failed[:5])
+            print(
+                "Archive:   "
+                f"{archive_failed_count} node(s) could not be archived last cycle ({sample})"
             )
         stored_nodes = stats["stored_nodes"]
         semantic_nodes = stats["semantic_nodes"]
@@ -3837,6 +3850,8 @@ def cmd_cron(args):
         slow = results.get("slow_graph_archived", 0)
         if slow:
             print(f"  Slow graph:        {slow} nodes moved to archive")
+        if results.get("slow_graph_error"):
+            print(f"  Slow graph:        archival failed: {results['slow_graph_error']}")
         w_expired = results.get("watches_expired", 0)
         w_notified = results.get("watches_notified", 0)
         if w_expired or w_notified:
@@ -4008,6 +4023,10 @@ def cmd_archive(args):
     elif action == "run":
         count = archive_cycle(cfg, store, verbose=True)
         print(f"Archived {count} nodes to slow graph.")
+        failed = int(store.get_meta("archive_failed_count") or 0)
+        if failed:
+            print(f"{failed} node(s) could not be archived and stay in the fast graph "
+                  "(`kin status` lists them).")
 
     store.close()
 

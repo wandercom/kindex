@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 
 import pytest
@@ -178,8 +179,12 @@ class TestArchiveNodes:
         archive.commit()
         archive.close()
 
-        with pytest.raises(sqlite3.IntegrityError, match="injected archive"):
-            archive_nodes(cfg, store, ["atomic-node"])
+        # The failure is recorded and the batch moves on; nothing half-moves.
+        assert archive_nodes(cfg, store, ["atomic-node"]) == 0
+        failed = json.loads(store.get_meta("archive_failed_ids"))
+        assert failed[0]["id"] == "atomic-node"
+        assert "injected archive" in failed[0]["error"]
+        assert store.get_meta("archive_failed_count") == "1"
 
         assert store.get_node("atomic-node") is not None
         assert store.edges_from("atomic-node")
