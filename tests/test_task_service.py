@@ -33,7 +33,7 @@ def create(store, scope, operation_id="create-a", **fields):
 def test_reopen_and_terminal_claim_lifecycle(store):
     task_id = tasks.create_task(store, "work")
     tasks.claim_task(store, task_id, "worker")
-    done = tasks.update_task(store, task_id, task_status="done")
+    done = tasks.update_task(store, task_id, actor="worker", task_status="done")
     assert "claim" not in done["extra"]
     assert done["status"] == "archived"
     # Repeated completion preserves completion instant and version.

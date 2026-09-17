@@ -276,6 +276,8 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
                     "error": safe_error(e)}
         try:
             r = _check_reminders(cfg, store, verbose=verbose)
+            if getattr(cfg, "profile_source", None) == "project":
+                _project_housekeeping(store)
             try:
                 raw = _json.loads(store.get_meta("project_graph_dirs") or "{}")
                 if isinstance(raw, dict):
@@ -314,8 +316,11 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
             cfg.profile_source = "legacy"
             results.append(_one(cfg, None))
 
-    # Project-local .kin graphs, deduped against the dirs already swept.
-    from .project_store import tracked_store_refusal
+    # Project-local .kin graphs, deduped against the dirs already swept:
+    # those a scan found and those the modern lane opened.
+    from .project_store import registered_project_graphs, tracked_store_refusal
+    for root, data_dir in registered_project_graphs().items():
+        project_registry.setdefault(root, data_dir)
     for project_root, data_dir in sorted(project_registry.items()):
         if not Path(data_dir).exists():
             continue  # project deleted since registration — ages out on scan
@@ -337,6 +342,21 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
             continue
         results.append(_one(cfg, project_root))
     return results
+
+
+def _project_housekeeping(store: "Store") -> None:
+    """The local upkeep a project graph gets beside its reminders: expired
+    capture candidates, nodes, task claims and locks. No ingest, LLM or
+    embedding work; each step is isolated."""
+    from .locks import cleanup_expired_locks
+    from .tasks import cleanup_expired_claims
+
+    for step in (store.prune_capture_candidates, lambda: _expire_nodes(store),
+                 lambda: cleanup_expired_claims(store), lambda: cleanup_expired_locks(store)):
+        try:
+            step()
+        except Exception:
+            continue
 
 
 def cron_run_all(base_config: "Config", verbose: bool = False) -> list[dict]:

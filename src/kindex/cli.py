@@ -101,6 +101,12 @@ def _hook_graph(args):
     return Store(_config(args), migrate=False)
 
 
+def _task_actor(args) -> str:
+    """Who a task command acts as: --agent, else the resolved agent id."""
+    from .config import resolve_agent_id
+    return getattr(args, "agent", None) or resolve_agent_id(_config(args))
+
+
 def _ledger(args):
     from .budget import BudgetLedger
     cfg = _config(args)
@@ -4335,7 +4341,8 @@ def _cmd_task(args, store):
         task_id = getattr(args, "task_id", None)
         if not task_id:
             raise ValueError("Usage: kin task done --task-id <id>")
-        result = complete_task(store, task_id)
+        result = complete_task(store, task_id, actor=_task_actor(args),
+                               force=getattr(args, "force", False))
         if result:
             print(f"Completed: {result['title']}")
         else:
@@ -4346,7 +4353,8 @@ def _cmd_task(args, store):
         task_id = getattr(args, "task_id", None)
         if not task_id:
             raise ValueError("Usage: kin task cancel --task-id <id>")
-        result = cancel_task(store, task_id)
+        result = cancel_task(store, task_id, actor=_task_actor(args),
+                             force=getattr(args, "force", False))
         if result:
             print(f"Cancelled: {result['title']}")
         else:
@@ -4373,7 +4381,8 @@ def _cmd_task(args, store):
                 fields[key] = getattr(args, key)
         if getattr(args, "title_words", None):
             fields["title"] = " ".join(args.title_words)
-        result = update_task(store, task_id, **fields)
+        result = update_task(store, task_id, actor=_task_actor(args),
+                             force=getattr(args, "force", False), **fields)
         if result:
             print(f"Updated: {result['title']}")
         else:
@@ -7737,10 +7746,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--session-id", help="Host session ID for contextual reminders")
     s.add_argument("--content", help="Task description (add/update)")
     s.add_argument("--expected-version", type=int, help="Refuse update if the task version changed")
-    s.add_argument("--agent", help="Agent name for claim/release")
+    s.add_argument("--agent", help="Agent acting (claim, release, done, cancel, update; default: resolved agent id)")
     s.add_argument("--ttl", type=int, default=120, help="Claim TTL in minutes")
     s.add_argument("--note", help="Claim note")
-    s.add_argument("--force", action="store_true", help="Force claim/release takeover")
+    s.add_argument("--force", action="store_true", help="Override another agent's live claim")
     _common(s)
     s.set_defaults(func=cmd_task)
 

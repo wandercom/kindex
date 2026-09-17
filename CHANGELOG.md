@@ -4,6 +4,18 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- A task claim is held by a host session (`<agent>:<session_id>` on the
+  modern lane, with `%` and `:` escaped in the agent): completing,
+  cancelling or reopening a task another agent or session has a live claim
+  on is refused (`task_claimed`) unless forced (`--force`, `force=true`),
+  and the holder may refresh its own claim.
+  `task_done`, `task_update` and `task_cancel` take `agent` and `force`.
+- Publishing refuses a release tag that does not name the committed project
+  version (`scripts/check-release-version.py`), instead of rendering the tag
+  into `pyproject.toml` and shipping a wheel whose own version and changelog
+  named the previous release.
+
 ### Fixed
 - Host hooks (`prime --for hook`, `compact-hook`, `prompt-check`,
   `stop-guard`, `attention-hook`) never run a schema migration: a pending
@@ -17,8 +29,26 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   archived one or a reminder is counted without its title. Only the scan
   for titles is capped; the per-action totals count every entry.
 - The prime summarises a reminder's action (mode, the size of its command
-  and instructions, a digest over both and a preview marked when cut) instead of showing a truncated command beside a
-  call to run it, and names the real commands (`--reminder-id`).
+  and instructions, a digest over both and a preview marked when cut)
+  instead of showing a truncated command beside a call to run it, and names
+  the real commands (`--reminder-id`).
+- `task_execute` answers scope, store and policy refusals, database
+  errors and Git timeouts as `{ok: false, error}` instead of raising them as
+  tool errors.
+- Scheduled maintenance finds repo-local graphs the modern lane opened (and
+  any `.kin/local` graph a scan walks, choosing the populated layout as the
+  store does), fires their reminders, and prunes their expired candidates,
+  nodes, claims and locks. The registry honours `KIN_NO_SCHEDULER_WRITES`
+  (`1`, `true`, `yes`) and locks portably.
+- A session enqueued for reinforcement while a drain is grading is kept, and
+  two drains never pay to grade the same conversation. A drain leases its
+  jobs in the queue, so a drain that dies loses none; a retried job goes
+  behind the rest, and one whose trace never fits the per-call estimate is
+  set aside after three attempts (`reinforce.dead_letter`).
+- A weight-decay run no longer rewrites a snapshot row for every node and
+  edge: a suppressed row's snapshot is created once and kept until the row is
+  written, and snapshots of deleted rows are removed. A row written since its
+  snapshot decays from the last run.
 
 ### Security
 - Stored graph text in the prime and in context blocks is marked as data,
