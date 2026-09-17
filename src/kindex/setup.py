@@ -934,8 +934,11 @@ def uninstall_cursor_mcp(config: "Config", dry_run: bool = False) -> list[str]:
 def install_launchd(config: "Config", dry_run: bool = False) -> list[str]:
     """Install macOS launchd plist for kin cron.
 
-    Creates ~/Library/LaunchAgents/com.kindex.cron.plist
-    Uses config.reminders.check_interval for the initial interval.
+    Creates ~/Library/LaunchAgents/com.kindex.cron.plist. The interval is
+    the one the adaptive repack last applied, as a crontab re-install keeps
+    its schedule; config.reminders.check_interval before any repack. Writing
+    check_interval over a repacked interval left the plist and the recorded
+    interval disagreeing, and the repack never corrected it.
     """
     refused = _binding_refused()
     if refused:
@@ -945,7 +948,8 @@ def install_launchd(config: "Config", dry_run: bool = False) -> list[str]:
     launch_agents = Path.home() / "Library" / "LaunchAgents"
     plist_path = launch_agents / "com.kindex.cron.plist"
     log_dir = config.scheduler_log_path
-    interval = config.reminders.check_interval
+    from .scheduling import applied_interval
+    interval = applied_interval(config) or config.reminders.check_interval
 
     plist_content = _launchd_plist(
         label="com.kindex.cron",

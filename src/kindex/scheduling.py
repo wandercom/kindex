@@ -182,6 +182,72 @@ def repack_schedule(store: "Store", config: "Config") -> dict:
     return result
 
 
+def applied_interval(config: "Config") -> int | None:
+    """The interval last applied to the machine scheduler, if one was."""
+    state = _read_state(_scheduler_state_path(config))
+    return state.applied if state.applied and state.applied > 0 else None
+
+
+CRON_LABEL = "com.kindex.cron"
+# One helper at a time holds "$4" (a directory, so taking it is atomic). It
+# waits, at most an hour (the maintenance cadence), until launchd reports the
+# job not running, then reloads it, or only unloads it when "$3" is
+# "unload". A reload request that finds the lock held exits: the holder
+# re-reads the plist after releasing the lock and reloads again if it changed
+# since its own load, so the newest interval is the one launchd runs. Two
+# helpers reloading side by side unloaded the run the other had just started.
+RELOAD_WHEN_IDLE = r"""
+label="$1"; plist="$2"; mode="$3"; lock="$4"
+acquire() {
+  mkdir "$lock" 2>/dev/null && return 0
+  # A lock older than the longest wait belongs to a helper that died.
+  [ -n "$(find "$lock" -maxdepth 0 -mmin +90 2>/dev/null)" ] || return 1
+  rm -rf "$lock" && mkdir "$lock" 2>/dev/null
+}
+acquire || exit 0
+while :; do
+  n=0
+  while launchctl list "$label" 2>/dev/null | grep -q '"PID" = '; do
+    n=$((n + 1)); [ "$n" -ge 3600 ] && break; sleep 1
+  done
+  loaded=$(cksum < "$plist" 2>/dev/null)
+  launchctl unload "$plist" >/dev/null 2>&1
+  if [ "$mode" = unload ]; then rmdir "$lock" 2>/dev/null; exit 0; fi
+  launchctl load "$plist" >/dev/null 2>&1
+  rmdir "$lock" 2>/dev/null
+  [ "$(cksum < "$plist" 2>/dev/null)" = "$loaded" ] && exit 0
+  acquire || exit 0
+done
+"""
+
+
+def _reload_lock(config: "Config") -> Path:
+    path = _scheduler_state_path(config).with_name("launchd-reload.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _reload_when_idle(plist_path: Path, config: "Config", mode: str = "reload") -> None:
+    """Reload (or unload) the maintenance job once it is not running.
+
+    The maintenance run is this job, and it repacks at the end of the run:
+    ``launchctl unload`` from inside it ended the run before the ``load``
+    that followed, so the job was left unloaded, the applied interval was
+    never recorded, and every later load did both again. A helper in its own
+    session is not part of the job's process group, so it outlives the run
+    and reloads the job once launchd reports it idle.
+    """
+    subprocess.Popen(
+        ["/bin/sh", "-c", RELOAD_WHEN_IDLE, "kindex-reload",
+         CRON_LABEL, str(plist_path), mode, str(_reload_lock(config))],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
 def scheduler_writes_disabled() -> bool:
     """``KIN_NO_SCHEDULER_WRITES`` set to 1, true or yes."""
     import os
@@ -195,7 +261,6 @@ def apply_schedule(interval: int, config: "Config") -> dict:
     ``KIN_NO_SCHEDULER_WRITES=1`` leaves the machine scheduler untouched
     (test suites and sandboxes, whose child processes inherit it).
     """
-    import os
     from .config import _bound_root
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
@@ -217,12 +282,8 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
         return {"action": "skipped", "reason": "no plist installed"}
 
     if interval == 0:
-        # Disable: unload the plist
-        subprocess.run(
-            ["launchctl", "unload", str(plist_path)],
-            capture_output=True, timeout=5,
-        )
-        return {"action": "disabled"}
+        _reload_when_idle(plist_path, config, mode="unload")
+        return {"action": "disabled", "reload": "when-idle"}
 
     # Read current plist, update the interval
     content = plist_path.read_text()
@@ -237,17 +298,8 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
         return {"action": "skipped", "reason": "plist format unrecognized"}
 
     plist_path.write_text(new_content)
-
-    # Reload: unload + load
-    subprocess.run(
-        ["launchctl", "unload", str(plist_path)],
-        capture_output=True, timeout=5,
-    )
-    subprocess.run(
-        ["launchctl", "load", str(plist_path)],
-        capture_output=True, timeout=5,
-    )
-    return {"action": "updated"}
+    _reload_when_idle(plist_path, config)
+    return {"action": "updated", "reload": "when-idle"}
 
 
 def _apply_crontab(interval: int, config: "Config") -> dict:

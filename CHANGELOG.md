@@ -11,6 +11,17 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   own review sessions; Kinbase's Antigravity classifier runs were reported
   as unscoped host activity (`observation_unavailable`).
 
+### Fixed
+- On macOS the maintenance job no longer unloads itself. `kin cron` repacks
+  its interval at the end of each run, and the synchronous `launchctl
+  unload` ended that run before the `load` that followed, so the job stayed
+  unloaded and the applied interval was never recorded; every `kin
+  setup-cron` repeated it. The reload now runs from a detached helper once
+  launchd reports the job idle.
+- `kin setup-cron` keeps the interval the adaptive repack last applied, as a
+  crontab re-install already did, instead of writing `check_interval` over
+  it.
+
 ## [0.43.1] - 2026-09-17
 
 ### Fixed
