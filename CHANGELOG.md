@@ -4,7 +4,11 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
-## [0.41.0] - 2026-09-17
+## [0.41.1] - 2026-09-17
+
+0.41.0 was tagged but never published (its publish workflow failed on a
+timing-sensitive test, now made independent of runner load); 0.41.1
+supersedes it.
 
 ### Fixed
 - The Stop/PreCompact capture hook extracts only transcript text it has not
