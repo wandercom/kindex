@@ -63,7 +63,7 @@ def project_scope(scope: dict) -> dict:
             "agent": scope.get("agent", "claude"), **({"profile": scope["profile"]} if scope.get("profile") else {})}
 
 
-def open_project_store(scope: dict):
+def open_project_store(scope: dict, *, migrate: bool = True):
     """Open only .kin/local in the actual worktree, never clone-configured paths.
 
     Shared .kin artifacts are evidence, not configuration authority. Existing
@@ -89,7 +89,7 @@ def open_project_store(scope: dict):
     config = trusted_supervisor_config(root, str(project_data_path(root)))
     config._project_path = root
     # The modern codebase lane is separate from legacy profile selection.
-    return Store(config)
+    return Store(config, migrate=migrate)
 
 
 def _signet(command: str, payload: dict, *, timeout: float = 5) -> dict | None:

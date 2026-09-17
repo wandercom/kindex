@@ -1453,6 +1453,15 @@ class Store:
 
     # ── Temporal queries ───────────────────────────────────────────────
 
+    def activity_counts_since(self, since_iso: str) -> dict[str, int]:
+        """Activity entries since a timestamp, counted per action."""
+        try:
+            return {row[0]: row[1] for row in self.conn.execute(
+                "SELECT action, COUNT(*) FROM activity_log WHERE timestamp >= ? "
+                "GROUP BY action ORDER BY COUNT(*) DESC, action", (since_iso,))}
+        except sqlite3.Error:
+            return {}
+
     def activity_since(self, since_iso: str, action: str | None = None,
                        limit: int | None = None) -> list[dict]:
         """Get activity log entries since a timestamp, optionally filtered by action type."""

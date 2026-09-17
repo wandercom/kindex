@@ -7,6 +7,7 @@ inbox writes, and CLAUDE.md directive generation.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import tempfile
 import uuid
@@ -235,6 +236,8 @@ def prime_context(
     try:
         yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
         recent = redact(store.activity_since(yesterday, limit=ACTIVITY_SCAN_LIMIT))
+        # Totals are counted in full; only the rows scanned for titles are capped.
+        totals = store.activity_counts_since(yesterday)
         if recent:
             lines.append("### Recent activity (last 24h)")
             # Group by action. Notable titles for nodes scoped to a different client
@@ -245,11 +248,12 @@ def prime_context(
             # that would otherwise echo its title back into context, and a
             # reminder (not a node) may belong to another conversation.
             scoping = bool(adapter) and adapter != "plain"
-            action_counts: dict[str, int] = {}
+            action_counts: dict[str, int] = dict(totals)
             notable: list[str] = []
             for entry in recent:
                 action = entry.get("action", "unknown")
-                action_counts[action] = action_counts.get(action, 0) + 1
+                if not totals:
+                    action_counts[action] = action_counts.get(action, 0) + 1
                 if len(notable) >= 5:
                     continue
                 try:
@@ -271,7 +275,8 @@ def prime_context(
                 except Exception:
                     continue
 
-            summary_parts = [f"{count} {action}" for action, count in action_counts.items()]
+            summary_parts = [f"{count} {graph_text(action, 40, single_line=True)}"
+                             for action, count in action_counts.items()]
             lines.append(f"- Activity: {', '.join(summary_parts)}")
             for n in notable[:3]:
                 lines.append(f"  - {n}")
@@ -515,13 +520,21 @@ def reminder_action_summary(extra: dict) -> str:
     from .retrieve import graph_text
 
     mode = resolve_mode(extra)
-    full = extra.get("action_instructions") if mode == "claude" else None
-    full = full or extra.get("action_command") or extra.get("action_instructions") or ""
-    full = str(full)
-    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:12]
-    preview = graph_text(full, ACTION_PREVIEW_CHARS, single_line=True).replace("`", "\u02cb")
-    cut = " …(truncated)" if len(" ".join(full.split())) > ACTION_PREVIEW_CHARS else ""
-    return (f"Action ({mode}, {len(full)} chars, sha256:{digest}): "
+    command = str(extra.get("action_command") or "")
+    instructions = str(extra.get("action_instructions") or "")
+    # The digest covers everything exec may use, so a changed command under
+    # unchanged instructions (or the reverse) changes it too.
+    digest = hashlib.sha256(
+        json.dumps({"mode": mode, "command": command, "instructions": instructions},
+                   sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    shown = instructions if (mode == "claude" and instructions) else (command or instructions)
+    sizes = ", ".join(
+        f"{name} {len(value)} chars"
+        for name, value in (("instructions", instructions), ("command", command)) if value
+    )
+    preview = graph_text(shown, ACTION_PREVIEW_CHARS, single_line=True).replace("`", "\u02cb")
+    cut = " …(truncated)" if len(" ".join(shown.split())) > ACTION_PREVIEW_CHARS else ""
+    return (f"Action ({mode}, {sizes}, sha256:{digest}): "
             f"{preview}{cut}")
 
 

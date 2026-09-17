@@ -773,11 +773,31 @@ def graph_text(value: object, limit: int | None = None, *, single_line: bool = F
     if limit is not None and len(text) > limit:
         text = text[:limit]
     text = (text.replace("<", "\u2039").replace(">", "\u203a")
-            .replace("```", "\u02cb\u02cb\u02cb"))
-    return "\n".join(
-        line.replace("#", "\uff03", 1) if line.lstrip().startswith("#") else line
-        for line in text.split("\n")
-    )
+            .replace("```", "\u02cb\u02cb\u02cb").replace("~~~", "\u02dc\u02dc\u02dc"))
+    return "\n".join(_defuse_markdown_line(line) for line in text.split("\n"))
+
+
+_SETEXT_MARKS = {"=": "\uff1d", "-": "\u2010"}
+
+
+def _defuse_markdown_line(line: str) -> str:
+    """A line that would open an ATX heading, or underline the line above
+    into a Setext heading, keeps its text but loses the markup."""
+    stripped = line.strip()
+    if line.lstrip().startswith("#"):
+        return line.replace("#", "\uff03", 1)
+    if stripped and stripped[0] in _SETEXT_MARKS and set(stripped) == {stripped[0]}:
+        return line.replace(stripped[0], _SETEXT_MARKS[stripped[0]], 1)
+    return line
+
+
+def _graph_field(value):
+    if isinstance(value, str):
+        return graph_text(value, single_line=True)
+    if isinstance(value, list):
+        return [graph_text(item, single_line=True) if isinstance(item, str) else item
+                for item in value]
+    return value
 
 
 def _graph_node(node: dict) -> dict:
@@ -790,15 +810,22 @@ def _graph_node(node: dict) -> dict:
             safe[key] = graph_text(safe[key], single_line=True)
     if safe.get("content"):
         safe["content"] = graph_text(safe["content"])
-    if isinstance(safe.get("aka"), list):
-        safe["aka"] = [graph_text(item, single_line=True) for item in safe["aka"]]
+    for key in ("aka", "domains", "tags", "prov_source", "prov_when",
+                "prov_activity", "prov_who"):
+        if key in safe:
+            safe[key] = _graph_field(safe[key])
     if isinstance(safe.get("edges_out"), list):
         safe["edges_out"] = [
-            {**edge, "to_title": graph_text(edge.get("to_title") or edge.get("to_id"),
-                                            single_line=True)}
+            {**edge,
+             "to_title": graph_text(edge.get("to_title") or edge.get("to_id"), single_line=True),
+             "type": _graph_field(edge.get("type"))}
             if isinstance(edge, dict) else edge
             for edge in safe["edges_out"]
         ]
+    # Operational fields render beside the title (action, trigger, owner,
+    # expires, scope); nested structures are not rendered and stay as stored.
+    if isinstance(safe.get("extra"), dict):
+        safe["extra"] = {key: _graph_field(value) for key, value in safe["extra"].items()}
     return safe
 
 
