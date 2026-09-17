@@ -57,6 +57,56 @@ PHEROMONE_WEIGHT_META = "pheromone.effective_weight"
 
 # meta key holding the pending session-end grading queue (enqueue cheap, drain in cron)
 REINFORCE_QUEUE_META = "reinforce.queue"
+# meta key prefix marking a conversation being graded, and how long a marker
+# from a process that died holds the conversation
+REINFORCE_INFLIGHT_PREFIX = "reinforce.inflight."
+REINFORCE_INFLIGHT_SECONDS = 1800
+
+
+def _read_queue(conn) -> list[dict]:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?",
+                       (REINFORCE_QUEUE_META,)).fetchone()
+    try:
+        queue = json.loads(row[0]) if row and row[0] else []
+    except (TypeError, ValueError):
+        return []
+    return [job for job in queue if isinstance(job, dict)] if isinstance(queue, list) else []
+
+
+def _write_queue(conn, queue: list[dict]) -> None:
+    from .privacy import redact_serialized
+
+    # Redacted as Store.set_meta redacts: a trace may quote a credential.
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                 (REINFORCE_QUEUE_META, redact_serialized(json.dumps(queue))))
+
+
+def _claim_inflight(store: "Store", conversation_id: str) -> bool:
+    """Mark a conversation as being graded, unless another grader holds it."""
+    import time
+
+    from .tasks import transaction
+
+    key = REINFORCE_INFLIGHT_PREFIX + conversation_id
+    with transaction(store) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        try:
+            held = row is not None and time.time() - float(row[0]) < REINFORCE_INFLIGHT_SECONDS
+        except (TypeError, ValueError):
+            held = False
+        if held:
+            return False
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     (key, str(time.time())))
+    return True
+
+
+def _release_inflight(store: "Store", conversation_id: str) -> None:
+    from .tasks import transaction
+
+    with transaction(store) as conn:
+        conn.execute("DELETE FROM meta WHERE key = ?",
+                     (REINFORCE_INFLIGHT_PREFIX + conversation_id,))
 
 
 def enqueue_reinforce(store: "Store", conversation_id: str,
@@ -70,23 +120,22 @@ def enqueue_reinforce(store: "Store", conversation_id: str,
     """
     if not conversation_id:
         return False
+    from .tasks import transaction
+
+    # One write transaction: a drain rewriting the queue meanwhile cannot
+    # erase this entry, nor this write erase the drain's.
     try:
-        raw = store.get_meta(REINFORCE_QUEUE_META)
-        queue = json.loads(raw) if raw else []
-        if not isinstance(queue, list):
-            queue = []
-    except Exception:
-        queue = []
-    prior = next((j for j in queue if j.get("conversation_id") == conversation_id), {})
-    queue = [j for j in queue if j.get("conversation_id") != conversation_id]
-    queue.append({
-        "conversation_id": conversation_id,
-        "transcript_path": transcript_path or prior.get("transcript_path", ""),
-        "trace": trace or prior.get("trace", ""),
-        "at": _now(),
-    })
-    try:
-        store.set_meta(REINFORCE_QUEUE_META, json.dumps(queue[-max_queue:]))
+        with transaction(store) as conn:
+            queue = _read_queue(conn)
+            prior = next((j for j in queue if j.get("conversation_id") == conversation_id), {})
+            queue = [j for j in queue if j.get("conversation_id") != conversation_id]
+            queue.append({
+                "conversation_id": conversation_id,
+                "transcript_path": transcript_path or prior.get("transcript_path", ""),
+                "trace": trace or prior.get("trace", ""),
+                "at": _now(),
+            })
+            _write_queue(conn, queue[-max_queue:])
         return True
     except Exception:
         return False
@@ -115,23 +164,26 @@ def drain_reinforce_queue(store: "Store", config: Config, *, max_jobs: int = 5,
     """
     if not config.attention.reinforce_enabled:
         return {"status": "disabled", "graded": 0, "pending": 0}
+    from .tasks import transaction
+
+    # Claim this drain's jobs out of the queue up front, in one write
+    # transaction. The queue used to be read, graded for minutes, then
+    # overwritten, dropping every session a Stop hook enqueued meanwhile.
     try:
-        raw = store.get_meta(REINFORCE_QUEUE_META)
-        queue = json.loads(raw) if raw else []
-        if not isinstance(queue, list):
-            queue = []
+        with transaction(store) as conn:
+            queue = _read_queue(conn)
+            claimed, rest = queue[:max_jobs], queue[max_jobs:]
+            if claimed:
+                _write_queue(conn, rest)
     except Exception:
-        queue = []
-    if not queue:
+        return {"status": "unavailable", "graded": 0, "pending": 0}
+    if not claimed:
         return {"status": "empty", "graded": 0, "pending": 0}
 
-    remaining: list[dict] = []
+    retry: list[dict] = []
     graded = 0
     results: list[dict] = []
-    for job in queue:
-        if graded >= max_jobs:
-            remaining.append(job)
-            continue
+    for job in claimed:
         conv = job.get("conversation_id")
         trace = _bounded_trace(job.get("transcript_path", ""), max_trace_chars) \
             or job.get("trace", "")
@@ -140,17 +192,24 @@ def drain_reinforce_queue(store: "Store", config: Config, *, max_jobs: int = 5,
         res = reinforce_session(store, config, conv, trace, client=client)
         status = res.get("status")
         if status in ("over_global_budget", "llm_unavailable", "estimate_exceeds_budget"):
-            remaining.append(job)  # transient — retry next cron
+            retry.append(job)  # transient — retry next cron
             continue
         if status == "ok":
             graded += 1
         results.append({"conversation_id": conv, "status": status})
 
     try:
-        store.set_meta(REINFORCE_QUEUE_META, json.dumps(remaining))
+        with transaction(store) as conn:
+            queue = _read_queue(conn)
+            queued = {job.get("conversation_id") for job in queue}
+            # A retried job goes back ahead of what arrived meanwhile, unless
+            # its conversation was enqueued again (the newer entry wins).
+            queue = [job for job in retry if job.get("conversation_id") not in queued] + queue
+            _write_queue(conn, queue)
+            pending = len(queue)
     except Exception:
-        pass
-    return {"status": "ok", "graded": graded, "pending": len(remaining), "results": results}
+        pending = len(retry)
+    return {"status": "ok", "graded": graded, "pending": pending, "results": results}
 
 
 def learned_pheromone_weight(store: "Store") -> float:
@@ -323,6 +382,24 @@ def reinforce_session(
     if client is None:
         return {"status": "llm_unavailable", "outcomes": []}
 
+    # Only one grader pays for a conversation: the idempotency stamp above is
+    # written after the LLM call, so two drains both passed it.
+    if not _claim_inflight(store, conversation_id):
+        return {"status": "in_flight", "outcomes": []}
+    try:
+        return _reinforce_claimed(store, config, conversation_id, trace, injected,
+                                  state, client, ledger)
+    finally:
+        _release_inflight(store, conversation_id)
+
+
+def _reinforce_claimed(store, config, conversation_id, trace, injected, state,
+                       client, ledger) -> dict:
+    """reinforce_session's paid part, run while the conversation is claimed."""
+    # A grader that finished while this one waited for the claim leaves the
+    # stamp behind it.
+    if _load_state(store, conversation_id).get("reinforced_at"):
+        return {"status": "already_reinforced", "outcomes": []}
     prompt = redact_text(build_reinforce_prompt(
         redact_text(trace), injected, config.attention.max_context_chars * 3))
 

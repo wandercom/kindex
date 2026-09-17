@@ -86,8 +86,14 @@ def open_project_store(scope: dict):
         if target.is_symlink() or (target.exists() and target.stat().st_nlink > 1):
             raise ValueError("Refusing linked repo-local Kindex database")
     ensure_local_ignored(local)
-    config = trusted_supervisor_config(root, str(project_data_path(root)))
+    data_dir = project_data_path(root)
+    config = trusted_supervisor_config(root, str(data_dir))
     config._project_path = root
+    # Scheduled maintenance finds a repo-local graph only through a registry;
+    # one opened here (no data_dir in any .kin/config) was never swept, so its
+    # due tasks and reminders never fired.
+    from .project_store import register_project_graph
+    register_project_graph(root, data_dir)
     # The modern codebase lane is separate from legacy profile selection.
     return Store(config)
 

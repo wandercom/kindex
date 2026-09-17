@@ -62,6 +62,10 @@ def hermetic_scheduler(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduling, "apply_schedule", record)
     monkeypatch.setattr(scheduling, "_scheduler_state_path",
                         lambda config: tmp_path / "scheduler" / "scheduler-state.json")
+    # The repo-local graph registry lives in the same state directory.
+    from kindex import project_store
+    monkeypatch.setattr(project_store, "project_graph_registry_path",
+                        lambda: tmp_path / "scheduler" / "project-graphs.json")
     return applied
 
 

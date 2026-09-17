@@ -20,9 +20,10 @@ MUTATIONS = frozenset({"create", "update", "complete", "cancel", "claim", "relea
 _FIELDS = {"title", "content", "status", "priority", "due", "owner", "active_form", "effort", "dependencies"}
 _ARGUMENTS = {
     "create": _FIELDS | {"scope", "link_to", "domains", "external_id", "namespace"},
-    "update": _FIELDS | {"id", "expected_version"},
+    "update": _FIELDS | {"id", "expected_version", "force"},
     "get": {"id"}, "list": {"status", "limit", "cursor"},
-    "complete": {"id", "expected_version"}, "cancel": {"id", "expected_version"},
+    "complete": {"id", "expected_version", "force"},
+    "cancel": {"id", "expected_version", "force"},
     "claim": {"id", "expected_version", "ttl_minutes", "note", "force"},
     "release": {"id", "expected_version", "force"},
     "reconcile": {"namespace", "items", "cancel_missing"},
@@ -33,6 +34,15 @@ class TaskServiceError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+def claim_holder(scope: dict) -> str:
+    """The identity a host session claims tasks as: its agent and its session.
+    A bare agent name ("claude") made every session everywhere one holder,
+    free to release or refresh each other's claims."""
+    agent = _identifier(scope.get("agent"), "scope.agent")
+    session = scope.get("session_id")
+    return f"{agent}:{session}" if isinstance(session, str) and session else agent
 
 
 def _json(value: Any) -> str:
@@ -210,7 +220,8 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
             owner=args.get("owner", ""), dependencies=args.get("dependencies", []),
             external_id=args.get("external_id", ""), namespace=args.get("namespace", ""))
         if args.get("active_form") or args.get("status", "open") != "open":
-            tasks.update_task(store, task_id, task_status=args.get("status", "open"),
+            tasks.update_task(store, task_id, actor=claim_holder(scope),
+                              task_status=args.get("status", "open"),
                               active_form=args.get("active_form", ""))
         return {"task": task_record(tasks.get_task(store, task_id))}
     node = _get(store, args.get("id"), scope)
@@ -221,11 +232,14 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
         fields = {key: args[key] for key in ("title", "content", "priority", "due", "owner", "active_form", "effort", "dependencies") if key in args}
         if "status" in args:
             fields["task_status"] = args["status"]
-        result = tasks.update_task(store, task_id, **fields)
+        result = tasks.update_task(store, task_id, actor=claim_holder(scope),
+                                   force=args.get("force") is True, **fields)
     elif operation in ("complete", "cancel"):
-        result = tasks.update_task(store, task_id, task_status="done" if operation == "complete" else "cancelled")
+        result = tasks.update_task(store, task_id, actor=claim_holder(scope),
+                                   force=args.get("force") is True,
+                                   task_status="done" if operation == "complete" else "cancelled")
     elif operation in ("claim", "release"):
-        agent = _identifier(scope.get("agent"), "scope.agent")
+        agent = claim_holder(scope)
         if operation == "claim":
             ttl = args.get("ttl_minutes", 120)
             if type(ttl) is not int or ttl <= 0:
@@ -273,7 +287,8 @@ def _reconcile(store, args: dict, scope: dict) -> dict:
     if args.get("cancel_missing") is True:
         for external_id, node in owned.items():
             if external_id not in external_ids and node["extra"].get("task_status") in ("open", "in_progress"):
-                cancelled.append(task_record(tasks.cancel_task(store, node["id"])))
+                cancelled.append(task_record(
+                    tasks.cancel_task(store, node["id"], actor=claim_holder(scope))))
     return {"tasks": results, "cancelled": cancelled, "namespace": namespace}
 
 
@@ -328,7 +343,8 @@ def execute(store, operation: str, args: dict, scope: dict) -> dict:
                 "error": {"code": exc.code, "message": safe_error(exc)}}
     except (ValueError, TypeError, KeyError) as exc:
         return {"ok": False, "operation_id": operation_id,
-                "error": {"code": "invalid_argument", "message": safe_error(exc)}}
+                "error": {"code": getattr(exc, "code", "invalid_argument"),
+                          "message": safe_error(exc)}}
     except sqlite3.Error:
         return {"ok": False, "operation_id": operation_id,
                 "error": {"code": "unavailable", "message": "Durable task storage is unavailable; no task fallback was created"}}

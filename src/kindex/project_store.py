@@ -159,6 +159,66 @@ def ensure_local_ignored(data_path: Path) -> None:
         os.close(fd)
 
 
+def project_graph_registry_path() -> Path:
+    """The machine's record of repo-local graphs opened outside any profile,
+    beside the scheduler state."""
+    base = os.environ.get("XDG_STATE_HOME", "").strip()
+    state = Path(base) if base else Path.home() / ".local" / "state"
+    return state / "kindex" / "project-graphs.json"
+
+
+def existing_local_store(root: Path) -> Path | None:
+    """The repo-local graph directory under ``root`` that holds a database."""
+    local = root / ".kin" / "local"
+    for directory in (local / "kindex", local):
+        if any((directory / name).is_file() for name in ("kindex.db", "conv.db")):
+            return directory
+    return None
+
+
+def register_project_graph(root: Path, data_dir: Path) -> None:
+    """Record a repo-local graph so scheduled maintenance can find it.
+    Best effort: an unwritable state directory never blocks the store."""
+    import fcntl
+    import json
+    import tempfile
+
+    # Whoever keeps kindex away from the machine's scheduler (a test run)
+    # keeps it away from the scheduler's registry too.
+    if os.environ.get("KIN_NO_SCHEDULER_WRITES") == "1":
+        return
+    path = project_graph_registry_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path.with_name(path.name + ".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                current = json.loads(path.read_text()) if path.exists() else {}
+            except (OSError, ValueError):
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            if current.get(str(root)) == str(data_dir):
+                return
+            current[str(root)] = str(data_dir)
+            with tempfile.NamedTemporaryFile(
+                    "w", dir=path.parent, delete=False, prefix=".project-graphs.") as out:
+                json.dump(current, out, sort_keys=True)
+            os.replace(out.name, path)
+    except OSError:
+        return
+
+
+def registered_project_graphs() -> dict[str, str]:
+    import json
+
+    try:
+        current = json.loads(project_graph_registry_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in current.items()} if isinstance(current, dict) else {}
+
+
 def project_data_path(root: Path) -> Path:
     root = root.resolve()
     local = root / ".kin" / "local"

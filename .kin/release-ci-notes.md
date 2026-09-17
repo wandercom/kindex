@@ -29,13 +29,15 @@ both Claude plugin manifests, MCP registry metadata, server card, public badges,
 and changelog aligned. The failed `v0.36.1` tag contains `0.36.0` metadata and
 must not be reused or moved.
 
-## Package version rendering from release tags
+## Release tags must name the committed version
 
-For PyPI artifact builds, the pushed release tag is the source of truth for the
-package version. `Publish to PyPI` accepts numeric three-part tags in the form
-`vX.Y.Z`; before `python -m build`, it runs
-`scripts/render-release-version.py "$GITHUB_REF_NAME" pyproject.toml`. The script
-strips the leading `v` and rewrites only the checked-out `pyproject.toml` used by
-that build, so `v0.1.2` produces `kindex-0.1.2-*` artifacts even if the committed
-development version is older. Do not retry an already-published tag: publish a
-new patch tag instead.
+The committed release surfaces are the release: `pyproject.toml`,
+`kindex.__version__`, the registry and plugin manifests and the changelog
+section, all moved together by `scripts/sync-version.sh`. `Publish to PyPI`
+accepts numeric three-part tags in the form `vX.Y.Z` and, before
+`python -m build`, runs
+`scripts/check-release-version.py "$GITHUB_REF_NAME" pyproject.toml`, which
+refuses a tag that does not name the committed project version. (The tag used
+to be rendered into `pyproject.toml` at build time, which published wheels whose
+own `__version__` and changelog named the previous release.) Do not retry an
+already-published tag: publish a new patch tag instead.

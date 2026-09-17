@@ -592,6 +592,13 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
             continue
 
         for kin_entry in sorted(project_dir.rglob(".kin")):
+            # A repo-local graph the modern lane created declares no data_dir
+            # and may have no config at all; it is registered all the same.
+            if kin_entry.is_dir():
+                from .project_store import existing_local_store
+                implicit = existing_local_store(kin_entry.parent)
+                if implicit is not None:
+                    project_graphs.setdefault(str(kin_entry.parent), str(implicit.resolve()))
             # Resolve to the config file inside the .kin directory
             if kin_entry.is_dir():
                 config_file = kin_entry / "config"
@@ -636,6 +643,7 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                 # The reminder sweep runs shell actions from every registered
                 # graph; a store a clone delivered is never one of them (the
                 # registry write below applies that rule).
+                # A declared data_dir wins over the implicit repo-local store.
                 project_graphs[str(project_root)] = str(resolved_dir.resolve())
 
             existing = store.get_node(slug)

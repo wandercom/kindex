@@ -3648,121 +3648,78 @@ class Store:
                     self.conn.rollback()
                 return 0
 
-            # Node decay over (max(last_accessed, row_prev), now] — unconditional
-            # fold, per-row accounting for the write threshold.
-            rows = self.conn.execute(
-                "SELECT id, weight, last_accessed FROM nodes").fetchall()
-            count = 0
-            for row in rows:
+            # Per-row accounting ({ts, w_true, w_stored} under
+            # `_wtr.<kind>.<id>`) records a row's unrounded weight at ts, so
+            # rounding never accumulates (R2.1). It is rewritten when the row
+            # is written; while writes are suppressed an existing snapshot
+            # stays valid, since the next fold computes the whole interval
+            # from it, so it is only created, never refreshed. Refreshing it
+            # for every row on every run made each cron pass O(graph) upserts
+            # under the write lock; snapshots of deleted rows are removed.
+            snapshots: dict[str, dict] = {}
+            for key, value in self.conn.execute(
+                    "SELECT key, value FROM meta WHERE key LIKE '\\_wtr.%' ESCAPE '\\'"):
                 try:
-                    last = datetime.fromisoformat(row["last_accessed"])
+                    snapshots[key] = _json.loads(value)
                 except (ValueError, TypeError):
-                    continue
-                # Per-row state: {ts, w_true, w_stored} where ts is the
-                # last decay time, w_true is the unrounded weight at that
-                # time, and w_stored is the 4-dp weight we wrote to the row.
-                # Falls back to the global stamp and stored weight when the
-                # row has never been suppressed (no meta key).
-                # On the next fold, if the row's current weight differs
-                # from w_stored, an external write (e.g. reinforcement)
-                # changed the weight between folds — discard the snapshot
-                # and use the row's current stored weight as w0 (R2.1).
-                row_meta_raw = self.get_meta(f"_wtr.node.{row['id']}")
-                row_prev = prev
-                true_weight = float(row["weight"])
-                if row_meta_raw:
-                    try:
-                        row_meta = _json.loads(row_meta_raw)
-                        row_prev = datetime.fromisoformat(row_meta["ts"])
-                        w_stored = float(row_meta["w_stored"])
-                        if w_stored == float(row["weight"]):
-                            # Row untouched since last fold — use the
-                            # unrounded snapshot to avoid cumulative
-                            # 4-dp rounding error (R2.1).
-                            true_weight = float(row_meta["w_true"])
-                        # else: external write happened — true_weight
-                        # stays as the row's current stored weight.
-                    except (ValueError, TypeError, KeyError):
-                        row_prev = prev
-                        true_weight = float(row["weight"])
-                start = max(last, row_prev)
-                days_since = (now - start).total_seconds() / 86400.0
-                if days_since <= 0:
-                    continue
-                decay = 0.5 ** (days_since / node_half_life_days)
-                new_true = true_weight * decay
-                new_weight = max(0.01, round(new_true, 4))
-                if new_weight != round(float(row["weight"]), 4):
-                    self.conn.execute(
-                        "UPDATE nodes SET weight = ? WHERE id = ?",
-                        (new_weight, row["id"]),
-                    )
-                    count += 1
-                    stored_weight = new_weight
-                else:
-                    stored_weight = float(row["weight"])
-                # Always write the per-row meta — the true weight must be
-                # preserved for the next fold's rounding-error avoidance.
-                # The cost is O(changed + suppressed) rows, not O(graph):
-                # rows with days_since <= 0 (just accessed, no interval)
-                # are skipped by the continue above and never reach here.
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                    (f"_wtr.node.{row['id']}",
-                     _json.dumps({
-                         "ts": now.isoformat(),
-                         "w_true": new_true,
-                         "w_stored": stored_weight,
-                     })),
-                )
+                    snapshots[key] = {}
 
-            # Edge decay over (max(created_at, prev), now] — unconditional.
-            # Edges use the global stamp and per-row accounting for the
-            # same rounding-error reason as nodes.
+            def fold(kind: str, rows, base_column: str, half_life: int) -> int:
+                written = 0
+                for row in rows:
+                    try:
+                        base = datetime.fromisoformat(row[base_column])
+                    except (ValueError, TypeError):
+                        continue
+                    key = f"_wtr.{kind}.{row['id']}"
+                    snapshot = snapshots.get(key)
+                    row_prev, true_weight, valid = prev, float(row["weight"]), False
+                    if snapshot is not None:
+                        try:
+                            row_prev = datetime.fromisoformat(snapshot["ts"])
+                            # A row written since (reinforcement) starts again
+                            # from its stored weight.
+                            if float(snapshot["w_stored"]) == float(row["weight"]):
+                                true_weight = float(snapshot["w_true"])
+                                valid = True
+                        except (ValueError, TypeError, KeyError):
+                            row_prev, true_weight = prev, float(row["weight"])
+                    days_since = (now - max(base, row_prev)).total_seconds() / 86400.0
+                    if days_since <= 0:
+                        continue
+                    new_true = true_weight * 0.5 ** (days_since / half_life)
+                    new_weight = max(0.01, round(new_true, 4))
+                    if new_weight != round(float(row["weight"]), 4):
+                        self.conn.execute(
+                            f"UPDATE {kind}s SET weight = ? WHERE id = ?",
+                            (new_weight, row["id"]),
+                        )
+                        written += 1
+                        stored = new_weight
+                    elif valid:
+                        continue
+                    else:
+                        stored = float(row["weight"])
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                        (key, _json.dumps({
+                            "ts": now.isoformat(),
+                            "w_true": new_true,
+                            "w_stored": stored,
+                        })),
+                    )
+                return written
+
+            node_rows = self.conn.execute(
+                "SELECT id, weight, last_accessed FROM nodes").fetchall()
+            count = fold("node", node_rows, "last_accessed", node_half_life_days)
             edge_rows = self.conn.execute(
                 "SELECT id, weight, created_at FROM edges").fetchall()
-            for row in edge_rows:
-                try:
-                    created = datetime.fromisoformat(row["created_at"])
-                except (ValueError, TypeError):
-                    continue
-                row_meta_raw = self.get_meta(f"_wtr.edge.{row['id']}")
-                row_prev = prev
-                true_weight = float(row["weight"])
-                if row_meta_raw:
-                    try:
-                        row_meta = _json.loads(row_meta_raw)
-                        row_prev = datetime.fromisoformat(row_meta["ts"])
-                        w_stored = float(row_meta["w_stored"])
-                        if w_stored == float(row["weight"]):
-                            true_weight = float(row_meta["w_true"])
-                    except (ValueError, TypeError, KeyError):
-                        row_prev = prev
-                        true_weight = float(row["weight"])
-                start = max(created, row_prev)
-                days_since = (now - start).total_seconds() / 86400.0
-                if days_since <= 0:
-                    continue
-                decay = 0.5 ** (days_since / edge_half_life_days)
-                new_true = true_weight * decay
-                new_weight = max(0.01, round(new_true, 4))
-                if new_weight != round(float(row["weight"]), 4):
-                    self.conn.execute(
-                        "UPDATE edges SET weight = ? WHERE id = ?",
-                        (new_weight, row["id"]),
-                    )
-                    stored_weight = new_weight
-                else:
-                    stored_weight = float(row["weight"])
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                    (f"_wtr.edge.{row['id']}",
-                     _json.dumps({
-                         "ts": now.isoformat(),
-                         "w_true": new_true,
-                         "w_stored": stored_weight,
-                     })),
-                )
+            fold("edge", edge_rows, "created_at", edge_half_life_days)
+            live = ({f"_wtr.node.{row['id']}" for row in node_rows}
+                    | {f"_wtr.edge.{row['id']}" for row in edge_rows})
+            for key in set(snapshots) - live:
+                self.conn.execute("DELETE FROM meta WHERE key = ?", (key,))
 
             # Stamp always advances — even if no write crossed the 4-dp
             # threshold, the interval is accounted for (R2.1, R2.4).

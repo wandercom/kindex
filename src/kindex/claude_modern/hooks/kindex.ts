@@ -14,6 +14,7 @@ const taskArguments = {
     dependencies: {type: "array", items: {type: "string"}}, link_to: {type: "array", items: {type: "string"}},
     domains: {type: "array", items: {type: "string"}}, limit: {type: "integer", minimum: 1, maximum: 500},
     cursor: {type: "string"}, namespace: {type: "string"}, cancel_missing: {type: "boolean"},
+    force: {type: "boolean", description: "claim/release/update/complete/cancel: override another session's live claim"},
     items: {type: "array", items: {type: "object"}},
   },
 };

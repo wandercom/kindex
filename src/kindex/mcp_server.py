@@ -2169,15 +2169,21 @@ def task_list(status: str = "open", scope: str = "",
 
 
 @_tool()
-def task_done(id: str) -> str:
+def task_done(id: str, agent: str = "", force: bool = False) -> str:
     """Mark a task as completed.
 
     Args:
         id: Task node ID.
+        agent: Agent completing it (default: resolved agent id). Another
+            agent's live claim refuses the change unless force is true.
+        force: Complete even though another agent holds a live claim.
     """
     store, _ = _get_store()
-    from .tasks import complete_task
-    result = complete_task(store, id)
+    from .tasks import TaskClaimedError, complete_task
+    try:
+        result = complete_task(store, id, actor=_default_agent(agent), force=force)
+    except TaskClaimedError as exc:
+        return f"Error: {exc.code}: {exc}"
     if result:
         return f"Completed: {result['title']} ({id})"
     return f"Task not found: {id}"
@@ -2251,10 +2257,13 @@ def task_update(id: str, title: str | None = None, content: str | None = None,
                 status: str | None = None, priority: int | None = None,
                 due: str | None = None, owner: str | None = None,
                 dependencies: list[str] | None = None,
-                expected_version: int | None = None) -> dict:
+                expected_version: int | None = None,
+                agent: str = "", force: bool = False) -> dict:
     """Update task fields; omitted fields stay unchanged. Empty due clears it.
 
     expected_version provides compare-and-swap protection against concurrent edits.
+    A status change that ends another agent's live claim is refused unless
+    force is true; agent defaults to the resolved agent id.
     Use task_execute for explicit host scope and durable operation replay.
     """
     from .tasks import update_task
@@ -2267,17 +2276,20 @@ def task_update(id: str, title: str | None = None, content: str | None = None,
         "dependencies": dependencies, "expected_version": expected_version,
     }.items() if value is not None}
     try:
-        node = update_task(store, id, **fields)
+        node = update_task(store, id, actor=_default_agent(agent), force=force, **fields)
     except ValueError as exc:
-        return {"ok": False, "error": {"code": "invalid_argument", "message": safe_error(exc)}}
+        return {"ok": False, "error": {"code": getattr(exc, "code", "invalid_argument"),
+                                       "message": safe_error(exc)}}
     return {"ok": True, "task": task_record(node)} if node else {
         "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
 
 
 @_tool()
-def task_cancel(id: str, expected_version: int | None = None) -> dict:
+def task_cancel(id: str, expected_version: int | None = None,
+                agent: str = "", force: bool = False) -> dict:
     """Cancel a task without deleting its durable record or history."""
-    return task_update(id, status="cancelled", expected_version=expected_version)
+    return task_update(id, status="cancelled", expected_version=expected_version,
+                       agent=agent, force=force)
 
 
 @_tool()
@@ -2290,22 +2302,44 @@ def task_execute(operation: str, arguments: dict, project_path: str,
     Operations: create/get/list/update/complete/cancel/claim/release/reconcile.
     Explicit project/session scope comes from the caller, never the MCP cwd.
     """
+    import subprocess
+
     from .integrations import open_project_store, execute_task, project_scope
+    from .privacy import safe_error
+    from .store import ProfileMismatchError, SchemaMigrationError, UnsupportedSchemaVersionError
+
+    # Every refusal is a result in the documented {ok, error} shape; one that
+    # escaped became an MCP isError text the adapter could not parse.
+    def refused(error: BaseException, default_code: str) -> dict:
+        return {"ok": False, "error": {"code": getattr(error, "code", default_code),
+                                       "message": safe_error(error)}}
+
+    if include_global:
+        return {"ok": False, "error": {"code": "invalid_scope", "message": "Modern task_execute is repo-local; use explicit legacy task tools for global tasks"}}
+    store_errors = (ProfileMismatchError, UnsupportedSchemaVersionError,
+                    SchemaMigrationError, OSError, subprocess.CalledProcessError)
     # The repo-local lane never needs the legacy store; resolving the agent
     # through it made one unreadable home scope fail every task call.
     requested = {
         "project_path": project_path, "session_id": session_id, "profile": profile,
         "include_global": include_global,
     }
-    resolved_agent = _agent_without_legacy_store(agent)
-    if resolved_agent:
-        requested["agent"] = resolved_agent
-    scope = project_scope(requested)
-    if include_global:
-        return {"ok": False, "error": {"code": "invalid_scope", "message": "Modern task_execute is repo-local; use explicit legacy task tools for global tasks"}}
-    store = open_project_store(scope)
+    try:
+        resolved_agent = _agent_without_legacy_store(agent)
+        if resolved_agent:
+            requested["agent"] = resolved_agent
+        scope = project_scope(requested)
+        store = open_project_store(scope)
+    except ValueError as error:
+        return refused(error, "invalid_scope")
+    except store_errors as error:
+        return refused(error, "store_unavailable")
     try:
         return execute_task(store, operation, arguments, scope, source_tool="kindex.task_execute")
+    except ValueError as error:
+        return refused(error, "invalid_request")
+    except store_errors as error:
+        return refused(error, "store_unavailable")
     finally:
         store.close()
 

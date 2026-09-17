@@ -248,18 +248,43 @@ def create_task(
         return task_id
 
 
-def complete_task(store: Store, task_id: str) -> dict | None:
+def complete_task(store: Store, task_id: str, *, actor: str | None = None,
+                  force: bool = False) -> dict | None:
     """Mark a task as done."""
-    return update_task(store, task_id, task_status="done")
+    return update_task(store, task_id, actor=actor, force=force, task_status="done")
 
 
-def cancel_task(store: Store, task_id: str) -> dict | None:
+def cancel_task(store: Store, task_id: str, *, actor: str | None = None,
+                force: bool = False) -> dict | None:
     """Cancel a task."""
-    return update_task(store, task_id, task_status="cancelled")
+    return update_task(store, task_id, actor=actor, force=force, task_status="cancelled")
 
 
-def update_task(store: Store, task_id: str, **fields) -> dict | None:
-    """Update task-specific fields: priority, task_status, due, effort, scope."""
+class TaskClaimedError(ValueError):
+    """A status change would drop a live claim another agent holds."""
+
+    code = "task_claimed"
+
+
+def _refuse_foreign_claim(extra: dict, actor: str | None, force: bool) -> None:
+    claim = extra.get("claim")
+    if not claim or force or _claim_expired(claim):
+        return
+    holder = str(claim.get("agent") or "")
+    if actor is not None and actor.strip() == holder:
+        return
+    raise TaskClaimedError(
+        f"Task claimed by {holder or 'unknown'}; the holder releases it, "
+        "or the change is forced")
+
+
+def update_task(store: Store, task_id: str, *, actor: str | None = None,
+                force: bool = False, **fields) -> dict | None:
+    """Update task-specific fields: priority, task_status, due, effort, scope.
+
+    A status change that ends a claim (done, cancelled, open) is the claim
+    holder's (``actor``) unless ``force``: it used to drop another agent's
+    live claim without a word."""
     with transaction(store):
         node = get_task(store, task_id)
         if not node:
@@ -280,6 +305,7 @@ def update_task(store: Store, task_id: str, **fields) -> dict | None:
             else:
                 extra.pop("completed_at", None)
             if status in ("done", "cancelled", "open"):
+                _refuse_foreign_claim(extra, actor, force)
                 extra.pop("claim", None)
             extra["task_status"] = status
         if "due" in fields:
@@ -328,7 +354,9 @@ def claim_task(
         if extra.get("task_status") in ("done", "cancelled"):
             raise ValueError("Cannot claim a completed or cancelled task; reopen it first")
         existing = extra.get("claim")
-        if existing and not _claim_expired(existing) and not force:
+        # The holder may refresh its own claim, as a lock holder may.
+        if (existing and not _claim_expired(existing) and not force
+                and existing.get("agent") != agent.strip()):
             owner = existing.get("agent", "unknown")
             raise ValueError(f"Task already claimed by {owner}")
         extra["task_status"] = "in_progress"
