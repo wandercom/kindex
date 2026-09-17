@@ -35,6 +35,14 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   count covers them, each node once.
 - The session prime's topic comes from the project (its root directory and
   git remote) instead of every word of the absolute working directory.
+- The budget ledger is shared safely: every write re-reads the file under a
+  lock and replaces it atomically, and spend checks follow the file, so a
+  concurrent worker's spend is no longer erased (two $0.40 calls used to
+  leave one entry under a $0.50 limit). An unreadable ledger is kept beside
+  the file (which stays in place), reported in the degraded ledger, and
+  replaced by one that stops spending for the rest of that day, instead of
+  failing every LLM feature or forgetting what was spent. A ledger that can
+  be neither read nor kept is left alone and stops spending on every day.
 
 ## [0.40.0] - 2026-09-17
 
