@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -48,6 +49,10 @@ def _conversation_summary(conv: dict) -> str:
     created = conv.get("created_at", "")[:10]
     proj_tag = f" [{project}]" if project else ""
     return f"{name}{proj_tag} ({created}, {len(msgs)} msgs)"
+
+
+# Metadata the export determines; re-ingest replaces these as a set.
+_EXPORT_KEYS = frozenset({"uuid", "name", "message_count", "source", "project"})
 
 
 class ClaudeWebAdapter:
@@ -162,6 +167,7 @@ class ClaudeWebAdapter:
 
             extra = {
                 "uuid": uuid,
+                "name": name,
                 "message_count": len(msgs),
                 "source": "claude.ai",
             }
@@ -174,17 +180,22 @@ class ClaudeWebAdapter:
                 if isinstance(old_count, str):
                     old_count = int(old_count) if old_count.isdigit() else 0
                 if len(msgs) > old_count:
-                    store.add_node(
-                        title=name,
-                        content=content,
-                        node_id=node_id,
-                        node_type="conversation",
-                        domains=domains,
-                        prov_when=created_at,
-                        prov_activity="claude-web-ingest",
-                        prov_source=f"claude.ai/{uuid}",
-                        extra=extra,
-                    )
+                    # Only what the export determines changes: add_node's
+                    # upsert reset weight, audience, aka, intent, standing
+                    # and the clocks the user had set.
+                    old_extra = existing.get("extra") or {}
+                    # The export owns its own keys (a conversation moved out
+                    # of a project loses `project`); anything else stays.
+                    kept = {key: value for key, value in old_extra.items()
+                            if key not in _EXPORT_KEYS}
+                    fields = {
+                        "content": content,
+                        "domains": domains,
+                        "extra": {**kept, **extra},
+                    }
+                    if existing.get("title") == old_extra.get("name"):
+                        fields["title"] = name  # not renamed by hand
+                    store.update_node(node_id, **fields)
                     updated += 1
                     if verbose:
                         log.info("Updated: %s", _conversation_summary(conv))
@@ -220,10 +231,10 @@ class ClaudeWebAdapter:
                             node_id, matches[0]["id"],
                             edge_type="discusses",
                             weight=0.3,
-                            why=f"Discussed in Claude web conversation: {name}",
+                            provenance=f"Discussed in Claude web conversation: {name}",
                         )
-                    except Exception:
-                        pass  # duplicate edge, etc.
+                    except sqlite3.IntegrityError:
+                        pass  # the target went away meanwhile
 
             # Link to project node if exists
             if project:
@@ -234,9 +245,9 @@ class ClaudeWebAdapter:
                             node_id, proj_matches[0]["id"],
                             edge_type="part_of",
                             weight=0.5,
-                            why=f"Conversation in Claude project: {project}",
+                            provenance=f"Conversation in Claude project: {project}",
                         )
-                    except Exception:
+                    except sqlite3.IntegrityError:
                         pass
 
         return IngestResult(

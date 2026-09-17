@@ -39,14 +39,14 @@ def test_pr_and_release_share_the_full_test_job():
     assert jobs["build"]["needs"] == "ci"
     assert "if" not in jobs["build"]
     build_steps = jobs["build"]["steps"]
-    render_index = next(
+    check_index = next(
         index
         for index, step in enumerate(build_steps)
         if step == {
-            "name": "Render package version from release tag",
-            "run": 'python scripts/render-release-version.py "$GITHUB_REF_NAME" pyproject.toml',
+            "name": "Check the release tag names the project version",
+            "run": 'python scripts/check-release-version.py "$GITHUB_REF_NAME" pyproject.toml',
         }
     )
-    assert build_steps[render_index + 1] == {"run": "python -m build"}
+    assert build_steps[check_index + 1] == {"run": "python -m build"}
     assert jobs["publish"]["needs"] == "build"
     assert "if" not in jobs["publish"]

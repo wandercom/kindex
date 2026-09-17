@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel, Field
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -52,8 +54,97 @@ def compute_optimal_interval(store: "Store", config: "Config") -> int:
     return config.reminders.min_interval
 
 
+# A store that has not reported within this window no longer holds the
+# machine scheduler fast (a removed profile, a deleted project store).
+_STORE_REPORT_TTL = 24 * 3600
+# With no reminder pending anywhere, maintenance (ingest, embedding, decay,
+# dream, watch expiry) still runs on this cadence; the job is never unloaded.
+_MAINTENANCE_INTERVAL = 3600
+
+
+def maintenance_interval(config: "Config") -> int:
+    return max(config.reminders.min_interval, _MAINTENANCE_INTERVAL)
+
+
+def _scheduler_state_path(config: "Config") -> Path:
+    """One record for the machine's one scheduler, wherever the store that
+    reports lives: a path under a store's own data directory gave each
+    profile and project its own record, and an idle pass overrode a busy
+    one."""
+    import os
+    base = os.environ.get("XDG_STATE_HOME", "").strip()
+    root = Path(base) if base else Path.home() / ".local" / "state"
+    return root / "kindex" / "scheduler-state.json"
+
+
+class StoreReport(BaseModel):
+    interval: int = 0
+    at: float = 0.0
+
+
+class SchedulerState(BaseModel):
+    """What each store last asked of the machine scheduler, and what was
+    applied."""
+    stores: dict[str, StoreReport] = Field(default_factory=dict)
+    applied: int | None = None
+
+
+class _StateLock:
+    def __init__(self, path: Path):
+        self.path = path.with_name(path.name + ".lock")
+        self.fd = None
+
+    def __enter__(self):
+        import os
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        import os
+        os.close(self.fd)  # closing releases the lock
+        return False
+
+
+def _read_state(path: Path) -> SchedulerState:
+    try:
+        return SchedulerState.model_validate_json(path.read_text())
+    except (OSError, ValueError):
+        return SchedulerState()
+
+
+def _write_state(path: Path, state: SchedulerState) -> None:
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(state.model_dump_json())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def repack_schedule(store: "Store", config: "Config") -> dict:
-    """Compute optimal interval and apply it if changed. Returns status dict."""
+    """Record this store's wanted interval and apply the machine's.
+
+    The scheduler is one machine-wide job serving every profile and project
+    store, so the interval applied is the shortest any live store wants, kept
+    in a machine-level record. Each pass used to apply its own store's
+    interval (and compare it with that store's own last value), so a profile
+    with no pending reminder unloaded the job every other profile relied on,
+    and nothing reloaded it. With no reminder pending anywhere the job keeps
+    a maintenance cadence instead of being unloaded.
+    """
     if not config.reminders.enabled:
         return {"action": "skipped", "reason": "reminders disabled"}
 
@@ -64,27 +155,52 @@ def repack_schedule(store: "Store", config: "Config") -> dict:
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
 
-    interval = compute_optimal_interval(store, config)
+    import time
 
-    # Check current interval from meta table
-    current = store.get_meta("cron_interval")
-    current_int = int(current) if current else None
+    wanted = compute_optimal_interval(store, config)
+    if store.get_meta("cron_interval") != str(wanted):
+        store.set_meta("cron_interval", str(wanted))  # this store's own want
 
-    if current_int == interval:
-        return {"action": "unchanged", "interval": interval}
-
-    result = apply_schedule(interval, config)
-    store.set_meta("cron_interval", str(interval))
+    path = _scheduler_state_path(config)
+    with _StateLock(path):
+        state = _read_state(path)
+        now = time.time()
+        stores = {key: report for key, report in state.stores.items()
+                  if now - report.at < _STORE_REPORT_TTL}
+        stores[str(store.db_path)] = StoreReport(interval=wanted, at=now)
+        live = [report.interval for report in stores.values() if report.interval > 0]
+        interval = min(live) if live else maintenance_interval(config)
+        previous = state.applied
+        if previous == interval:
+            _write_state(path, SchedulerState(stores=stores, applied=previous))
+            return {"action": "unchanged", "interval": interval}
+        result = apply_schedule(interval, config)
+        applied = interval if result.get("action") in ("updated", "unchanged") else previous
+        _write_state(path, SchedulerState(stores=stores, applied=applied))
     result["interval"] = interval
-    result["previous"] = current_int
+    result["previous"] = previous
     return result
 
 
+def scheduler_writes_disabled() -> bool:
+    """``KIN_NO_SCHEDULER_WRITES`` set to 1, true or yes."""
+    import os
+
+    return os.environ.get("KIN_NO_SCHEDULER_WRITES", "").strip() in ("1", "true", "yes")
+
+
 def apply_schedule(interval: int, config: "Config") -> dict:
-    """Apply a new cron interval to the system scheduler (launchd or crontab)."""
+    """Apply a new cron interval to the system scheduler (launchd or crontab).
+
+    ``KIN_NO_SCHEDULER_WRITES=1`` leaves the machine scheduler untouched
+    (test suites and sandboxes, whose child processes inherit it).
+    """
+    import os
     from .config import _bound_root
     if _bound_root is not None:
         return {"action": "skipped", "reason": "config binding active"}
+    if scheduler_writes_disabled():
+        return {"action": "skipped", "reason": "scheduler writes disabled"}
     if platform.system() == "Darwin":
         return _apply_launchd(interval, config)
     return _apply_crontab(interval, config)
@@ -149,7 +265,7 @@ def _apply_crontab(interval: int, config: "Config") -> dict:
                  if "remind check" in l or not is_kindex_cron_line(l)]
 
     if interval > 0:
-        from .setup import _find_kin_path
+        from .setup import _find_kin_path, cron_path_assignment
         kin_path = _find_kin_path()
         # Base-dir logs: repacks run once per profile pass, and the log
         # target must not drift to whichever profile's pass last changed
@@ -162,7 +278,9 @@ def _apply_crontab(interval: int, config: "Config") -> dict:
             pass  # best-effort: never let a log-dir failure break the repack
         # Convert interval to cron minutes (minimum 1)
         minutes = max(1, interval // 60)
-        new_lines.append(f"*/{minutes} * * * * {kin_path} cron >> {log_dir}/cron.log 2>&1")
+        env = cron_path_assignment()
+        new_lines.append(
+            f"*/{minutes} * * * * {env} {kin_path} cron >> {log_dir}/cron.log 2>&1")
 
     new_crontab = "\n".join(new_lines) + "\n"
     proc = subprocess.run(["crontab", "-"], input=new_crontab,

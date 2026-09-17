@@ -192,11 +192,7 @@ def scan_sessions(
         pass
 
     # Find recent JSONL conversation files
-    jsonl_files = sorted(
-        projects_dir.rglob("*.jsonl"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )[:limit]
+    jsonl_files = [path for path, _ in session_transcripts(projects_dir)][:limit]
 
     # Per-profile session routing: an explicit per-pass predicate (set by
     # daemon.cron_run_all / kin cron) wins; otherwise one is built from the
@@ -436,18 +432,69 @@ def _codex_message_texts(content) -> list[str]:
     return texts
 
 
+def session_transcripts(projects_dir: Path) -> list[tuple[Path, float]]:
+    """Claude Code session transcripts (``<project>/<session>.jsonl``) and
+    their mtimes, newest first.
+
+    Subagent and workflow transcripts nest below a session's directory; they
+    are not sessions. Scanning them too (most transcripts on a busy machine
+    are) titled nodes after ``subagents`` and crowded real sessions out of
+    each scan. A file that disappears mid-scan is skipped.
+    """
+    found: list[tuple[Path, float]] = []
+    for path in projects_dir.glob("*/*.jsonl"):
+        try:
+            found.append((path, path.stat().st_mtime))
+        except OSError:
+            continue
+    found.sort(key=lambda item: item[1], reverse=True)
+    return found
+
+
 def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
     """Extract human-readable text from a Claude Code JSONL session file."""
-    texts = []
-    total_len = 0
+    # A finished file is read to its end (or max_chars): the byte bound is
+    # for a hook reading a live transcript a turn at a time.
+    return _extract_session_text_since(
+        jsonl_path, 0, max_chars=max_chars, max_bytes=None, complete_lines_only=False)[0]
 
+
+def _extract_session_text_since(
+    jsonl_path: Path,
+    start_offset: int,
+    *,
+    max_chars: int = 8000,
+    max_bytes: int | None = 4 * 1024 * 1024,
+    complete_lines_only: bool = True,
+) -> tuple[str, int, bool]:
+    """Assistant text from ``start_offset`` on, the offset of the first line
+    not consumed, and whether that offset is the end of the file.
+
+    With ``complete_lines_only`` (a live transcript) a line without its
+    newline is still being written and is read next time; a finished file's
+    unterminated last line is read. Reading stops once ``max_chars`` of text or ``max_bytes`` of
+    transcript have been taken, so a long delta is covered over several calls.
+    """
+    texts: list[str] = []
+    total_len = 0
+    offset = start_offset
+    at_end = False
     try:
-        with open(jsonl_path, "r", errors="replace") as f:
-            for line in f:
-                if total_len >= max_chars:
+        with open(jsonl_path, "rb") as f:
+            f.seek(start_offset)
+            while total_len < max_chars and (
+                    max_bytes is None or offset - start_offset < max_bytes):
+                raw = f.readline()
+                if not raw:
+                    at_end = True
                     break
+                if not raw.endswith(b"\n"):
+                    at_end = True
+                    if complete_lines_only:
+                        break
+                offset += len(raw)
                 try:
-                    entry = json.loads(line)
+                    entry = json.loads(raw.decode("utf-8", errors="replace"))
                 except (json.JSONDecodeError, ValueError):
                     continue
                 if not isinstance(entry, dict):
@@ -475,10 +522,12 @@ def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
                             text = redact_text(block["text"])[:1000]
                             texts.append(text)
                             total_len += len(text)
+            else:
+                at_end = not f.read(1)
     except OSError:
-        return ""
+        return "", start_offset, True
 
-    return "\n".join(texts)
+    return "\n".join(texts), offset, at_end
 
 
 # ── Parent directory .kin walk ────────────────────────────────────────
@@ -543,6 +592,13 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
             continue
 
         for kin_entry in sorted(project_dir.rglob(".kin")):
+            # A repo-local graph the modern lane created declares no data_dir
+            # and may have no config at all; it is registered all the same.
+            if kin_entry.is_dir():
+                from .project_store import existing_local_store
+                implicit = existing_local_store(kin_entry.parent)
+                if implicit is not None:
+                    project_graphs.setdefault(str(kin_entry.parent), str(implicit.resolve()))
             # Resolve to the config file inside the .kin directory
             if kin_entry.is_dir():
                 config_file = kin_entry / "config"
@@ -587,6 +643,7 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                 # The reminder sweep runs shell actions from every registered
                 # graph; a store a clone delivered is never one of them (the
                 # registry write below applies that rule).
+                # A declared data_dir wins over the implicit repo-local store.
                 project_graphs[str(project_root)] = str(resolved_dir.resolve())
 
             existing = store.get_node(slug)
@@ -1108,8 +1165,11 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
         # Query code nodes belonging to this repo by ID prefix
         mod_prefix = f"code-mod-{repo_slug}-"
         sym_prefix = f"code-sym-{repo_slug}-"
+        # A retired module or symbol (its file or class is gone) is not
+        # exported.
         rows = store.conn.execute(
-            "SELECT * FROM nodes WHERE id LIKE ? OR id LIKE ? "
+            "SELECT * FROM nodes WHERE (id LIKE ? OR id LIKE ?) "
+            "AND status NOT IN ('archived', 'superseded') "
             "ORDER BY id ASC",
             (f"{mod_prefix}%", f"{sym_prefix}%"),
         ).fetchall()
@@ -1128,13 +1188,15 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
     elif include_private:
         # Explicitly private index: the repo owner opted in to a full snapshot.
         rows = store.conn.execute(
-            "SELECT * FROM nodes ORDER BY id ASC LIMIT ?",
+            "SELECT * FROM nodes WHERE status NOT IN ('archived', 'superseded') "
+            "ORDER BY id ASC LIMIT ?",
             (500,),
         ).fetchall()
         nodes = [store._row_to_dict(r) for r in rows]
     else:
         rows = store.conn.execute(
             "SELECT * FROM nodes WHERE audience IN ('public', 'team') "
+            "AND status NOT IN ('archived', 'superseded') "
             "ORDER BY id ASC LIMIT ?",
             (500,),
         ).fetchall()

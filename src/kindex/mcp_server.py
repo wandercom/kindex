@@ -132,6 +132,12 @@ class MemoryUnavailableError(RuntimeError):
 
     def __init__(self, cause: BaseException):
         self.error_class = type(cause).__name__
+        # A configuration refusal (an ambiguous scope, an unknown profile)
+        # is something the caller can act on, so its remedy travels with the
+        # error; a broken database says only its class.
+        self.remedy = (
+            safe_error(cause, limit=600) if isinstance(cause, ValueError) else ""
+        )
         super().__init__(f"memory unavailable ({self.error_class})")
 
 
@@ -162,6 +168,8 @@ def _tool(*dargs, **dkwargs):
                 ) else "success"
                 return result
             except MemoryUnavailableError as e:
+                if e.remedy:
+                    return f"Error: memory unavailable ({e.error_class}): {e.remedy}"
                 return f"Error: memory unavailable ({e.error_class})"
             except sqlite3.Error as e:
                 # The store opened but a query hit a broken/locked DB
@@ -228,12 +236,35 @@ def _get_config():
     return config
 
 
+def _node_for_write(store, ref: str):
+    """``(node, error)`` for a mutating tool: a title must name one node."""
+    from .store import AmbiguousTitleError
+    try:
+        return store.resolve_node_for_write(ref), ""
+    except AmbiguousTitleError as error:
+        return None, f"Error: title_collision: {error}"
+
+
 def _default_agent(agent: str = "") -> str:
     """Explicit agent name, or the resolved stable agent identity."""
     if agent and agent.strip():
         return agent.strip()
     from .config import resolve_agent_id
     return resolve_agent_id(_get_config())
+
+
+def _agent_without_legacy_store(agent: str = "") -> str:
+    """An explicit agent, KIN_AGENT_ID, or the configured identity when the
+    legacy store is readable; otherwise empty, and project_scope applies its
+    own default."""
+    if agent and agent.strip():
+        return agent.strip()
+    if os.environ.get("KIN_AGENT_ID", "").strip():
+        return os.environ["KIN_AGENT_ID"].strip()
+    try:
+        return _default_agent("")
+    except MemoryUnavailableError:
+        return ""
 
 
 def _mcp_client() -> str | None:
@@ -613,7 +644,9 @@ def edit(node_id: str, title: str = "", content: str = "", append: str = "",
     store, config = _get_store()
     from .store import EditPolicyError, LockHeldError
 
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
 
@@ -665,7 +698,9 @@ def supersede(node_id: str, new_text: str, expires: str = "", reason: str = "") 
     store, config = _get_store()
     from .store import LockHeldError
 
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
 
@@ -898,7 +933,9 @@ def verify(
     """
     store, _ = _get_store()
     operation_instant = operation_now()
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
     try:
@@ -931,7 +968,9 @@ def invalidate(
     """
     store, _ = _get_store()
     operation_instant = operation_now()
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
     try:
@@ -989,8 +1028,10 @@ def link(
         reason: Why this connection exists (stored as provenance — always provide this).
     """
     store, _ = _get_store()
-    a = store.get_node(node_a) or store.get_node_by_title(node_a)
-    b = store.get_node(node_b) or store.get_node_by_title(node_b)
+    a, error_a = _node_for_write(store, node_a)
+    b, error_b = _node_for_write(store, node_b)
+    if error_a or error_b:
+        return error_a or error_b
     if not a:
         return f"Source node not found: {node_a}"
     if not b:
@@ -2128,15 +2169,21 @@ def task_list(status: str = "open", scope: str = "",
 
 
 @_tool()
-def task_done(id: str) -> str:
+def task_done(id: str, agent: str = "", force: bool = False) -> str:
     """Mark a task as completed.
 
     Args:
         id: Task node ID.
+        agent: Agent completing it (default: resolved agent id). Another
+            agent's live claim refuses the change unless force is true.
+        force: Complete even though another agent holds a live claim.
     """
     store, _ = _get_store()
-    from .tasks import complete_task
-    result = complete_task(store, id)
+    from .tasks import TaskClaimedError, complete_task
+    try:
+        result = complete_task(store, id, actor=_default_agent(agent), force=force)
+    except TaskClaimedError as exc:
+        return f"Error: {exc.code}: {exc}"
     if result:
         return f"Completed: {result['title']} ({id})"
     return f"Task not found: {id}"
@@ -2210,10 +2257,13 @@ def task_update(id: str, title: str | None = None, content: str | None = None,
                 status: str | None = None, priority: int | None = None,
                 due: str | None = None, owner: str | None = None,
                 dependencies: list[str] | None = None,
-                expected_version: int | None = None) -> dict:
+                expected_version: int | None = None,
+                agent: str = "", force: bool = False) -> dict:
     """Update task fields; omitted fields stay unchanged. Empty due clears it.
 
     expected_version provides compare-and-swap protection against concurrent edits.
+    A status change that ends another agent's live claim is refused unless
+    force is true; agent defaults to the resolved agent id.
     Use task_execute for explicit host scope and durable operation replay.
     """
     from .tasks import update_task
@@ -2226,17 +2276,20 @@ def task_update(id: str, title: str | None = None, content: str | None = None,
         "dependencies": dependencies, "expected_version": expected_version,
     }.items() if value is not None}
     try:
-        node = update_task(store, id, **fields)
+        node = update_task(store, id, actor=_default_agent(agent), force=force, **fields)
     except ValueError as exc:
-        return {"ok": False, "error": {"code": "invalid_argument", "message": safe_error(exc)}}
+        return {"ok": False, "error": {"code": getattr(exc, "code", "invalid_argument"),
+                                       "message": safe_error(exc)}}
     return {"ok": True, "task": task_record(node)} if node else {
         "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
 
 
 @_tool()
-def task_cancel(id: str, expected_version: int | None = None) -> dict:
+def task_cancel(id: str, expected_version: int | None = None,
+                agent: str = "", force: bool = False) -> dict:
     """Cancel a task without deleting its durable record or history."""
-    return task_update(id, status="cancelled", expected_version=expected_version)
+    return task_update(id, status="cancelled", expected_version=expected_version,
+                       agent=agent, force=force)
 
 
 @_tool()
@@ -2249,16 +2302,45 @@ def task_execute(operation: str, arguments: dict, project_path: str,
     Operations: create/get/list/update/complete/cancel/claim/release/reconcile.
     Explicit project/session scope comes from the caller, never the MCP cwd.
     """
+    import subprocess
+
     from .integrations import open_project_store, execute_task, project_scope
-    scope = project_scope({
-        "project_path": project_path, "session_id": session_id, "profile": profile,
-        "agent": _default_agent(agent), "include_global": include_global,
-    })
+    from .privacy import safe_error
+    from .store import ProfileMismatchError, SchemaMigrationError, UnsupportedSchemaVersionError
+
+    # Every refusal is a result in the documented {ok, error} shape; one that
+    # escaped became an MCP isError text the adapter could not parse.
+    def refused(error: BaseException, default_code: str) -> dict:
+        return {"ok": False, "error": {"code": getattr(error, "code", default_code),
+                                       "message": safe_error(error)}}
+
     if include_global:
         return {"ok": False, "error": {"code": "invalid_scope", "message": "Modern task_execute is repo-local; use explicit legacy task tools for global tasks"}}
-    store = open_project_store(scope)
+    store_errors = (ProfileMismatchError, UnsupportedSchemaVersionError,
+                    SchemaMigrationError, OSError, sqlite3.Error,
+                    subprocess.CalledProcessError, subprocess.TimeoutExpired)
+    # The repo-local lane never needs the legacy store; resolving the agent
+    # through it made one unreadable home scope fail every task call.
+    requested = {
+        "project_path": project_path, "session_id": session_id, "profile": profile,
+        "include_global": include_global,
+    }
+    try:
+        resolved_agent = _agent_without_legacy_store(agent)
+        if resolved_agent:
+            requested["agent"] = resolved_agent
+        scope = project_scope(requested)
+        store = open_project_store(scope)
+    except ValueError as error:
+        return refused(error, "invalid_scope")
+    except store_errors as error:
+        return refused(error, "store_unavailable")
     try:
         return execute_task(store, operation, arguments, scope, source_tool="kindex.task_execute")
+    except ValueError as error:
+        return refused(error, "invalid_request")
+    except store_errors as error:
+        return refused(error, "store_unavailable")
     finally:
         store.close()
 
@@ -2335,15 +2417,17 @@ def coord_post(conversation: str, agent: str = "", message: str = "",
 
 
 @_tool()
-def coord_read(conversation: str, since_id: int = 0, limit: int = 50,
+def coord_read(conversation: str, since_id: int | None = None, limit: int = 50,
                agent: str = "") -> str:
     """Read messages from a coordination conversation.
 
-    Advances the reading agent's member cursor (unread tracking).
+    Without since_id, reads from the agent's member cursor and advances it
+    (unread tracking).
 
     Args:
         conversation: Conversation ID or name.
-        since_id: Only return messages with a higher id.
+        since_id: Only return messages with a higher id (0 for all); leaves
+            the read cursor unchanged.
         limit: Maximum messages to return.
         agent: Reading agent name (default: resolved agent id).
     """
@@ -2370,7 +2454,9 @@ def coord_attach(name: str, node_id: str) -> str:
     """
     store, _ = _get_store()
     from .coordination import attach_resource
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     try:
         resources = attach_resource(store, name,
                                     node["id"] if node else node_id)
@@ -2479,7 +2565,9 @@ def lock_acquire(node_id: str, ttl_minutes: int = 60, note: str = "",
     store, _ = _get_store()
     from .locks import lock_node
     from .store import LockHeldError
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
     try:
@@ -2502,7 +2590,9 @@ def lock_release(node_id: str, force: bool = False) -> str:
     store, _ = _get_store()
     from .locks import unlock_node
     from .store import LockHeldError
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    node, error = _node_for_write(store, node_id)
+    if error:
+        return error
     if not node:
         return f"Node not found: {node_id}"
     try:

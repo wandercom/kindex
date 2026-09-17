@@ -63,7 +63,7 @@ def project_scope(scope: dict) -> dict:
             "agent": scope.get("agent", "claude"), **({"profile": scope["profile"]} if scope.get("profile") else {})}
 
 
-def open_project_store(scope: dict):
+def open_project_store(scope: dict, *, migrate: bool = True):
     """Open only .kin/local in the actual worktree, never clone-configured paths.
 
     Shared .kin artifacts are evidence, not configuration authority. Existing
@@ -86,10 +86,16 @@ def open_project_store(scope: dict):
         if target.is_symlink() or (target.exists() and target.stat().st_nlink > 1):
             raise ValueError("Refusing linked repo-local Kindex database")
     ensure_local_ignored(local)
-    config = trusted_supervisor_config(root, str(project_data_path(root)))
+    data_dir = project_data_path(root)
+    config = trusted_supervisor_config(root, str(data_dir))
     config._project_path = root
+    # Scheduled maintenance finds a repo-local graph only through a registry;
+    # one opened here (no data_dir in any .kin/config) was never swept, so its
+    # due tasks and reminders never fired.
+    from .project_store import register_project_graph
+    register_project_graph(root, data_dir)
     # The modern codebase lane is separate from legacy profile selection.
-    return Store(config)
+    return Store(config, migrate=migrate)
 
 
 def _signet(command: str, payload: dict, *, timeout: float = 5) -> dict | None:
@@ -411,7 +417,8 @@ def dispatch(request: dict) -> dict:
                 from .supervisor import supervisor_tick
                 return supervisor_tick(store, store.config, scope, text=str(request.get("text", "")),
                                        goal=request.get("goal"), initial_goal=request.get("initial_goal"), event_id=request.get("event_id"),
-                                       transcript_path=request.get("transcript_path"), deliver=request.get("deliver") is not False)
+                                       transcript_path=request.get("transcript_path"), deliver=request.get("deliver") is not False,
+                                       launch_paths=[(request.get("scope") or {}).get("project_path")])
             if action == "task":
                 result = redact(execute_task(store, request["operation"], request.get("args", {}), scope,
                                             source_tool=request.get("source_tool", "kindex.task"), expected_owner=request.get("expected_owner")))

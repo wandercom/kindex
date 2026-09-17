@@ -114,6 +114,14 @@ class SchemaMigrationError(RuntimeError):
     """A schema migration could not proceed safely or complete."""
 
 
+class SchemaMigrationPending(SchemaMigrationError):
+    """A hook opened a store whose schema needs upgrading. Hooks never
+    migrate: a full-database snapshot under a host's 2-10 s budget was killed
+    mid-copy and left a partial snapshot behind on every invocation."""
+
+    remedy = "run `kin doctor --fix` to upgrade the graph"
+
+
 class CandidateNotFoundError(ValueError):
     """A capture candidate does not exist."""
 
@@ -128,6 +136,10 @@ class StaleReviewError(ValueError):
 
 class TitleCollisionError(ValueError):
     """Automated promotion would collide with an existing durable title."""
+
+
+class AmbiguousTitleError(ValueError):
+    """A title or alias names more than one node where exactly one is meant."""
 
 
 class InvalidIntervalError(ValueError):
@@ -337,6 +349,7 @@ class Store:
         *,
         sqlite_timeout: float = 5.0,
         migration_step_hook: Callable[[int, str], None] | None = None,
+        migrate: bool = True,
     ):
         self.config = config
         # Support both kindex.db (new) and conv.db (legacy)
@@ -346,6 +359,7 @@ class Store:
         self._conn: sqlite3.Connection | None = None
         self._sqlite_timeout = max(0.0, float(sqlite_timeout))
         self._migration_step_hook = migration_step_hook
+        self._migrate = migrate
         # Profile stamp guard: configs that carry an active_profile (added by
         # the profiles feature) bind this database to that profile name.
         self._expected_profile: str | None = getattr(config, "active_profile", None)
@@ -412,6 +426,17 @@ class Store:
                 f"but the active profile is '{expected}'"
             )
 
+    def _refuse_migration_unless_allowed(self, current: int) -> None:
+        if self._migrate:
+            return
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            conn.close()
+        raise SchemaMigrationPending(
+            f"Database {self.db_path} is at schema {current} and needs "
+            f"migrating to {SCHEMA_VERSION}; {SchemaMigrationPending.remedy}"
+        )
+
     def _init_schema(self) -> None:
         # Check if this is an existing database that needs migration
         # before applying the full schema (which includes triggers
@@ -433,6 +458,7 @@ class Store:
                         "Upgrade Kindex or restore a compatible database backup."
                     )
                 if current < SCHEMA_VERSION:
+                    self._refuse_migration_unless_allowed(current)
                     with self._schema_migration_lock():
                         self._migrate_versioned_schema_after_lock()
                 # An already-current store performs no schema migration on
@@ -445,6 +471,7 @@ class Store:
             # A daemon and foreground command can discover the same ancient
             # pre-versioning store concurrently. Lock and recheck before even
             # creating meta, just as the versioned path does.
+            self._refuse_migration_unless_allowed(0)
             with self._schema_migration_lock():
                 locked_has_meta = self._conn.execute(
                     "SELECT 1 FROM sqlite_master "
@@ -1497,7 +1524,17 @@ class Store:
 
     # ── Temporal queries ───────────────────────────────────────────────
 
-    def activity_since(self, since_iso: str, action: str | None = None) -> list[dict]:
+    def activity_counts_since(self, since_iso: str) -> dict[str, int]:
+        """Activity entries since a timestamp, counted per action."""
+        try:
+            return {row[0]: row[1] for row in self.conn.execute(
+                "SELECT action, COUNT(*) FROM activity_log WHERE timestamp >= ? "
+                "GROUP BY action ORDER BY COUNT(*) DESC, action", (since_iso,))}
+        except sqlite3.Error:
+            return {}
+
+    def activity_since(self, since_iso: str, action: str | None = None,
+                       limit: int | None = None) -> list[dict]:
         """Get activity log entries since a timestamp, optionally filtered by action type."""
         try:
             q = "SELECT * FROM activity_log WHERE timestamp >= ? "
@@ -1506,6 +1543,9 @@ class Store:
                 q += "AND action = ? "
                 params.append(action)
             q += "ORDER BY timestamp DESC"
+            if limit is not None:
+                q += " LIMIT ?"
+                params.append(int(limit))
             rows = self.conn.execute(q, params).fetchall()
             result = []
             for r in rows:
@@ -1589,6 +1629,18 @@ class Store:
         self._log("add_suggestion", f"{concept_a}->{concept_b}", "",
                   details={"reason": reason, "source": source})
         return cur.lastrowid
+
+    def prune_suggestions(self, *, accepted_after_days: int = 90) -> int:
+        """Delete accepted suggestions older than ``accepted_after_days``:
+        the edge they asked for exists, so they decide nothing. Rejected and
+        pending rows stay, as the record that the pair was already raised."""
+        cutoff = (datetime.now(tz=None) - timedelta(days=accepted_after_days)
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.execute(
+            "DELETE FROM suggestions WHERE status = 'accepted' AND created_at < ?",
+            (cutoff,))
+        self.conn.commit()
+        return cursor.rowcount
 
     def pending_suggestions(self, limit: int = 20) -> list[dict]:
         """Get pending suggestions (bridge opportunities)."""
@@ -1849,21 +1901,49 @@ class Store:
             return []
 
     def get_node_by_title(self, title: str) -> dict | None:
-        """Match by title or AKA (case-insensitive)."""
-        # Exact title match
-        row = self.conn.execute(
-            "SELECT * FROM nodes WHERE lower(title) = lower(?)", (title,)).fetchone()
-        if row:
-            return self._row_to_dict(row)
-        # AKA match: search JSON array for alias
+        """Match by title or AKA (case-insensitive); an active node first,
+        then the most recently updated."""
+        matches = self._nodes_named(title)
+        return matches[0] if matches else None
+
+    def _nodes_named(self, title: str) -> list[dict]:
+        """Every node whose title, else whose alias, is ``title``
+        (case-insensitive), active first, then most recently updated."""
+        order = ("ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, "
+                 "updated_at DESC, id")
+        rows = self.conn.execute(
+            f"SELECT * FROM nodes WHERE lower(title) = lower(?) {order}", (title,)
+        ).fetchall()
+        if rows:
+            return [self._row_to_dict(row) for row in rows]
         lower = title.lower()
         rows = self.conn.execute(
-            "SELECT * FROM nodes WHERE aka != '[]' AND aka != ''").fetchall()
-        for r in rows:
-            d = self._row_to_dict(r)
-            if any(a.lower() == lower for a in (d.get("aka") or [])):
-                return d
-        return None
+            f"SELECT * FROM nodes WHERE aka != '[]' AND aka != '' {order}").fetchall()
+        return [
+            d for d in (self._row_to_dict(r) for r in rows)
+            if any(isinstance(a, str) and a.lower() == lower for a in (d.get("aka") or []))
+        ]
+
+    def resolve_node_for_write(self, ref: str) -> dict | None:
+        """The node a mutating or trust operation means by ``ref``.
+
+        An id names its node. Otherwise the title or alias must name one
+        active node (or, with none active, exactly one node): a verification
+        asserted by title used to land on whichever duplicate SQLite
+        returned, possibly an archived twin, while the live one stayed
+        unverified. Raises AmbiguousTitleError naming the candidates.
+        """
+        node = self.get_node(ref)
+        if node is not None:
+            return node
+        matches = self._nodes_named(ref)
+        active = [m for m in matches if m.get("status") == "active"]
+        pool = active or matches
+        if len(pool) > 1:
+            raise AmbiguousTitleError(
+                f"'{ref}' names {len(pool)} nodes "
+                f"({', '.join(m['id'] for m in pool[:10])}); use a node id")
+        return pool[0] if pool else None
 
     def update_node(self, node_id: str, _log_activity: bool = True,
                     **fields) -> None:
@@ -3545,49 +3625,70 @@ class Store:
         safe_phrase = phrase.replace('"', '""')
         token_expr = " OR ".join(tokens)
         fts_query = f'"{safe_phrase}" OR {token_expr}'
-        admitted = []
-        offset = 0
-        while len(admitted) < limit:
-            try:
-                rows = self.conn.execute(
-                    f"""SELECT n.*, rank FROM nodes_fts
-                       JOIN nodes n ON n.id = nodes_fts.id
-                       WHERE nodes_fts MATCH ? AND {fts_fence}
-                       ORDER BY CASE n.standing WHEN 'authoritative' THEN 6
+        standing_order = """CASE {col} WHEN 'authoritative' THEN 6
                            WHEN 'ratified' THEN 5 WHEN 'enforced' THEN 4
                            WHEN 'exemplary' THEN 3 WHEN 'prevalent' THEN 2
-                           WHEN 'present' THEN 1 ELSE 0 END DESC, rank LIMIT ? OFFSET ?""",
-                    (fts_query, limit, offset),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                # Fallback: simple LIKE search if FTS query syntax fails.
-                # This is a degraded path — log it so a malformed fence or
-                # broken FTS index announces itself rather than silently
-                # returning plausible wrong results (R5.1/I4).
-                import sys
-                print(f"Warning: FTS search degraded to LIKE fallback for "
-                      f"query {fts_query!r} (fence: {fts_fence})",
-                      file=sys.stderr)
-                rows = self.conn.execute(
-                    f"""SELECT *, 0 as rank FROM nodes
+                           WHEN 'present' THEN 1 ELSE 0 END DESC"""
+        fts_sql = (f"""FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.id
+                       WHERE nodes_fts MATCH ? AND {fts_fence}
+                       ORDER BY {standing_order.format(col='n.standing')}, rank""")
+        like_sql = (f"""FROM nodes
                        WHERE (title LIKE ? OR content LIKE ?)
                          AND {like_fence}
-                       ORDER BY CASE standing WHEN 'authoritative' THEN 6
-                           WHEN 'ratified' THEN 5 WHEN 'enforced' THEN 4
-                           WHEN 'exemplary' THEN 3 WHEN 'prevalent' THEN 2
-                           WHEN 'present' THEN 1 ELSE 0 END DESC, weight DESC LIMIT ? OFFSET ?""",
-                    (f"%{phrase}%", f"%{phrase}%", limit, offset),
-                ).fetchall()
-            for row in rows:
+                       ORDER BY {standing_order.format(col='standing')}, weight DESC""")
+        like_params = (f"%{phrase}%", f"%{phrase}%")
+
+        def degraded() -> None:
+            # Fallback: simple LIKE search if FTS query syntax fails.
+            # This is a degraded path — log it so a malformed fence or
+            # broken FTS index announces itself rather than silently
+            # returning plausible wrong results (R5.1/I4).
+            import sys
+            print(f"Warning: FTS search degraded to LIKE fallback for "
+                  f"query {fts_query!r} (fence: {fts_fence})",
+                  file=sys.stderr)
+
+        if candidate_filter is None:
+            try:
+                rows = self.conn.execute(
+                    f"SELECT n.*, rank {fts_sql} LIMIT ?", (fts_query, limit)).fetchall()
+            except sqlite3.OperationalError:
+                degraded()
+                rows = self.conn.execute(
+                    f"SELECT *, 0 as rank {like_sql} LIMIT ?", (*like_params, limit)).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+        # With a filter, the matches are ranked once and read in pages until
+        # enough pass. Paging with OFFSET re-ranked every match per page:
+        # quadratic when most matches are refused.
+        try:
+            ranked = self.conn.execute(
+                f"SELECT n.id, rank {fts_sql}", (fts_query,)).fetchall()
+        except sqlite3.OperationalError:
+            degraded()
+            ranked = self.conn.execute(
+                f"SELECT id, 0 as rank {like_sql}", like_params).fetchall()
+        admitted: list[dict] = []
+        page = max(limit, 50)
+        for first in range(0, len(ranked), page):
+            chunk = ranked[first:first + page]
+            placeholders = ",".join("?" for _ in chunk)
+            by_id = {
+                row["id"]: row for row in self.conn.execute(
+                    f"SELECT * FROM nodes WHERE id IN ({placeholders})",
+                    [node_id for node_id, _ in chunk])
+            }
+            for node_id, rank in chunk:
+                row = by_id.get(node_id)
+                if row is None:
+                    continue
                 node = self._row_to_dict(row)
-                if candidate_filter is not None and not candidate_filter(node):
+                node["rank"] = rank
+                if not candidate_filter(node):
                     continue
                 admitted.append(node)
                 if len(admitted) >= limit:
-                    break
-            if len(rows) < limit or candidate_filter is None:
-                break
-            offset += len(rows)
+                    return admitted
         return admitted
 
     # ── Weight decay ───────────────────────────────────────────────────
@@ -3662,121 +3763,80 @@ class Store:
                     self.conn.rollback()
                 return 0
 
-            # Node decay over (max(last_accessed, row_prev), now] — unconditional
-            # fold, per-row accounting for the write threshold.
-            rows = self.conn.execute(
-                "SELECT id, weight, last_accessed FROM nodes").fetchall()
-            count = 0
-            for row in rows:
+            # Per-row accounting ({ts, w_true, w_stored} under
+            # `_wtr.<kind>.<id>`) records a row's unrounded weight at ts, so
+            # rounding never accumulates (R2.1). It is rewritten when the row
+            # is written; while writes are suppressed an existing snapshot
+            # stays valid, since the next fold computes the whole interval
+            # from it, so it is only created, never refreshed. Refreshing it
+            # for every row on every run made each cron pass O(graph) upserts
+            # under the write lock; snapshots of deleted rows are removed.
+            snapshots: dict[str, dict] = {}
+            for key, value in self.conn.execute(
+                    "SELECT key, value FROM meta WHERE key LIKE '\\_wtr.%' ESCAPE '\\'"):
                 try:
-                    last = datetime.fromisoformat(row["last_accessed"])
+                    snapshots[key] = _json.loads(value)
                 except (ValueError, TypeError):
-                    continue
-                # Per-row state: {ts, w_true, w_stored} where ts is the
-                # last decay time, w_true is the unrounded weight at that
-                # time, and w_stored is the 4-dp weight we wrote to the row.
-                # Falls back to the global stamp and stored weight when the
-                # row has never been suppressed (no meta key).
-                # On the next fold, if the row's current weight differs
-                # from w_stored, an external write (e.g. reinforcement)
-                # changed the weight between folds — discard the snapshot
-                # and use the row's current stored weight as w0 (R2.1).
-                row_meta_raw = self.get_meta(f"_wtr.node.{row['id']}")
-                row_prev = prev
-                true_weight = float(row["weight"])
-                if row_meta_raw:
-                    try:
-                        row_meta = _json.loads(row_meta_raw)
-                        row_prev = datetime.fromisoformat(row_meta["ts"])
-                        w_stored = float(row_meta["w_stored"])
-                        if w_stored == float(row["weight"]):
-                            # Row untouched since last fold — use the
-                            # unrounded snapshot to avoid cumulative
-                            # 4-dp rounding error (R2.1).
-                            true_weight = float(row_meta["w_true"])
-                        # else: external write happened — true_weight
-                        # stays as the row's current stored weight.
-                    except (ValueError, TypeError, KeyError):
-                        row_prev = prev
-                        true_weight = float(row["weight"])
-                start = max(last, row_prev)
-                days_since = (now - start).total_seconds() / 86400.0
-                if days_since <= 0:
-                    continue
-                decay = 0.5 ** (days_since / node_half_life_days)
-                new_true = true_weight * decay
-                new_weight = max(0.01, round(new_true, 4))
-                if new_weight != round(float(row["weight"]), 4):
-                    self.conn.execute(
-                        "UPDATE nodes SET weight = ? WHERE id = ?",
-                        (new_weight, row["id"]),
-                    )
-                    count += 1
-                    stored_weight = new_weight
-                else:
-                    stored_weight = float(row["weight"])
-                # Always write the per-row meta — the true weight must be
-                # preserved for the next fold's rounding-error avoidance.
-                # The cost is O(changed + suppressed) rows, not O(graph):
-                # rows with days_since <= 0 (just accessed, no interval)
-                # are skipped by the continue above and never reach here.
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                    (f"_wtr.node.{row['id']}",
-                     _json.dumps({
-                         "ts": now.isoformat(),
-                         "w_true": new_true,
-                         "w_stored": stored_weight,
-                     })),
-                )
+                    snapshots[key] = {}
 
-            # Edge decay over (max(created_at, prev), now] — unconditional.
-            # Edges use the global stamp and per-row accounting for the
-            # same rounding-error reason as nodes.
+            def fold(kind: str, rows, base_column: str, half_life: int) -> int:
+                written = 0
+                for row in rows:
+                    try:
+                        base = datetime.fromisoformat(row[base_column])
+                    except (ValueError, TypeError):
+                        continue
+                    key = f"_wtr.{kind}.{row['id']}"
+                    snapshot = snapshots.get(key)
+                    row_prev, true_weight, valid = prev, float(row["weight"]), False
+                    if snapshot is not None:
+                        try:
+                            if float(snapshot["w_stored"]) == float(row["weight"]):
+                                row_prev = datetime.fromisoformat(snapshot["ts"])
+                                true_weight = float(snapshot["w_true"])
+                                valid = True
+                        except (ValueError, TypeError, KeyError):
+                            pass
+                    # A row written since its snapshot (reinforcement) starts
+                    # again from its stored weight at the last run: every run
+                    # rewrites an invalid snapshot, so the write came after
+                    # `prev`, not at the snapshot's (possibly old) time.
+                    days_since = (now - max(base, row_prev)).total_seconds() / 86400.0
+                    if days_since <= 0:
+                        continue
+                    new_true = true_weight * 0.5 ** (days_since / half_life)
+                    new_weight = max(0.01, round(new_true, 4))
+                    if new_weight != round(float(row["weight"]), 4):
+                        self.conn.execute(
+                            f"UPDATE {kind}s SET weight = ? WHERE id = ?",
+                            (new_weight, row["id"]),
+                        )
+                        written += 1
+                        stored = new_weight
+                    elif valid:
+                        continue
+                    else:
+                        stored = float(row["weight"])
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                        (key, _json.dumps({
+                            "ts": now.isoformat(),
+                            "w_true": new_true,
+                            "w_stored": stored,
+                        })),
+                    )
+                return written
+
+            node_rows = self.conn.execute(
+                "SELECT id, weight, last_accessed FROM nodes").fetchall()
+            count = fold("node", node_rows, "last_accessed", node_half_life_days)
             edge_rows = self.conn.execute(
                 "SELECT id, weight, created_at FROM edges").fetchall()
-            for row in edge_rows:
-                try:
-                    created = datetime.fromisoformat(row["created_at"])
-                except (ValueError, TypeError):
-                    continue
-                row_meta_raw = self.get_meta(f"_wtr.edge.{row['id']}")
-                row_prev = prev
-                true_weight = float(row["weight"])
-                if row_meta_raw:
-                    try:
-                        row_meta = _json.loads(row_meta_raw)
-                        row_prev = datetime.fromisoformat(row_meta["ts"])
-                        w_stored = float(row_meta["w_stored"])
-                        if w_stored == float(row["weight"]):
-                            true_weight = float(row_meta["w_true"])
-                    except (ValueError, TypeError, KeyError):
-                        row_prev = prev
-                        true_weight = float(row["weight"])
-                start = max(created, row_prev)
-                days_since = (now - start).total_seconds() / 86400.0
-                if days_since <= 0:
-                    continue
-                decay = 0.5 ** (days_since / edge_half_life_days)
-                new_true = true_weight * decay
-                new_weight = max(0.01, round(new_true, 4))
-                if new_weight != round(float(row["weight"]), 4):
-                    self.conn.execute(
-                        "UPDATE edges SET weight = ? WHERE id = ?",
-                        (new_weight, row["id"]),
-                    )
-                    stored_weight = new_weight
-                else:
-                    stored_weight = float(row["weight"])
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                    (f"_wtr.edge.{row['id']}",
-                     _json.dumps({
-                         "ts": now.isoformat(),
-                         "w_true": new_true,
-                         "w_stored": stored_weight,
-                     })),
-                )
+            fold("edge", edge_rows, "created_at", edge_half_life_days)
+            live = ({f"_wtr.node.{row['id']}" for row in node_rows}
+                    | {f"_wtr.edge.{row['id']}" for row in edge_rows})
+            for key in set(snapshots) - live:
+                self.conn.execute("DELETE FROM meta WHERE key = ?", (key,))
 
             # Stamp always advances — even if no write crossed the 4-dp
             # threshold, the interval is accounted for (R2.1, R2.4).
@@ -4590,6 +4650,48 @@ class Store:
         """Mark a reminder as completed."""
         self.update_reminder(reminder_id, status="completed")
         self._log("complete_reminder", reminder_id)
+
+    def settle_reminder(self, reminder_id: str, status: str, **fields) -> bool:
+        """Set a sweep outcome unless the reminder was closed meanwhile.
+
+        A reminder cancelled (or completed) while its action ran stays that
+        way; the sweep's later write used to reopen it. Returns whether the
+        row changed. Only status and the listed timestamp columns are set.
+        """
+        allowed = {"last_fired", "next_due", "snooze_until"}
+        columns = ["status = ?", "updated_at = ?"]
+        values: list = [status, _now()]
+        for key, value in fields.items():
+            if key in allowed:
+                columns.append(f"{key} = ?")
+                values.append(value)
+        values.append(reminder_id)
+        cursor = self.conn.execute(
+            f"UPDATE reminders SET {', '.join(columns)} "
+            "WHERE id = ? AND status NOT IN ('cancelled', 'completed')",
+            values,
+        )
+        self.conn.commit()
+        if cursor.rowcount and status == "completed":
+            self._log("complete_reminder", reminder_id)
+        return bool(cursor.rowcount)
+
+    def quarantine_reminder_action(self, reminder_id: str, reason: str) -> None:
+        """Park an action whose stored row cannot be rewritten through the
+        normal path (a legacy command the credential guard now refuses): the
+        command is left exactly as stored and only the action state changes
+        (an ``extra`` that is not a JSON object is kept verbatim under
+        ``unparsed_extra``)."""
+        self.conn.execute(
+            "UPDATE reminders SET extra = CASE "
+            "WHEN json_valid(extra) AND json_type(extra) = 'object' "
+            "THEN json_set(extra, '$.action_status', 'paused', '$.action_result', ?1) "
+            "ELSE json_object('action_status', 'paused', 'action_result', ?1, "
+            "'unparsed_extra', extra) END, updated_at = ?2 "
+            "WHERE id = ?3",
+            (redact_text(reason)[:400], _now(), reminder_id),
+        )
+        self.conn.commit()
 
     def _reminder_to_dict(self, row: sqlite3.Row) -> dict:
         """Convert a reminder row to dict with JSON parsing."""

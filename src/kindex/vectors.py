@@ -1261,15 +1261,35 @@ def select_reindex_nodes(
         q += " AND (prov_source LIKE ? OR extra LIKE ?)"
         params.extend([f"{project_prefix}%", f"%{project_prefix}%"])
     q += " ORDER BY weight DESC, updated_at DESC"
-    if limit:
-        q += " LIMIT ?"
-        params.append(limit)
+    if not stale:
+        if limit:
+            q += " LIMIT ?"
+            params.append(limit)
+        return [store._row_to_dict(row) for row in store.conn.execute(q, params)]
 
-    rows = store.conn.execute(q, params).fetchall()
-    nodes = [store._row_to_dict(row) for row in rows]
-    if stale:
-        fingerprint = embedding_fingerprint(store.config)
-        nodes = [node for node in nodes if not _node_embedding_fresh(store, node, fingerprint)]
+    # Staleness is judged per node, so the limit applies to stale nodes: a
+    # limit taken first re-selected the same fresh top rows on every pass and
+    # nothing below them was ever re-embedded. Ranked ids once, rows in pages.
+    fingerprint = embedding_fingerprint(store.config)
+    ids = [row[0] for row in store.conn.execute(
+        q.replace("SELECT *", "SELECT id", 1), params)]
+    nodes: list[dict] = []
+    page = 500
+    for first in range(0, len(ids), page):
+        chunk = ids[first:first + page]
+        placeholders = ",".join("?" for _ in chunk)
+        by_id = {row["id"]: row for row in store.conn.execute(
+            f"SELECT * FROM nodes WHERE id IN ({placeholders})", chunk)}
+        for node_id in chunk:
+            row = by_id.get(node_id)
+            if row is None:
+                continue
+            node = store._row_to_dict(row)
+            if _node_embedding_fresh(store, node, fingerprint):
+                continue
+            nodes.append(node)
+            if limit and len(nodes) >= limit:
+                return nodes
     return nodes
 
 

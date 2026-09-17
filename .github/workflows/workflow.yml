@@ -21,8 +21,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install build
-      - name: Render package version from release tag
-        run: python scripts/render-release-version.py "$GITHUB_REF_NAME" pyproject.toml
+      - name: Check the release tag names the project version
+        run: python scripts/check-release-version.py "$GITHUB_REF_NAME" pyproject.toml
       - run: python -m build
       - uses: actions/upload-artifact@v6
         with:

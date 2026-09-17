@@ -27,6 +27,189 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Reading a node records its access at most once every ten minutes instead of
   taking the write lock on every read.
 
+## [0.42.0] - 2026-09-17
+
+### Changed
+- A task claim is held by a host session (`<agent>:<session_id>` on the
+  modern lane, with `%` and `:` escaped in the agent): completing,
+  cancelling or reopening a task another agent or session has a live claim
+  on is refused (`task_claimed`) unless forced (`--force`, `force=true`),
+  and the holder may refresh its own claim.
+  `task_done`, `task_update` and `task_cancel` take `agent` and `force`.
+- Publishing refuses a release tag that does not name the committed project
+  version (`scripts/check-release-version.py`), instead of rendering the tag
+  into `pyproject.toml` and shipping a wheel whose own version and changelog
+  named the previous release.
+
+### Fixed
+- Host hooks (`prime --for hook`, `compact-hook`, `prompt-check`,
+  `stop-guard`, `attention-hook`) never run a schema migration: a pending
+  one is reported on the degraded line with its remedy (`kin doctor --fix`)
+  instead of copying the whole database inside the host's timeout. A
+  migration snapshot is written under a `.partial` name and renamed when it
+  validates, and a partial left by a killed process is removed by the next
+  snapshot.
+- The prime's recent activity names only nodes that still exist, are
+  active and unexpired, under their current title; a deleted node, an
+  archived one or a reminder is counted without its title. Only the scan
+  for titles is capped; the per-action totals count every entry.
+- The prime summarises a reminder's action (mode, the size of its command
+  and instructions, a digest over both and a preview marked when cut)
+  instead of showing a truncated command beside a call to run it, and names
+  the real commands (`--reminder-id`).
+- `task_execute` answers scope, store and policy refusals, database
+  errors and Git timeouts as `{ok: false, error}` instead of raising them as
+  tool errors.
+- Scheduled maintenance finds repo-local graphs the modern lane opened (and
+  any `.kin/local` graph a scan walks, choosing the populated layout as the
+  store does), fires their reminders, and prunes their expired candidates,
+  nodes, claims and locks. The registry honours `KIN_NO_SCHEDULER_WRITES`
+  (`1`, `true`, `yes`) and locks portably.
+- A session enqueued for reinforcement while a drain is grading is kept, and
+  two drains never pay to grade the same conversation. A drain leases its
+  jobs in the queue, so a drain that dies loses none; a retried job goes
+  behind the rest, and one whose trace never fits the per-call estimate is
+  set aside after three attempts (`reinforce.dead_letter`).
+- A weight-decay run no longer rewrites a snapshot row for every node and
+  edge: a suppressed row's snapshot is created once and kept until the row is
+  written, and snapshots of deleted rows are removed. A row written since its
+  snapshot decays from the last run.
+
+### Security
+- Stored graph text in the prime and in context blocks is marked as data,
+  and cannot open or close a tag, start or underline a heading, or open or
+  close a code fence (backtick or tilde), so a node cannot pose as Kindex's
+  own directives. This covers every rendered field: titles, content,
+  aliases, domains, tags, provenance, edge types and a rule's fields.
+
+## [0.41.1] - 2026-09-17
+
+0.41.0 was tagged but never published (its publish workflow failed on a
+timing-sensitive test, now made independent of runner load); 0.41.1
+supersedes it.
+
+### Fixed
+- The Stop/PreCompact capture hook extracts only transcript text it has not
+  extracted before. It read the transcript from the top on every turn, paying
+  for the same LLM extraction each time and never reaching later turns.
+- Hook LLM requests are bounded by the hook's budget with no retries, and
+  every other request by a 60-second timeout (the SDK default was ten
+  minutes with two retries); a timed-out extraction counts its input against
+  the budget. `prompt-check` queues its attention review and waits at most
+  `--deadline-ms` (default 1000) instead of judging inline.
+- Antigravity hooks that cannot resolve their workspace still answer in the
+  protocol (a PreToolUse decision, JSON on PreInvocation and Stop), and the
+  permission gate runs before the workspace is resolved.
+- kin-mcp returns the remedy with a configuration refusal ("Ambiguous Kindex
+  scope ... Select --project-path ..."), and `task_execute` no longer needs
+  the legacy store to name the agent.
+- A queued attention review (from `attention-hook` or `prompt-check`) is
+  judged with its client's and instance's `agents` overrides; one an instance
+  enabled was dropped as disabled by the background drain.
+- Search names only neighbours a reader may see: an archived, expired,
+  other-client or (under `trusted_only`) untrusted neighbour's title no longer
+  appears beside a result, in the prime or in any context format.
+- Standing orders the query's own text matches; a graph neighbour or vector
+  hit that does not match the query no longer outranks the best match
+  because it has any standing. The whole-table standing probe on every
+  search is gone.
+- `trusted_only` recall filters every candidate before the result window,
+  so verified matches ranked below a page of unverified rows are found (the
+  matches are ranked once, however many are refused), and the withheld
+  count covers them, each node once.
+- The session prime's topic comes from the project (its root directory and
+  git remote) instead of every word of the absolute working directory.
+- The budget ledger is shared safely: every write re-reads the file under a
+  lock and replaces it atomically, and spend checks follow the file, so a
+  concurrent worker's spend is no longer erased (two $0.40 calls used to
+  leave one entry under a $0.50 limit). An unreadable ledger is kept beside
+  the file (which stays in place), reported in the degraded ledger, and
+  replaced by one that stops spending for the rest of that day, instead of
+  failing every LLM feature or forgetting what was spent. A ledger that can
+  be neither read nor kept is left alone and stops spending on every day.
+- Reminder actions:
+  - an action is claimed from the stored reminder, so a sweep never reruns
+    an action finished meanwhile (by `kin remind exec` or another sweep), and
+    a reminder cancelled while its action runs stays cancelled;
+  - a failing action gets three attempts per occurrence (a recurring
+    reminder stays on its occurrence, retried after the automatic snooze,
+    and a worker that died mid-run used its attempt) and is then set aside
+    (`exhausted`) until the next occurrence or a manual exec;
+  - claude actions are capped by `max_budget_usd` (`--max-budget-usd`), not
+    by five turns, and a spent budget or turn limit is final;
+  - a runner finishes when its command exits even if the command started a
+    background service, decodes output leniently, and kills the whole process
+    group on timeout (also when the command closed its output first) or when
+    the runner itself is interrupted;
+  - one reminder the store refuses to rewrite is paused and reported instead
+    of ending the sweep for every reminder after it.
+- Scheduled jobs (launchd and cron) run with the installing shell's PATH and
+  the agent CLIs' directories, and launchd jobs start in the home directory;
+  agent CLIs are also looked up in the usual install locations. Re-run
+  `kin setup-cron` to update an installed scheduler; each re-run refreshes
+  the PATH and keeps a crontab line's schedule.
+- Coordination names address one conversation: starting a second live
+  conversation with an active one's name is refused (it silently took over
+  every post, read, inject and end addressed by that name), a name that
+  reaches more than one live conversation is refused with their ids, and the
+  hooks point at the conversation's id.
+- `coord_read` honours an explicit `since_id` for a member (it was raised to
+  the member's read cursor, so a re-read from 0 printed "No messages.") and
+  leaves the cursor alone; a cursor read that finds nothing says how many
+  messages were already read.
+- The scheduler interval is decided for the machine, not per store: the
+  job runs at the shortest interval any store that reported in the last day
+  wants (recorded in `$XDG_STATE_HOME/kindex/scheduler-state.json`), and with
+  no reminder pending anywhere it keeps an hourly maintenance cadence. A profile (or the only graph) with no pending
+  reminder used to unload the single launchd job, and nothing reloaded it,
+  so reminders, ingest, embedding, decay and dream all stopped.
+- `kin setup-codex-hooks` (and uninstall) change only handlers whose command
+  is exactly one Kindex installed (recorded in `kindex-hooks.json`, so a
+  moved `kin` executable still owns them), keep other handlers in the same
+  entry, back up `hooks.json` before rewriting it, and leave an unchanged
+  file alone. A handler that merely mentioned "kindex", or shared an entry with a
+  Kindex handler, was replaced.
+- The test suite no longer touches the machine's scheduler: creating a
+  reminder in a test repacked the developer's real launchd job or crontab
+  (and, with a fresh store, unloaded it). `KIN_NO_SCHEDULER_WRITES=1`
+  leaves the scheduler untouched, including for child processes.
+- The claude-web adapter writes its concept and project edges (every one
+  failed on an unknown keyword and was swallowed), and re-ingesting a grown
+  conversation updates only its content, domains and metadata, keeping the
+  weight, audience, aka, intent, standing and a title renamed by hand.
+- The code adapter retires modules and classes whose file or definition is
+  gone (and restores them if they return), so deleted and renamed files no
+  longer live on in the graph or in `.kin/index.json`. A run cut short by
+  `--limit` retires nothing, and a node archived by hand stays archived.
+- `kin watch` ingests current Claude Code transcripts (its reader knew only
+  the old top-level shape), and session scans skip subagent and workflow
+  transcripts, which were titled after their directory and crowded real
+  sessions out of every scan.
+- `verify`, `invalidate`, `edit`, `supersede`, `link`, `lock`/`unlock` and
+  `coord_attach` (MCP and CLI) resolve a title to the one active node that
+  carries it and refuse a title that names more than one
+  (`title_collision`); a verification by title could land on an archived
+  twin while the live node stayed unverified. An id still names its node,
+  and title lookups prefer an active node, then the most recently updated.
+- cron no longer re-suggests a cross-component pair that was already raised,
+  in any state (once 100 newer suggestions existed it re-inserted the same
+  pairs every pass, and it re-suggested rejected pairs); accepted
+  suggestions older than 90 days are pruned.
+- The session prime shows an imported Kinbase node's governance label and
+  open Unknowns on the node's own entry, as context blocks already did.
+- A session launched from a repository subdirectory no longer reports
+  `missing_hooks`: the hook receipt is also recorded under the launch
+  directory, where native activity is observed.
+- The stale-embedding reindex applies its limit to stale nodes; it took the
+  limit first, re-selected the same fresh top rows every pass, and never
+  reached the rest.
+
+### Security
+- Collab text from peers (authors, lock holders, standing-message setters,
+  titles, focus, bodies) is rendered on one bounded line with `<`, `>` and
+  `#` neutralized, so it cannot close the hook's context envelope or forge a
+  Kindex heading.
+
 ## [0.40.0] - 2026-09-17
 
 ### Fixed

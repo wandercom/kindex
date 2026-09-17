@@ -6,7 +6,7 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .privacy import redact_text, safe_error
+from .privacy import safe_error
 from .privacy import redacting_print as print
 
 from .routing import (  # noqa: F401  (re-exported for backward compatibility)
@@ -152,6 +152,10 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
 
     # 6. Suggest cross-component links
     suggestion_count = _suggest_links(store, verbose=verbose)
+    try:
+        results["suggestions_pruned"] = store.prune_suggestions()
+    except Exception:
+        results["suggestions_pruned"] = 0
     results["link_suggestions"] = suggestion_count
 
     # 7. Graph hygiene — archive stale orphans, auto-link viable ones
@@ -272,6 +276,8 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
                     "error": safe_error(e)}
         try:
             r = _check_reminders(cfg, store, verbose=verbose)
+            if getattr(cfg, "profile_source", None) == "project":
+                _project_housekeeping(store)
             try:
                 raw = _json.loads(store.get_meta("project_graph_dirs") or "{}")
                 if isinstance(raw, dict):
@@ -310,8 +316,11 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
             cfg.profile_source = "legacy"
             results.append(_one(cfg, None))
 
-    # Project-local .kin graphs, deduped against the dirs already swept.
-    from .project_store import tracked_store_refusal
+    # Project-local .kin graphs, deduped against the dirs already swept:
+    # those a scan found and those the modern lane opened.
+    from .project_store import registered_project_graphs, tracked_store_refusal
+    for root, data_dir in registered_project_graphs().items():
+        project_registry.setdefault(root, data_dir)
     for project_root, data_dir in sorted(project_registry.items()):
         if not Path(data_dir).exists():
             continue  # project deleted since registration — ages out on scan
@@ -333,6 +342,21 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
             continue
         results.append(_one(cfg, project_root))
     return results
+
+
+def _project_housekeeping(store: "Store") -> None:
+    """The local upkeep a project graph gets beside its reminders: expired
+    capture candidates, nodes, task claims and locks. No ingest, LLM or
+    embedding work; each step is isolated."""
+    from .locks import cleanup_expired_locks
+    from .tasks import cleanup_expired_claims
+
+    for step in (store.prune_capture_candidates, lambda: _expire_nodes(store),
+                 lambda: cleanup_expired_claims(store), lambda: cleanup_expired_locks(store)):
+        try:
+            step()
+        except Exception:
+            continue
 
 
 def cron_run_all(base_config: "Config", verbose: bool = False) -> list[dict]:
@@ -501,14 +525,11 @@ def _suggest_links(store: "Store", verbose: bool = False) -> int:
         suggestions = suggest_cross_component_links(store, max_suggestions=5)
         count = 0
         for s in suggestions:
-            # Check if this suggestion already exists
-            existing = store.pending_suggestions(limit=100)
-            already = any(
-                (e["concept_a"] == s["concept_a"] and e["concept_b"] == s["concept_b"])
-                or (e["concept_a"] == s["concept_b"] and e["concept_b"] == s["concept_a"])
-                for e in existing
-            )
-            if not already:
+            # Any earlier suggestion of the pair, in any state, answers it:
+            # checking only the 100 newest pending rows re-inserted the same
+            # pairs every pass once other sources had written 100 more, and
+            # re-suggested pairs the user had rejected.
+            if not store.suggestion_exists(s["concept_a"], s["concept_b"], status=None):
                 store.add_suggestion(
                     concept_a=s["concept_a"],
                     concept_b=s["concept_b"],
@@ -748,16 +769,12 @@ def find_new_sessions(config: "Config", since_iso: str) -> list[Path]:
         # If invalid timestamp, return all files
         since_dt = datetime.datetime.min
 
-    results = []
-    for jsonl_path in projects_dir.rglob("*.jsonl"):
-        try:
-            mtime = datetime.datetime.fromtimestamp(jsonl_path.stat().st_mtime)
-            if mtime > since_dt:
-                results.append(jsonl_path)
-        except OSError:
-            continue
+    from .ingest import session_transcripts
 
-    return sorted(results, key=lambda p: p.stat().st_mtime, reverse=True)
+    return [
+        path for path, mtime in session_transcripts(projects_dir)
+        if datetime.datetime.fromtimestamp(mtime) > since_dt
+    ]
 
 
 def incremental_ingest(
@@ -768,13 +785,12 @@ def incremental_ingest(
     This is a lightweight alternative to full scan_sessions that only
     looks at files modified since the given timestamp.
     """
-    import json
-
     new_files = find_new_sessions(config, since_iso)
     if not new_files:
         return 0
 
     from .extract import keyword_extract
+    from .ingest import _extract_session_text
 
     # Per-profile session routing — same predicate as scan_sessions, so
     # `kin watch` cannot pull foreign-profile sessions into this store.
@@ -791,8 +807,10 @@ def incremental_ingest(
         if store.get_node(session_slug):
             continue
 
-        # Extract text from the session
-        text = _extract_session_text_quick(jsonl_path)
+        # Extract text from the session (the same reader as scan_sessions;
+        # a copy of it read only the old top-level role and found nothing in
+        # current transcripts).
+        text = _extract_session_text(jsonl_path, max_chars=4000)
         if not text or len(text) < 50:
             continue
 
@@ -833,41 +851,3 @@ def incremental_ingest(
                 )
 
     return count
-
-
-def _extract_session_text_quick(jsonl_path: Path, max_chars: int = 4000) -> str:
-    """Quick text extraction from a JSONL session file."""
-    import json
-
-    texts = []
-    total_len = 0
-
-    try:
-        with open(jsonl_path, "r", errors="replace") as f:
-            for line in f:
-                if total_len >= max_chars:
-                    break
-                try:
-                    entry = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-
-                role = entry.get("role", "")
-                if role != "assistant":
-                    continue
-
-                content = entry.get("content", "")
-                if isinstance(content, str):
-                    chunk = redact_text(content)[:800]
-                    texts.append(chunk)
-                    total_len += len(chunk)
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            chunk = redact_text(block.get("text", ""))[:800]
-                            texts.append(chunk)
-                            total_len += len(chunk)
-    except OSError:
-        return ""
-
-    return "\n".join(texts)

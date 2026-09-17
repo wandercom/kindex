@@ -938,6 +938,80 @@ def _symbol_id(repo_slug: str, qualified_name: str) -> str:
     return f"code-sym-{repo_slug}-{h}"
 
 
+_RETIRED_BY = "code-ingest"
+
+
+def _keep_retirement(existing: dict, extra: dict) -> dict:
+    """New adapter metadata, keeping the marker that says this adapter
+    retired the node, so reconciliation can restore it."""
+    old = existing.get("extra") or {}
+    kept = {key: old[key] for key in ("retired_by", "retired_at") if key in old}
+    return {**extra, **kept}
+
+
+def _reconcile_code_nodes(
+    store: "Store",
+    repo_slug: str,
+    root: Path,
+    directory: Path,
+    *,
+    seen: set[str],
+    listed: set[str],
+    parsed: set[str],
+    retire: bool,
+) -> tuple[int, int]:
+    """Retire this repository's code nodes under ``directory`` that the run
+    did not see, and restore ones it retired that are back. Returns
+    ``(retired, restored)``. Only nodes this adapter wrote for this
+    repository root are touched; a node someone archived by hand stays so.
+
+    A module is gone when its file is not ``listed``. A class is gone when
+    its file is gone, or when its file was ``parsed`` this run and the class
+    was not among the tags.
+    """
+    import datetime
+    import json as _json
+
+    try:
+        scope = directory.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return 0, 0
+    prefixes = (f"code-mod-{repo_slug}-", f"code-sym-{repo_slug}-")
+    rows = store.conn.execute(
+        "SELECT id, status, extra FROM nodes "
+        "WHERE substr(id, 1, ?) = ? OR substr(id, 1, ?) = ?",
+        (len(prefixes[0]), prefixes[0], len(prefixes[1]), prefixes[1]),
+    ).fetchall()
+    retired = restored = 0
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    for row in rows:
+        try:
+            extra = _json.loads(row["extra"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(extra, dict) or extra.get("repo_root") != str(root):
+            continue
+        relative = Path(str(extra.get("relative_path") or ""))
+        if str(scope) not in ("", ".") and not relative.is_relative_to(scope):
+            continue
+        if row["id"] in seen:
+            if row["status"] == "archived" and extra.get("retired_by") == _RETIRED_BY:
+                extra.pop("retired_by", None)
+                extra.pop("retired_at", None)
+                store.update_node(row["id"], status="active", extra=extra)
+                restored += 1
+            continue
+        is_symbol = row["id"].startswith(prefixes[1])
+        if is_symbol and str(relative) in listed and str(relative) not in parsed:
+            continue
+        if retire and row["status"] not in ("archived", "superseded"):
+            extra["retired_by"] = _RETIRED_BY
+            extra["retired_at"] = now
+            store.update_node(row["id"], status="archived", extra=extra)
+            retired += 1
+    return retired, restored
+
+
 def _file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -1028,12 +1102,21 @@ def ingest_code(
     # tree-sitter checked per-language later
 
     # Get file list
-    files = _get_file_list(directory, repo_root, exclude_patterns, extensions)
+    # git ls-files still lists a file deleted but not staged; it is gone.
+    files = [f for f in _get_file_list(directory, repo_root, exclude_patterns, extensions)
+             if f.is_file()]
     if verbose:
         print(f"  Found {len(files)} source files in {directory}")
 
     if not files:
-        return IngestResult()
+        # Nothing left to ingest: whatever this adapter recorded here is gone.
+        retired, _ = _reconcile_code_nodes(
+            store, repo_slug, repo_root or directory, directory,
+            seen=set(), listed=set(), parsed=set(), retire=True,
+        )
+        warnings = ([f"retired {retired} code node(s) whose file or symbol is gone"]
+                    if retired else [])
+        return IngestResult(warnings=warnings)
 
     # Run ctags on code files only — asset files added via unity/
     # extra_extensions have no ctags parser, and feeding them in would
@@ -1164,7 +1247,8 @@ def ingest_code(
         title = rel_path  # Use relative path as title — most useful for search
 
         if existing:
-            store.update_node(mod_id, content=content, extra=extra)
+            store.update_node(mod_id, content=content,
+                              extra=_keep_retirement(existing, extra))
             updated += 1
         else:
             store.add_node(
@@ -1234,7 +1318,8 @@ def ingest_code(
                 sym_title = f"{scope}.{t['name']}"
 
             if sym_existing:
-                store.update_node(sym_id, content=sym_content, extra=sym_extra)
+                store.update_node(sym_id, content=sym_content,
+                                  extra=_keep_retirement(sym_existing, sym_extra))
                 updated += 1
             else:
                 store.add_node(
@@ -1529,6 +1614,30 @@ def ingest_code(
 
         if verbose:
             print(f"  tree-sitter: processed {len(file_list)} {language} files")
+
+    # Reconcile: a module or class this run no longer found is retired, and
+    # one that came back is restored. Ingest used to be additive only, so
+    # deleted and renamed files lived on (and were exported) forever. A run
+    # cut short by its limit saw only part of the tree and retires nothing.
+    def relative(path_str: str) -> str:
+        try:
+            return str(Path(path_str).relative_to(effective_root))
+        except ValueError:
+            return path_str
+
+    retired, restored = _reconcile_code_nodes(
+        store, repo_slug, effective_root, directory,
+        seen=set(module_node_ids.values()) | set(symbol_node_ids.values()),
+        listed=set(module_node_ids),
+        # A file's classes are judged only where ctags produced tags for it
+        # this run; a failed or missing parse says nothing about them.
+        parsed={relative(path) for path, file_tags in grouped.items() if file_tags},
+        retire=not truncated,
+    )
+    if verbose and (retired or restored):
+        print(f"  Retired {retired} and restored {restored} code node(s)")
+    if retired:
+        warnings.append(f"retired {retired} code node(s) whose file or symbol is gone")
 
     # Link all code nodes to project
     _link_to_project(store, repo_slug, all_node_ids)

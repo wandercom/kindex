@@ -471,6 +471,10 @@ def _advance_recurring_locked(store: Store, reminder_id: str) -> str | None:
     r = store.get_reminder(reminder_id)
     if r is None:
         raise ValueError(f"Reminder not found: {reminder_id}")
+    if r.get("status") in ("cancelled", "completed"):
+        # Closed while its action ran: stays closed.
+        store.conn.rollback()
+        return None
 
     schedule = r.get("schedule", "")
     if not schedule:
@@ -519,6 +523,11 @@ def _advance_recurring_locked(store: Store, reminder_id: str) -> str | None:
         updates["extra"] = extra
     if extra.get("action_status") and extra["action_status"] not in ("running", "paused"):
         extra["action_status"] = "pending"
+        updates["extra"] = extra
+    if "action_attempts" in extra:
+        # Each occurrence gets its own attempts.
+        extra.pop("action_attempts", None)
+        extra.pop("action_attempt_occurrence", None)
         updates["extra"] = extra
 
     store.update_reminder(reminder_id, **updates)
@@ -645,7 +654,7 @@ def _check_and_fire_locked(
     config: Config,
     token: str,
 ) -> list[dict]:
-    from .notify import dispatch, is_user_idle
+    from .notify import is_user_idle
 
     # Skip all notifications if user is idle beyond threshold
     idle = is_user_idle(config)
@@ -665,52 +674,88 @@ def _check_and_fire_locked(
         if not _renew_check_lock(store, token):
             break
 
-        # Determine channels for this reminder
-        channels = r.get("channels") or []
-        if not channels:
-            channels = None  # will use defaults
-
-        # Dispatch notification
-        dispatch(r, config, channel_names=channels)
-
-        # Execute action if present, enabled, and not stale. The staleness
-        # guard is a hard safety line: a wake reminder minutes overdue is a
-        # live workflow and executes; one overdue by more than
-        # max_action_overdue means the workflow it belonged to is long gone —
-        # auto-executing it (worst case: a first-ever scheduler install
-        # discovering months of due pollers) detonates a swarm of headless
-        # agents. Stale ones notify only; run `kin remind exec` to run one
-        # deliberately.
-        from .actions import execute_action, has_action
-
-        stale = _action_is_stale(r, config)
-        if config.reminders.action_enabled and not stale:
-            if has_action(r):
-                result = execute_action(store, r, config)
-                if result.get("status") == "completed":
-                    if r["reminder_type"] == "recurring":
-                        advance_recurring(store, r["id"])
-                    else:
-                        store.complete_reminder(r["id"])
-                    fired.append(r)
-                    continue
-
-        if r["reminder_type"] == "recurring":
-            # Advance to next occurrence
-            advance_recurring(store, r["id"])
-            if stale and has_action(r):
-                # Advancing re-arms the action for an occurrence one period
-                # away — which would resurrect a stale poller swarm, merely
-                # time-shifted. Park it instead: notify-only every occurrence
-                # until a deliberate `kin remind exec` resumes the job.
-                _pause_action(store, r["id"])
-        else:
-            # Mark as fired (pending user action)
-            store.update_reminder(r["id"], status="fired", last_fired=_now())
-
-        fired.append(r)
+        # One reminder that cannot be processed is set aside and reported;
+        # it used to end the sweep, and since it stays due and sorts to the
+        # same place, every reminder after it never fired again.
+        try:
+            if _fire_one(store, config, r):
+                fired.append(r)
+        except Exception as error:
+            _set_aside(store, r, error)
 
     return fired
+
+
+def _set_aside(store: Store, reminder: dict, error: Exception) -> None:
+    from .config import record_degraded
+    from .privacy import safe_error
+
+    try:
+        store.conn.rollback()
+    except Exception:
+        pass
+    try:
+        store.quarantine_reminder_action(
+            reminder["id"], f"set aside by the reminder sweep: {safe_error(error)}")
+    except Exception:
+        pass
+    record_degraded("remind-check", error, config=store.config)
+
+
+def _fire_one(store: Store, config: Config, r: dict) -> bool:
+    """Dispatch one due reminder and run its action. Returns whether it fired."""
+    from .notify import dispatch
+
+    # Determine channels for this reminder
+    channels = r.get("channels") or []
+    if not channels:
+        channels = None  # will use defaults
+
+    # Dispatch notification
+    dispatch(r, config, channel_names=channels)
+
+    # Execute action if present, enabled, and not stale. The staleness
+    # guard is a hard safety line: a wake reminder minutes overdue is a
+    # live workflow and executes; one overdue by more than
+    # max_action_overdue means the workflow it belonged to is long gone —
+    # auto-executing it (worst case: a first-ever scheduler install
+    # discovering months of due pollers) detonates a swarm of headless
+    # agents. Stale ones notify only; run `kin remind exec` to run one
+    # deliberately.
+    from .actions import execute_action, has_action
+
+    stale = _action_is_stale(r, config)
+    if config.reminders.action_enabled and not stale:
+        if has_action(r):
+            result = execute_action(store, r, config)
+            if result.get("status") == "completed":
+                if r["reminder_type"] == "recurring":
+                    advance_recurring(store, r["id"])
+                else:
+                    store.settle_reminder(r["id"], "completed")
+                return True
+            if result.get("status") == "failed":
+                # Retried on this occurrence, after the automatic snooze,
+                # until it succeeds or its attempts run out; advancing a
+                # recurring reminder here started a new occurrence (and a
+                # fresh attempt count) on every failure.
+                store.settle_reminder(r["id"], "fired", last_fired=_now())
+                return True
+
+    if r["reminder_type"] == "recurring":
+        # Advance to next occurrence
+        advanced = advance_recurring(store, r["id"])
+        if stale and has_action(r) and advanced is not None:
+            # Advancing re-arms the action for an occurrence one period
+            # away — which would resurrect a stale poller swarm, merely
+            # time-shifted. Park it instead: notify-only every occurrence
+            # until a deliberate `kin remind exec` resumes the job.
+            _pause_action(store, r["id"])
+    else:
+        # Mark as fired (pending user action), unless closed meanwhile.
+        store.settle_reminder(r["id"], "fired", last_fired=_now())
+
+    return True
 
 
 def _pause_action(store: Store, reminder_id: str) -> None:
