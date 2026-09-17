@@ -6902,13 +6902,26 @@ def _config_write(key: str, value: str, config_path: str | None = None,
                 # a path that doesn't go through the symlink.
                 path = Path.home() / "kin.yaml"
     else:
-        from .config import _maybe_upgrade_kin_file, _project_config_paths, resolve_project_root
+        from .config import (
+            _contained_resolve,
+            _maybe_upgrade_kin_file,
+            _project_config_paths,
+            resolve_project_root,
+        )
         # Auto-upgrade old .kin file before searching local paths
         root = resolve_project_root(project_path)
         _maybe_upgrade_kin_file((root / ".kin").expanduser().resolve())
         path = None
+        # Only this project's own files. The read path also inherits from
+        # ancestor directories; writing to the first ancestor found silently
+        # reconfigured every sibling repository under it.
+        # Compared as the read path resolves them (a kin.yaml may be a
+        # symlink to another name).
+        own = {resolved for candidate in (root / ".kin" / "config", root / "kin.yaml",
+                                          root / "conv.yaml")
+               if (resolved := _contained_resolve(candidate)) is not None}
         for p in _project_config_paths(root):
-            if p.exists():
+            if p in own and p.exists():
                 path = p
                 break
         if path is None:
