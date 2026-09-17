@@ -24,7 +24,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-      # The local transport contract tests skip without tmux.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+      # The local transport contract tests skip without tmux; the rust
+      # adapter's symbol tests need universal-ctags.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux universal-ctags
       - run: pip install -e ".[dev,mcp]"
       - run: pytest -n auto --dist loadfile --timeout 300

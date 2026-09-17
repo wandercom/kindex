@@ -6,6 +6,7 @@ smoke test on a synthetic 3-file rust project.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import textwrap
 from pathlib import Path
 
@@ -205,6 +206,8 @@ class TestRustIngestion:
         finally:
             store.close()
 
+    @pytest.mark.skipif(shutil.which("ctags") is None,
+                        reason="symbol nodes come from universal-ctags, which is not installed")
     def test_ingest_creates_trait_impl_edges(self, tmp_path):
         """`impl Greet for Greeter` should create an `implements` edge.
 
