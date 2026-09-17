@@ -125,6 +125,13 @@ def prime_context(
                     entry += f": {content}"
                 if connected:
                     entry += f" [{connected}]"
+                # Imported Kinbase evidence carries its governance label and
+                # open Unknowns on the same entry, so the budget keeps or
+                # drops them together (context blocks already did this).
+                from .kinbase import evidence_note
+                caveat = evidence_note(r)
+                if caveat:
+                    entry += "\n  " + caveat.replace("\n", "\n  ")
             except Exception:
                 continue  # one malformed node never zeroes the prime
 
