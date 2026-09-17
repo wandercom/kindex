@@ -1,6 +1,7 @@
 """Resolve the two historical repo-local layouts without moving graph data."""
 import os
 from pathlib import Path
+import shlex
 import sqlite3
 import subprocess
 
@@ -56,6 +57,18 @@ _GIT_REDIRECT_ENV = frozenset({
 })
 
 
+def _printable(value: object) -> str:
+    return "".join(char if char.isprintable() else "?" for char in str(value))
+
+
+def untrack_command(worktree: Path, relative: str) -> str:
+    """The shell command that stops a worktree tracking a directory while
+    keeping its files. Both paths come from the repository, so both are
+    quoted, and the pathspec is literal."""
+    return shlex.join(["git", "--literal-pathspecs", "-C", str(worktree),
+                       "rm", "-r", "--cached", "--", relative])
+
+
 def _enclosing_worktree(path: Path) -> Path | None:
     for candidate in (path, *path.parents):
         if (candidate / ".git").exists():
@@ -91,17 +104,19 @@ def tracked_store_refusal(directory: Path) -> str | None:
             ["git", "--literal-pathspecs", "-C", str(worktree), "ls-files", "-z", "--", relative],
             capture_output=True, stdin=subprocess.DEVNULL, env=env, timeout=3)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return (f"Refusing Kindex storage at {directory}: git could not confirm that "
-                f"{worktree} does not track it ({type(error).__name__})")
+        return (f"Refusing Kindex storage at {_printable(directory)}: git could not confirm "
+                f"that {_printable(worktree)} does not track it ({type(error).__name__})")
     if listed.returncode != 0:
         reason = listed.stderr.decode("utf-8", "replace").strip().splitlines()[:1]
-        return (f"Refusing Kindex storage at {directory}: git could not confirm that "
-                f"{worktree} does not track it ({reason[0] if reason else listed.returncode})")
+        return (f"Refusing Kindex storage at {_printable(directory)}: git could not confirm "
+                f"that {_printable(worktree)} does not track it "
+                f"({_printable(reason[0]) if reason else listed.returncode})")
     if listed.stdout.strip(b"\0"):
-        return (f"Refusing tracked Kindex storage at {directory}: {worktree} tracks it, and "
-                "files a clone delivers are not a local trusted database. If this store is "
-                f"your own, stop tracking it (git -C {worktree} rm -r --cached -- {relative}); "
-                "the files stay on disk")
+        return (f"Refusing tracked Kindex storage at {_printable(directory)}: "
+                f"{_printable(worktree)} tracks it, and files a clone delivers are not a "
+                "local trusted database. If this store is your own, stop tracking it "
+                "(the files stay on disk):\n  "
+                + _printable(untrack_command(worktree, relative)))
     return None
 
 

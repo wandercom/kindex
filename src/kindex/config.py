@@ -872,12 +872,44 @@ def _deep_merge(base: dict, override: dict) -> dict:
 # it is evidence, not authority: these keys come only from the user's own
 # config, as trusted_supervisor_config already does for the hook lane.
 _PROJECT_LAYER_UNTRUSTED_KEYS = frozenset({
-    "sim", "llm", "embedding", "budget", "agents",
+    "sim", "llm", "embedding", "budget", "agents", "attention",
     "profiles", "default_profile",
     "project_dirs", "claude_dir", "codex_dir", "gemini_dir", "antigravity_dir",
     "antigravity_cli_dir", "opencode_dir", "cursor_dir",
     "user", "agent_id",
 })
+# Sections a repository may tune only partly. Reminder channels carry private
+# reminder text to webhooks and mailboxes, and the rest of the section decides
+# whether and when actions execute; a project may only switch off the usage
+# nudge (documented as a per-project setting).
+_PROJECT_LAYER_ALLOWED_SUBKEYS = {
+    "reminders": frozenset({"remind_kindex_usage"}),
+}
+
+
+def _strip_project_authority(data: dict) -> tuple[dict, list[str]]:
+    """The project layer without the keys only the user's config may set,
+    and the names of the keys it tried to set."""
+    ignored = sorted(k for k in data if k in _PROJECT_LAYER_UNTRUSTED_KEYS)
+    kept = {k: v for k, v in data.items() if k not in _PROJECT_LAYER_UNTRUSTED_KEYS}
+    for section, allowed in _PROJECT_LAYER_ALLOWED_SUBKEYS.items():
+        value = kept.get(section)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            ignored.append(section)
+            kept.pop(section)
+            continue
+        ignored.extend(f"{section}.{k}" for k in sorted(value) if k not in allowed)
+        kept[section] = {k: v for k, v in value.items() if k in allowed}
+    return kept, sorted(ignored)
+
+
+def _same_path(left: str | Path, right: str | Path) -> bool:
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except (OSError, ValueError):
+        return False
 
 
 def load_config(
@@ -932,11 +964,11 @@ def load_config(
     # Layer 2: local config (project-level) merges over global
     kin_profile = merged.pop("profile", None)
     ignored_project_keys: list[str] = []
+    project_data_dir: str | None = None
     for p in project_layers:
         if p.is_file():
-            data = _load_kin_config_with_inheritance(p)
-            ignored_project_keys = sorted(k for k in data if k in _PROJECT_LAYER_UNTRUSTED_KEYS)
-            data = {k: v for k, v in data.items() if k not in _PROJECT_LAYER_UNTRUSTED_KEYS}
+            data, ignored_project_keys = _strip_project_authority(
+                _load_kin_config_with_inheritance(p))
             if "profile" in data:
                 kin_profile = data.pop("profile")
             # A relative data_dir in a project config means "inside this
@@ -950,10 +982,7 @@ def load_config(
                 config_root = p.parent.parent if p.parent.name == ".kin" else p.parent
                 data["data_dir"] = str(config_root / Path(str(raw_dd)).expanduser())
             if data.get("data_dir"):
-                # A repository may name its own local store; it may not name
-                # one that a clone delivered.
-                from .project_store import refuse_tracked_store
-                refuse_tracked_store(Path(str(data["data_dir"])))
+                project_data_dir = str(data["data_dir"])
             merged = _deep_merge(merged, data)
             break  # use first local found
 
@@ -983,7 +1012,14 @@ def load_config(
                         f"Both are preserved. Select --project-path {project_root} for project work "
                         f"or --data-dir {selected} for the home store; no data was merged or moved.")
             cfg.data_dir = str(project_store)
-    return _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
+    cfg = _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
+    if project_data_dir and _same_path(cfg.data_dir, project_data_dir):
+        # A repository may name its own local store; it may not name one that
+        # a clone delivered. Asked only of the store actually selected: an
+        # explicit --data-dir or a user profile replaces the repository's.
+        from .project_store import refuse_tracked_store
+        refuse_tracked_store(Path(project_data_dir))
+    return cfg
 
 
 def _override_data_dir(config: Config, data_dir: str | Path | None) -> Config:

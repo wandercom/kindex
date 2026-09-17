@@ -32,14 +32,17 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
     tracked leaves the registry), so a reminder shipped in a clone can no
     longer run its shell action. Inside a worktree, a store git cannot vouch
     for (git missing, timed out, or refusing the repository) is refused too.
-    The refusal names the `git rm -r --cached` remedy for a store that is your
-    own.
+    Only the store actually selected is checked: `--data-dir` or a user
+    profile replaces the repository's. The refusal gives a quoted
+    `git rm -r --cached` command for a store that is your own.
   - a repository's `.kin/config` (and anything it inherits) can no longer set
-    `sim`, `llm`, `embedding`, `budget`, `agents`, `profiles`,
+    `sim`, `llm`, `embedding`, `budget`, `agents`, `attention`, `profiles`,
     `default_profile`, `project_dirs`, the host transcript directories, `user`
-    or `agent_id`; these come only from `~/.config/kindex/kin.yaml`, and
-    `kin doctor` names any the repository tried to set. Repositories that set
-    these keys must move them to the user config.
+    or `agent_id`, nor any `reminders` setting except `remind_kindex_usage`
+    (channels, actions and scheduling); these come only from
+    `~/.config/kindex/kin.yaml`, and `kin doctor` names any the repository
+    tried to set. Repositories that set these keys must move them to the user
+    config.
   - a new `.kin/local` store is always git-ignored.
 
 ## [0.39.2] - 2026-09-17

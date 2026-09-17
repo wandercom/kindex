@@ -327,3 +327,62 @@ def test_the_ignore_entry_is_appended_to_existing_bytes(world):
     ensure_local_ignored(kin / "local")
     ensure_local_ignored(kin / "local" / "kindex")
     assert (kin / ".gitignore").read_bytes() == b"caf\xe9-notes\nlocal/\n"
+
+
+def test_repo_config_cannot_route_reminders_or_turn_on_attention(world):
+    (world["repo"] / ".kin").mkdir()
+    (world["repo"] / ".kin" / "config").write_text(
+        "reminders:\n  remind_kindex_usage: false\n  action_enabled: true\n"
+        "  channels:\n    slack:\n      enabled: true\n      webhook_url: https://hooks.example.invalid/x\n"
+        "attention:\n  enabled: true\n")
+    commit_all(world["repo"])
+    probe = run_py(world, "from kindex.config import load_config; c = load_config(); "
+                          "print(c.reminders.remind_kindex_usage, c.reminders.channels.slack.webhook_url == '', "
+                          "c.attention.enabled, c._ignored_project_keys)")
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == (
+        "False True False ['attention', 'reminders.action_enabled', 'reminders.channels']")
+
+
+def test_an_explicit_store_choice_replaces_a_tracked_project_store(world):
+    """Only the store actually selected is asked about."""
+    (world["repo"] / ".kin").mkdir()
+    (world["repo"] / ".kin" / "config").write_text("data_dir: shipped-store\n")
+    seed_store(world["repo"] / "shipped-store")
+    commit_all(world["repo"])
+    mine = world["tmp"] / "my-store"
+    chosen = run_py(world, "import sys; from kindex.config import load_config; "
+                           "print(load_config(data_dir=sys.argv[1]).data_path)", str(mine))
+    assert chosen.returncode == 0, chosen.stderr
+    assert chosen.stdout.strip() == str(mine)
+    (world["home"] / ".config" / "kindex" / "kin.yaml").write_text(
+        f"profiles:\n  work:\n    data_dir: {world['tmp'] / 'work-store'}\n")
+    profiled = run_py(world, "from kindex.config import load_config; "
+                             "print(load_config(profile='work').data_path)")
+    assert profiled.returncode == 0, profiled.stderr
+    assert profiled.stdout.strip() == str(world["tmp"] / "work-store")
+
+
+def test_the_suggested_remedy_is_safe_to_paste(world):
+    hostile = world["repo"] / ";touch OWNED;#"
+    seed_store(hostile)
+    commit_all(world["repo"])
+    refusal = refusal_for(world, hostile)
+    command = refusal.split("\n  ", 1)[1]
+    subprocess.run(["bash", "-c", command], cwd=world["tmp"], check=True,
+                   capture_output=True, env={**os.environ, **GIT_ENV})
+    assert not (world["tmp"] / "OWNED").exists() and not (world["repo"] / "OWNED").exists()
+    assert refusal_for(world, hostile) == "None", "the store is untracked and kept"
+    assert (hostile / "kindex.db").exists()
+
+
+def test_opening_a_store_never_writes_through_a_symlinked_kin(world):
+    # The target is itself a .kin directory, so the resolved path looks
+    # canonical; only the path as named shows the link.
+    outside = world["tmp"] / "elsewhere" / ".kin"
+    outside.mkdir(parents=True)
+    (world["repo"] / ".kin").symlink_to(outside)
+    store = Store(Config(data_dir=str(world["repo"] / ".kin" / "local" / "kindex")))
+    store.add_node(title="local", node_id="local-node")
+    store.close()
+    assert not (outside / ".gitignore").exists()
