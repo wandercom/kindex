@@ -1065,7 +1065,10 @@ def degraded_ledger_path(config: Config | None = None,
     """Path of degraded.jsonl under the base (pre-profile) data dir.
 
     override_dir is an explicit --data-dir: like the store itself it wins
-    over config resolution so hermetic runs stay hermetic.
+    over config resolution so hermetic runs stay hermetic. Without a config
+    (the event being recorded is usually a failure to resolve one) the base
+    is the fixed ~/.kindex: it needs no configuration to compute, and
+    `kin status` / `kin doctor` read it alongside their own base.
     """
     if override_dir:
         base = override_dir
@@ -1099,9 +1102,15 @@ def record_degraded(cmd: str, error: BaseException,
         path = degraded_ledger_path(config, override_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         event = redact({
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            # Microseconds: events from two ledgers are merged by ts, and a
+            # tie at one-second resolution could report an older failure as
+            # the latest.
+            "ts": datetime.now().isoformat(timespec="microseconds"),
             "cmd": cmd,
-            "profile": config.active_profile if config is not None else None,
+            # Every field is bounded (msg by safe_error, profile here), so a
+            # line stays a single small write (R2.6).
+            "profile": (str(config.active_profile)[:100]
+                        if config is not None and config.active_profile else None),
             "profile_source": (config.profile_source
                                if config is not None else "unknown"),
             "error_class": type(error).__name__,
@@ -1120,6 +1129,14 @@ def record_degraded(cmd: str, error: BaseException,
         _try_cap_degraded_ledger(path)
     except Exception:
         pass
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write may write less than asked; a replacement ledger that stopped
+    part-way would replace good lines with a truncated one."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def _try_cap_degraded_ledger(path: Path) -> None:
@@ -1152,9 +1169,20 @@ def _try_cap_degraded_ledger(path: Path) -> None:
             read_size = len(data)
             lines = data.splitlines(keepends=True)
             trimmed = b"".join(lines[-_DEGRADED_KEEP_LINES:])
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            # The replacement must keep the ledger's 0600: a plain write took
+            # its mode from the umask (0644 in practice), and the raw reasons
+            # the ledger holds are only protected by that mode. mkstemp gives
+            # an exclusive, unpredictable name; fchmod pins the mode whatever
+            # the umask.
+            import tempfile
+            fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+            tmp = Path(tmp_name)
             try:
-                tmp.write_bytes(trimmed)
+                try:
+                    os.fchmod(fd, 0o600)
+                    _write_all(fd, trimmed)
+                finally:
+                    os.close(fd)
                 os.replace(tmp, path)
             finally:
                 tmp.unlink(missing_ok=True)
@@ -1170,7 +1198,7 @@ def _try_cap_degraded_ledger(path: Path) -> None:
                 if tail.strip():
                     new_fd = os.open(str(path), os.O_WRONLY | os.O_APPEND, 0o600)
                     try:
-                        os.write(new_fd, tail)
+                        _write_all(new_fd, tail)
                     finally:
                         os.close(new_fd)
         finally:
@@ -1185,10 +1213,41 @@ def _try_cap_degraded_ledger(path: Path) -> None:
         os.close(lock_fd)
 
 
+def _degraded_ledger_candidates(config: Config | None,
+                                override_dir: str | None) -> list[Path]:
+    """Every ledger a degraded event may have been written to.
+
+    A writer that had a config writes under its store's base; one that could
+    not load a config writes under ~/.kindex. A reader composes both, so a
+    refusal recorded before a config was fixed, or while resolution itself
+    failed, is still found. An explicit --data-dir is exclusive. Two names
+    for one file (symlink, hard link, a base that is ~/.kindex) are read once.
+    """
+    if override_dir:
+        return [degraded_ledger_path(None, override_dir)]
+    paths = []
+    if config is not None:
+        paths.append(degraded_ledger_path(config))
+    paths.append(degraded_ledger_path(None))
+    seen: set = set()
+    unique = []
+    for path in paths:
+        try:
+            info = path.stat()
+            key = (info.st_dev, info.st_ino)
+        except OSError:
+            key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
 def read_degraded_events(config: Config | None = None,
                          days: int = 7,
                          override_dir: str | None = None) -> list[dict]:
-    """Degraded events from the last `days` days, oldest first.
+    """Degraded events from the last `days` days, oldest first, composed
+    from every ledger an event may have been written to.
 
     Absent file or unreadable content mean zero events, never an error;
     malformed lines are skipped.
@@ -1196,22 +1255,26 @@ def read_degraded_events(config: Config | None = None,
     import json
     from datetime import datetime, timedelta
 
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    events = []
     try:
-        path = degraded_ledger_path(config, override_dir)
-        if not path.exists():
-            return []
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
-        events = []
-        for raw in path.read_text(errors="replace").splitlines():
-            try:
-                event = json.loads(raw)
-            except ValueError:
-                continue
-            if isinstance(event, dict) and str(event.get("ts", "")) >= cutoff:
-                events.append(event)
-        return events
+        candidates = _degraded_ledger_candidates(config, override_dir)
     except Exception:
         return []
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            for raw in path.read_text(errors="replace").splitlines():
+                try:
+                    event = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and str(event.get("ts", "")) >= cutoff:
+                    events.append(event)
+        except Exception:
+            continue
+    return sorted(events, key=lambda event: str(event.get("ts", "")))
 
 
 def resolve_agent_id(config: Config) -> str:
