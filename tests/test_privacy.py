@@ -247,8 +247,11 @@ def test_new_archive_preserves_sanitized_bytes_and_old_sources_are_not_rewritten
     legacy = store.add_node("Legacy", "safe")
     store.conn.execute("UPDATE nodes SET content=? WHERE id=?", (CANARY, legacy))
     store.conn.commit()
-    with pytest.raises(ValueError, match="credential remediation"):
-        archive_nodes(cfg, store, [legacy])
+    # Refused, reported and skipped; the batch is not aborted for it.
+    assert archive_nodes(cfg, store, [legacy]) == 0
+    failed = json.loads(store.get_meta("archive_failed_ids"))
+    assert failed[0]["id"] == legacy and "credential remediation" in failed[0]["error"]
+    assert CANARY not in store.get_meta("archive_failed_ids")
     assert store.get_node(legacy)["content"] == CANARY
     assert not search_archives(cfg, "Legacy")
 
