@@ -97,17 +97,25 @@ def test_documented_migration_snapshots_are_outside_merge_rotation():
 
 
 def _tracked_files(directory: str) -> list[Path]:
-    """The files Git tracks under `directory`; every file when this is not a
-    Git checkout (an unpacked sdist)."""
+    """The files Git tracks under `directory`; every file when ROOT is not
+    the top of its own Git checkout (an unpacked sdist, possibly inside some
+    other repository, where Git would list nothing)."""
     import subprocess
 
+    everything = list((ROOT / directory).rglob("*"))
     try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=ROOT,
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout.strip()
+        if Path(top).resolve() != ROOT.resolve():
+            return everything
         listed = subprocess.run(
             ["git", "ls-files", "-z", "--", directory], cwd=ROOT,
             capture_output=True, check=True, timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return list((ROOT / directory).rglob("*"))
+        return everything
     return [ROOT / name for name in listed.decode().split("\0") if name]
 
 
@@ -121,3 +129,17 @@ def test_published_pages_leave_out_internal_reviews_and_home_paths():
         if path.is_file() and path.suffix in {".md", ".html", ".json", ".txt"}:
             homes = set(re.findall(r"/Users/([A-Za-z0-9._-]+)/", path.read_text(errors="replace")))
             assert homes <= {"alice"}, (path, homes)
+
+
+def test_a_nested_unpacked_tree_is_checked_whole(tmp_path, monkeypatch):
+    """ROOT inside another repository is not that repository: every file is read."""
+    import subprocess
+    import sys
+
+    outer = tmp_path / "outer"
+    inner = outer / "vendor" / "kindex"
+    (inner / "docs").mkdir(parents=True)
+    (inner / "docs" / "page.md").write_text("x")
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", inner)
+    assert _tracked_files("docs") == [inner / "docs" / "page.md"]
