@@ -744,3 +744,22 @@ class TestExplicitPathsAndRelativeProfiles:
         monkeypatch.chdir(elsewhere)
         cfg = load_config(project_path=project)
         assert cfg.data_dir == str(global_yaml.parent / "graphs" / "work")
+
+    def test_every_profile_dir_is_anchored_for_cron(
+            self, global_yaml, project, tmp_path, monkeypatch):
+        """Cron and routing read every profile entry, not just the active one."""
+        global_yaml.write_text(yaml.dump({
+            "profiles": {
+                "work": {"data_dir": "graphs/work", "roots": []},
+                "home": {"data_dir": "graphs/home", "roots": []},
+            },
+            "default_profile": "work",
+        }))
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        cfg = load_config(project_path=project)
+        assert {name: entry.data_dir for name, entry in cfg.profiles.items()} == {
+            "work": str(global_yaml.parent / "graphs" / "work"),
+            "home": str(global_yaml.parent / "graphs" / "home"),
+        }

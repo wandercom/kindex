@@ -859,6 +859,9 @@ class Store:
         if current_version < 14:
             self._migrate_v14()
 
+        if current_version < 15:
+            self._migrate_v15()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -1359,6 +1362,32 @@ class Store:
             c.rollback()
             raise
 
+    def _migrate_v15(self) -> None:
+        """Index Kinbase rows by repository, and give an early-v7
+        ``injection_pheromone`` its composite key.
+
+        ``idx_nodes_kinbase_repo`` was added to the schema after v14 shipped,
+        so only fresh stores had it and sync scanned ``nodes`` everywhere
+        else. The early-v7 pheromone table was keyed by ``node_id`` alone:
+        adding its missing columns left that key, and a deposit for a second
+        context of the same node failed.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nodes_kinbase_repo "
+                "ON nodes (json_extract(extra, '$.kinbase.repo')) WHERE json_valid(extra)")
+            if _pheromone_needs_rebuild(c):
+                _rebuild_pheromone_table(c)
+            if _pheromone_needs_rebuild(c):
+                raise RuntimeError("v15 migration verification failed: injection_pheromone key")
+            c.execute("UPDATE meta SET value = '15' WHERE key = 'schema_version'")
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
     # Columns each table must carry for the code that queries it to work.
     # Checked by `kin doctor`, which is the only place that catches the failure
     # class v10 repairs: a table that exists with the right name and the wrong
@@ -1416,6 +1445,10 @@ class Store:
                                 f"UPDATE {table} SET {column} = {backfill} WHERE {column} = ''")
                     except sqlite3.OperationalError:
                         continue  # a column SQLite cannot add in place stays drift
+            # A wrong primary key cannot be altered in place: the table is
+            # rebuilt with the schema's key, keeping every row.
+            if _pheromone_needs_rebuild(self._conn):
+                _rebuild_pheromone_table(self._conn)
             self._conn.commit()
             self._record_schema_migration_snapshot(snapshot, reason)
         return self.schema_drift()
@@ -1447,6 +1480,8 @@ class Store:
                         f"PRAGMA table_info({table})").fetchall()
                 }
                 missing = required - cols
+                if table == "injection_pheromone" and _pheromone_key_drift(conn):
+                    missing = missing | {PHEROMONE_KEY_DRIFT}
                 if missing:
                     drift[table] = missing
             except Exception:
@@ -4831,6 +4866,51 @@ class Store:
     def node_ids(self) -> list[str]:
         """All node IDs."""
         return [r[0] for r in self.conn.execute("SELECT id FROM nodes").fetchall()]
+
+#: How schema drift names a table whose primary key is not the schema's.
+PHEROMONE_KEY_DRIFT = "primary key (node_id, context)"
+
+
+def _pheromone_key_drift(conn) -> bool:
+    """Whether ``injection_pheromone`` is keyed other than (node_id, context)."""
+    rows = conn.execute("PRAGMA table_info(injection_pheromone)").fetchall()
+    key = [row[1] for row in sorted(rows, key=lambda row: row[5]) if row[5]]
+    return bool(rows) and key != ["node_id", "context"]
+
+
+def _pheromone_needs_rebuild(conn) -> bool:
+    rows = conn.execute("PRAGMA table_info(injection_pheromone)").fetchall()
+    if not rows:
+        return False
+    columns = {row[1] for row in rows}
+    return _pheromone_key_drift(conn) or not Store.REQUIRED_COLUMNS["injection_pheromone"] <= columns
+
+
+def _rebuild_pheromone_table(conn) -> None:
+    """Recreate ``injection_pheromone`` from the schema inside the caller's
+    transaction, copying every column both shapes share."""
+    import re
+
+    statement = re.search(
+        r"CREATE TABLE IF NOT EXISTS injection_pheromone\s*\(.*?\n\);", CREATE_TABLES, re.S)
+    if statement is None:
+        raise RuntimeError("the schema holds no injection_pheromone table")
+    old = {row[1] for row in conn.execute("PRAGMA table_info(injection_pheromone)")}
+    conn.execute("ALTER TABLE injection_pheromone RENAME TO injection_pheromone_rebuild")
+    conn.execute(statement.group(0))
+    new = [row[1] for row in conn.execute("PRAGMA table_info(injection_pheromone)")]
+    shared = ", ".join(column for column in new if column in old)
+    # Rows for nodes that no longer exist would fail the foreign key; they
+    # carry nothing a lookup can reach.
+    conn.execute(
+        f"INSERT OR IGNORE INTO injection_pheromone ({shared}) "
+        f"SELECT {shared} FROM injection_pheromone_rebuild "
+        "WHERE node_id IN (SELECT id FROM nodes)")
+    conn.execute("DROP TABLE injection_pheromone_rebuild")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pheromone_node ON injection_pheromone(node_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pheromone_strength ON injection_pheromone(strength DESC)")
+
 
 def _column_definitions(schema_sql: str) -> dict[str, dict[str, str]]:
     """`{table: {column: definition}}` from CREATE TABLE statements, for

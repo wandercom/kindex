@@ -558,6 +558,22 @@ def test_reduced_sync_stops_at_its_explain_budget(store, repo, monkeypatch):
         kb.sync_kinbase(store, repo, mode="reduced", explain_budget_s=0)
 
 
+def test_one_slow_explain_cannot_outlast_the_budget(store, repo, monkeypatch, tmp_path):
+    import time
+
+    from kindex import kinbase as kb
+
+    write_doc(repo, sign(fact()))
+    slow = tmp_path / "slow-kinbase"
+    slow.write_text("#!/bin/sh\nsleep 30\n")
+    slow.chmod(0o755)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: str(slow))
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        kb.sync_kinbase(store, repo, mode="reduced", explain_budget_s=0.5)
+    assert time.monotonic() - started < 10
+
+
 def test_a_malformed_extra_row_does_not_break_sync(store, repo):
     from kindex import kinbase as kb
 

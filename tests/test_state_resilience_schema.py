@@ -483,18 +483,54 @@ def test_p6_2_migration_lock_error_is_visible_and_cannot_stamp_v8(tmp_path):
     _assert_v7_rollback(db)
 
 
-def test_doctor_fix_adds_the_columns_an_early_v7_store_lacks(tmp_path):
-    """The early v7 injection_pheromone lacked context/last_deposit/last_decay,
-    and reopening never added them (a current store performs no DDL)."""
+def test_the_v15_migration_rebuilds_an_early_v7_pheromone_table(tmp_path):
+    """The early v7 injection_pheromone lacked context/last_deposit/last_decay
+    and was keyed by node_id alone; v15 rebuilds it with the schema's key,
+    keeping its rows, so a second context for a node can be deposited."""
     db = _create_v7_fixture(tmp_path)
     store = Store(Config(data_dir=str(db.parent)))
     try:
-        assert store.schema_drift() == {
-            "injection_pheromone": {"context", "last_decay", "last_deposit"}}
-        assert store.repair_schema_drift() == {}
+        assert store.schema_drift() == {}
         row = store.conn.execute(
             "SELECT context, last_deposit FROM injection_pheromone "
             "WHERE node_id = 'legacy-node'").fetchone()
         assert row["context"] == "" and row["last_deposit"]
+        store.conn.execute(
+            "INSERT INTO injection_pheromone (node_id, context, strength) "
+            "VALUES ('legacy-node', 'second', 1.0)")
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM injection_pheromone WHERE node_id = 'legacy-node'"
+        ).fetchone()[0] == 2
+    finally:
+        store.close()
+
+
+def test_doctor_fix_rebuilds_a_wrong_pheromone_key(tmp_path):
+    """A current-version store whose pheromone table has the columns but not
+    the key reports that drift, and --fix rebuilds the table."""
+    store = Store(Config(data_dir=str(tmp_path)))
+    try:
+        store.add_node("Kept", node_id="kept", node_type="concept", prov_activity="test")
+        store.conn.executescript("""
+            DROP TABLE injection_pheromone;
+            CREATE TABLE injection_pheromone (
+                node_id TEXT PRIMARY KEY,
+                context TEXT NOT NULL DEFAULT '',
+                strength REAL NOT NULL DEFAULT 0.0,
+                deposits INTEGER NOT NULL DEFAULT 0,
+                reinforcements INTEGER NOT NULL DEFAULT 0,
+                missed INTEGER NOT NULL DEFAULT 0,
+                last_deposit TEXT NOT NULL DEFAULT '',
+                last_decay TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO injection_pheromone (node_id, strength) VALUES ('kept', 2.5);
+            INSERT INTO injection_pheromone (node_id, strength) VALUES ('gone', 1.0);
+        """)
+        from kindex.store import PHEROMONE_KEY_DRIFT
+        assert store.schema_drift() == {"injection_pheromone": {PHEROMONE_KEY_DRIFT}}
+        assert store.repair_schema_drift() == {}
+        rows = store.conn.execute(
+            "SELECT node_id, strength FROM injection_pheromone").fetchall()
+        assert [(row["node_id"], row["strength"]) for row in rows] == [("kept", 2.5)]
     finally:
         store.close()

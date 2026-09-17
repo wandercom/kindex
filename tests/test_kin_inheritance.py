@@ -130,6 +130,21 @@ class TestResolveKinChain:
         assert chain[0]["name"] == "legacy"
         assert (tmp_path / ".kin").is_file()
 
+    def test_opening_a_repo_local_store_upgrades_a_legacy_kin_file(self, tmp_path):
+        """A store cannot be created beneath a .kin file; opening one upgrades it."""
+        from kindex.config import Config
+        from kindex.store import Store
+
+        (tmp_path / ".kin").write_text("name: legacy\n")
+        store = Store(Config(data_dir=str(tmp_path / ".kin" / "local" / "kindex")))
+        try:
+            store.conn
+        finally:
+            store.close()
+        assert (tmp_path / ".kin" / "config").read_text() == "name: legacy\n"
+        assert (tmp_path / ".kin" / "local" / "kindex").is_dir()
+        assert "local/" in (tmp_path / ".kin" / ".gitignore").read_text()
+
     def test_explicit_upgrade_keeps_the_content(self, tmp_path, monkeypatch):
         """The upgrade moves the file aside before anything else, so a failed
         write leaves the content on disk."""

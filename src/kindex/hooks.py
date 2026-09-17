@@ -574,22 +574,32 @@ def _fit_prime_to_budget(head: list[str], concepts: list[str] | None,
     def tail_size() -> int:
         return sum(size(_render_prime_section(s)) for s in sections)
 
-    concept_lines: list[str] = []
-    concepts_left = 0
-    if concepts is not None:
-        room = max(budget - head_size - tail_size() - len("### Key concepts") - 2,
-                   int(budget * PRIME_CONCEPT_FLOOR))
-        concept_lines.append("### Key concepts")
-        used = 0
-        for index, entry in enumerate(concepts):
-            if used + len(entry) + 1 > room:
-                concepts_left = len(concepts) - index
-                break
-            concept_lines.append(entry)
-            used += len(entry) + 1
-        concept_lines.append("")
+    heading = "### Key concepts"
 
-    total = head_size + size(concept_lines) + tail_size()
+    def allocate(room: int) -> tuple[list[str], int]:
+        chosen: list[str] = []
+        used = 0
+        for index, entry in enumerate(concepts or []):
+            if used + len(entry) + 1 > room:
+                return chosen, len(concepts) - index
+            chosen.append(entry)
+            used += len(entry) + 1
+        return chosen, 0
+
+    def render_concepts(chosen: list[str]) -> list[str]:
+        return [heading, *chosen, ""] if concepts is not None else []
+
+    room = max(budget - head_size - tail_size() - len(heading) - 2,
+               int(budget * PRIME_CONCEPT_FLOOR))
+    chosen, concepts_left = allocate(room)
+    total = head_size + size(render_concepts(chosen)) + tail_size()
+    if total > budget or concepts_left:
+        # Something will be left out, so the closing line's room is kept
+        # before anything else is placed.
+        room = max(budget - head_size - tail_size() - len(heading) - 2 - _OMISSION_RESERVE,
+                   int(budget * PRIME_CONCEPT_FLOOR))
+        chosen, concepts_left = allocate(room)
+        total = head_size + size(render_concepts(chosen)) + tail_size()
     limit = budget - _OMISSION_RESERVE if total > budget or concepts_left else budget
     for prefix in PRIME_TRIM_ORDER:
         for section in sections:
@@ -602,7 +612,11 @@ def _fit_prime_to_budget(head: list[str], concepts: list[str] | None,
                 section["entries"].pop()
                 section["omitted"] += 1
                 total += size(_render_prime_section(section)) - before
-
+    # The concept floor gives way last, so the whole never passes the budget.
+    while total > limit and chosen:
+        total -= len(chosen.pop()) + 1
+        concepts_left += 1
+    concept_lines = render_concepts(chosen)
     rendered = list(head) + concept_lines
     for section in sections:
         rendered.extend(_render_prime_section(section))
@@ -610,9 +624,9 @@ def _fit_prime_to_budget(head: list[str], concepts: list[str] | None,
     left_out += [f"{section['omitted']} of {section['heading'].lstrip('# ').split(':')[0]}"
                  for section in sections if section["omitted"]]
     if left_out:
-        rendered.append(
-            "_(Left out for the token budget: " + "; ".join(left_out)
-            + ". Ask with `context` or `search` for more.)_"[:_OMISSION_RESERVE])
+        line = ("_(Left out for the token budget: " + "; ".join(left_out)
+                + ". Ask with `context` or `search` for more.)_")
+        rendered.append(line[:_OMISSION_RESERVE - 1])
     return rendered
 
 

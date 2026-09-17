@@ -158,6 +158,10 @@ def _identity(repo, identity):
     return "kinbase-" + hashlib.sha256((repo + "\x00" + identity).encode()).hexdigest()
 
 
+#: The most one `kinbase explain` may take.
+EXPLAIN_TIMEOUT_S = 60
+
+
 def _reduced(root, binary, documents, budget_s=None):
     deadline = None if budget_s is None else time.monotonic() + budget_s
     by_event = {}
@@ -170,18 +174,28 @@ def _reduced(root, binary, documents, budget_s=None):
         if doc.get("schema") == "kinbase-unknown/1" and isinstance(fact_id, str) and fact_id:
             by_unknown.setdefault((fact_id, doc["logical_key"]), []).append((digest, doc))
     rows = []
+    exhausted = ("Kinbase explain budget exhausted; sync not applied. "
+                 "Run `kin kinbase sync` from a shell for a full reduced sync.")
     for key in sorted({doc["logical_key"] for _, doc in documents}):
-        if deadline is not None and time.monotonic() >= deadline:
-            raise RuntimeError(
-                "Kinbase explain budget exhausted; sync not applied. "
-                "Run `kin kinbase sync` from a shell for a full reduced sync.")
+        # Each call may use only what is left of the budget: checking between
+        # calls still let the last one run its own full minute.
+        timeout = EXPLAIN_TIMEOUT_S
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(exhausted)
+            timeout = min(timeout, remaining)
         try:
             result = subprocess.run(
                 [binary, "explain", key, "--repo", str(root), "--decision",
                  "Kindex read-only synchronization", "--json"],
-                capture_output=True, text=True, timeout=60, check=False,
+                capture_output=True, text=True, timeout=timeout, check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            if timeout < EXPLAIN_TIMEOUT_S:
+                raise RuntimeError(exhausted) from exc
+            raise RuntimeError("Kinbase explain failed; sync not applied") from exc
+        except OSError as exc:
             raise RuntimeError("Kinbase explain failed; sync not applied") from exc
         if result.returncode:
             raise RuntimeError(f"Kinbase explain exited {result.returncode}; sync not applied")

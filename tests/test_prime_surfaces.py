@@ -572,3 +572,19 @@ def test_the_prime_budget_is_a_ceiling(store, config, monkeypatch):
     assert "Left out for the token budget:" in block
     assert "5 of Watches" in block and "of Recent activity" in block
     assert hooks.PRIME_TRIM_ORDER[-1] == "### Reminders"
+
+
+def test_a_sparse_prime_keeps_room_for_what_it_left_out():
+    from kindex.hooks import _fit_prime_to_budget
+
+    head = ["## Kindex Context (auto-primed)", "note", ""]
+    concepts = [f"- **Topic {n}** (concept): " + "x" * 150 for n in range(6)]
+    for budget in (300, 450, 800, 1000):
+        lines = _fit_prime_to_budget(head, concepts, [], budget)
+        text = "\n".join(lines) + "\n"
+        assert len(text) <= budget, (budget, len(text))
+        assert "Left out for the token budget" in text
+    # Six 176-character concepts and the head fit in 1200 with nothing left out.
+    exact = "\n".join(_fit_prime_to_budget(head, concepts, [], 1200)) + "\n"
+    assert len(exact) <= 1200
+    assert "Left out" not in exact and exact.count("- **Topic") == 6

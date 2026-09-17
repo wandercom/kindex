@@ -23,12 +23,16 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Search confidence is each source's score over its best match: the only,
   tied or weakest real match is no longer reported as 0.000.
 - A missing `--config` file or project path is refused instead of falling
-  through to the home store; a relative profile `data_dir` is anchored to
-  the config that declared it. A symlinked `.kin` chain is never selected
-  implicitly.
+  through to the home store; every relative profile `data_dir` is anchored
+  to the config that declared it, so cron and routing open the same graphs.
+  A symlinked `.kin` chain is never selected implicitly.
 - The activity log keeps 365 days (cron prunes it).
+- Schema v15 indexes Kinbase rows by repository on existing stores (only
+  fresh stores had the index) and rebuilds an early-v7
+  `injection_pheromone` table with its `(node_id, context)` key, keeping its
+  rows; `kin doctor --fix` performs the same rebuild on a current store.
 - The MCP `kinbase_sync` tool runs only the `kinbase` found on PATH and stops at a
-  time budget.
+  time budget, which also caps each `kinbase explain` call.
 
 ### Fixed
 - The reminder sweep holds its lock through a whole action; renewed to the
@@ -71,8 +75,9 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   backfilling expression defaults, and a store with a meta table but no
   version row is migrated from v1. Read helpers treat only a missing table
   as empty.
-- Loading config reads a legacy `.kin` file in place; the explicit upgrade
-  moves it aside before writing, so a failure never loses it.
+- Loading config reads a legacy `.kin` file in place; opening a repo-local
+  store upgrades it to `.kin/config` (a store cannot be created beneath the
+  file), moving it aside before writing so a failure never loses it.
 - `cron` reports failing steps, runs one pass at a time, and skips the
   embedding coverage scan. A failed cron or remind check says why on stderr.
 - Health failures are signalled and their receipts kept pending; the

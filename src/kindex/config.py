@@ -1072,6 +1072,7 @@ def _resolve_profile(cfg: Config, explicit: str | None,
     env_profile = os.environ.get("KIN_PROFILE") or None
     if not cfg.profiles and not explicit and not env_profile:
         return cfg  # legacy: byte-identical to pre-profile behavior
+    _anchor_profile_dirs(cfg, profiles_base)
 
     # Explicit tiers: flag > env > .kin chain key
     for name, source in ((explicit, "flag"), (env_profile, "env"),
@@ -1105,6 +1106,20 @@ def _resolve_profile(cfg: Config, explicit: str | None,
         return _activate_profile(cfg, cfg.default_profile, "default", profiles_base)
 
     return cfg  # profiles exist but nothing matched -> legacy passthrough
+
+
+def _anchor_profile_dirs(cfg: Config, profiles_base: Path | None) -> None:
+    """Make every profile's relative data_dir absolute against the config that
+    declared it. Cron, routing and `kin profile list` read the entries
+    directly; anchoring only the active one left the rest resolving against
+    whatever directory the scheduler ran in, so cron opened other graphs and
+    missed their reminders."""
+    if profiles_base is None:
+        return
+    for entry in cfg.profiles.values():
+        data_dir = Path(entry.data_dir).expanduser()
+        if not data_dir.is_absolute():
+            entry.data_dir = str(profiles_base / data_dir)
 
 
 def _activate_profile(cfg: Config, name: str, source: str,
