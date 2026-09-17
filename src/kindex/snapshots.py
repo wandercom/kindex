@@ -154,31 +154,55 @@ def _snapshot_connection_to_dir(
     """Write and validate one private SQLite backup in an explicit directory."""
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target_dir.chmod(0o700)
+    _prune_stale_partials(target_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     slug = _REASON_SLUG_RE.sub("-", reason).strip("-") or "merge"
     target = target_dir / f"{stamp}-{slug}.sqlite3"
+    # The copy is written under a partial name and renamed when it validates,
+    # so a process killed mid-copy (a signal skips the cleanup below) leaves a
+    # file that says what it is, and a later snapshot removes it.
+    partial = target_dir / f"{target.name}{PARTIAL_SUFFIX}"
     # sqlite3.connect creates with the process umask. Reserve the path first so
     # a permissive umask never leaves even a brief world-readable corpus copy.
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(fd)
-    target.chmod(0o600)
+    partial.chmod(0o600)
     dest: sqlite3.Connection | None = None
     try:
-        dest = sqlite3.connect(str(target))
+        dest = sqlite3.connect(str(partial))
         connection.backup(dest)
         _validate_snapshot(dest, expected_schema_version)
+        dest.close()
+        dest = None
+        os.replace(partial, target)
     except BaseException:
         if dest is not None:
             dest.close()
-        target.unlink(missing_ok=True)
-        Path(f"{target}-wal").unlink(missing_ok=True)
-        Path(f"{target}-shm").unlink(missing_ok=True)
+        _remove_snapshot_files(partial)
         raise
-    else:
-        dest.close()
     if keep is not None:
         _rotate(target_dir, keep)
     return target
+
+
+PARTIAL_SUFFIX = ".partial"
+#: A partial copy older than this is from a killed process, never a live one.
+PARTIAL_STALE_SECONDS = 3600
+
+
+def _remove_snapshot_files(path: Path) -> None:
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"), Path(f"{path}-journal")):
+        candidate.unlink(missing_ok=True)
+
+
+def _prune_stale_partials(target_dir: Path) -> None:
+    cutoff = datetime.now(timezone.utc).timestamp() - PARTIAL_STALE_SECONDS
+    for partial in target_dir.glob(f"*{PARTIAL_SUFFIX}"):
+        try:
+            if partial.stat().st_mtime < cutoff:
+                _remove_snapshot_files(partial)
+        except OSError:
+            continue
 
 
 def _validate_snapshot(

@@ -389,7 +389,10 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
                 record_health(disabled_scope, "review", source="hook", state="disabled", reason="disabled", event_id="disabled")
             return {"ok": True, "context": "", "supervisor": {"state": "disabled"}}
     scope = project_scope({"session_id": sid, "agent": adapter, "project_path": launch_path})
-    store = Store(config) if config is not None else open_project_store(scope)
+    # A hook never migrates (see Store(migrate=False)); the host's timeout
+    # would kill the snapshot copy.
+    store = (Store(config, migrate=False) if config is not None
+             else open_project_store(scope, migrate=False))
     try:
         instance_key = resolve_agent_instance_key(adapter, explicit=sid)
         cfg = apply_agent_overrides(config or store.config, client=adapter, instance_key=instance_key)
