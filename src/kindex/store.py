@@ -439,9 +439,25 @@ class Store:
         )
         has_meta = cur.fetchone() is not None
 
+        has_nodes = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
+        ).fetchone() is not None
         if has_meta:
             cur = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'")
             row = cur.fetchone()
+            if row is None and has_nodes:
+                # A store with a meta table but no version row predates
+                # versioning: it is migrated from v1, not stamped current
+                # over its old shape.
+                self._refuse_migration_unless_allowed(1)
+                with self._schema_migration_lock():
+                    if self._conn.execute(
+                            "SELECT 1 FROM meta WHERE key = 'schema_version'").fetchone() is None:
+                        self._conn.execute(
+                            "INSERT INTO meta (key, value) VALUES ('schema_version', '1')")
+                        self._conn.commit()
+                    self._migrate_versioned_schema_after_lock()
+                return
             if row is not None:
                 current = self._parse_schema_version(row["value"])
                 if current > SCHEMA_VERSION:
@@ -550,6 +566,8 @@ class Store:
                 f"snapshot: {snapshot}"
             ) from exc
         self._record_schema_migration_snapshot(snapshot, reason)
+
+
 
     @contextmanager
     def _schema_migration_lock(self):
@@ -1361,6 +1379,44 @@ class Store:
         },
     }
 
+    def repair_schema_drift(self) -> dict[str, set[str]]:
+        """Add the required columns a current-version store lacks, each with
+        its definition from the schema, under the migration lock and after a
+        recovery snapshot. Reopening could never repair this: a store whose
+        version reads current performs no DDL. Returns the drift that
+        remains."""
+        drift = self.schema_drift()
+        if not drift:
+            return {}
+        definitions = _column_definitions(CREATE_TABLES)
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        version = self._parse_schema_version(row["value"]) if row else 0
+        with self._schema_migration_lock():
+            snapshot, reason = self._snapshot_schema_migration(version)
+            self._record_schema_recovery_metadata(snapshot, reason)
+            for table, columns in sorted(drift.items()):
+                for column in sorted(columns):
+                    ddl = definitions.get(table, {}).get(column)
+                    if ddl is None:
+                        continue
+                    # SQLite adds no column whose default is an expression:
+                    # add it with an empty default and backfill the value.
+                    backfill = None
+                    if "(datetime('now'))" in ddl:
+                        ddl = ddl.replace("(datetime('now'))", "''")
+                        backfill = "datetime('now')"
+                    try:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+                        if backfill:
+                            self._conn.execute(
+                                f"UPDATE {table} SET {column} = {backfill} WHERE {column} = ''")
+                    except sqlite3.OperationalError:
+                        continue  # a column SQLite cannot add in place stays drift
+            self._conn.commit()
+            self._record_schema_migration_snapshot(snapshot, reason)
+        return self.schema_drift()
+
     def schema_drift(self) -> dict[str, set[str]]:
         """Report columns the code requires that this store is missing.
 
@@ -1369,18 +1425,22 @@ class Store:
         (a migration will create it); a table present with missing columns is,
         because ``CREATE TABLE IF NOT EXISTS`` will never repair it.
         """
+        return self._drift_of(self.conn)
+
+    @classmethod
+    def _drift_of(cls, conn) -> dict[str, set[str]]:
         drift: dict[str, set[str]] = {}
-        for table, required in self.REQUIRED_COLUMNS.items():
+        for table, required in cls.REQUIRED_COLUMNS.items():
             try:
-                exists = self.conn.execute(
+                exists = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
                     (table,),
                 ).fetchone()
                 if not exists:
                     continue
                 cols = {
-                    row["name"]
-                    for row in self.conn.execute(
+                    row[1]
+                    for row in conn.execute(
                         f"PRAGMA table_info({table})").fetchall()
                 }
                 missing = required - cols
@@ -4711,3 +4771,26 @@ class Store:
     def node_ids(self) -> list[str]:
         """All node IDs."""
         return [r[0] for r in self.conn.execute("SELECT id FROM nodes").fetchall()]
+
+def _column_definitions(schema_sql: str) -> dict[str, dict[str, str]]:
+    """`{table: {column: definition}}` from CREATE TABLE statements, for
+    adding a missing column with the schema's own type and default."""
+    import re
+
+    definitions: dict[str, dict[str, str]] = {}
+    for match in re.finditer(
+            r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", schema_sql, re.S):
+        table, body = match.group(1), match.group(2)
+        columns: dict[str, str] = {}
+        for line in body.splitlines():
+            text = line.split("--", 1)[0].strip().rstrip(",")
+            if not text or text.upper().startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "CHECK", "CONSTRAINT")):
+                continue
+            name = text.split()[0]
+            if name.isidentifier():
+                # ALTER TABLE cannot add a primary key or a unique column.
+                if "PRIMARY KEY" in text.upper() or " UNIQUE" in text.upper():
+                    continue
+                columns[name] = text
+        definitions[table] = columns
+    return definitions

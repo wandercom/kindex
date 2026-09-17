@@ -540,7 +540,6 @@ def find_parent_kin(start_path: Path | None = None, max_depth: int = 10) -> list
     Auto-upgrades old .kin files to .kin/config on discovery.
     Stops at filesystem root or after max_depth levels.
     """
-    from .config import _maybe_upgrade_kin_file
 
     if start_path is None:
         start_path = Path.cwd()
@@ -555,9 +554,8 @@ def find_parent_kin(start_path: Path | None = None, max_depth: int = 10) -> list
             if config_file.is_file():
                 found.append(config_file)
         elif kin_entry.is_file():
-            upgraded = _maybe_upgrade_kin_file(kin_entry)
-            if upgraded and upgraded.is_file():
-                found.append(upgraded)
+            # A legacy .kin file is read in place (see config._project_config_paths).
+            found.append(kin_entry)
         parent = current.parent
         if parent == current:  # filesystem root
             break
@@ -582,7 +580,6 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
     Returns count of updated nodes.
     """
     import yaml
-    from .config import _maybe_upgrade_kin_file
 
     count = 0
     all_pending: list[tuple[str, str]] = []  # (source_slug, target_name)
@@ -606,10 +603,7 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                     continue
                 project_root = kin_entry.parent
             elif kin_entry.is_file():
-                upgraded = _maybe_upgrade_kin_file(kin_entry)
-                if not upgraded or not upgraded.is_file():
-                    continue
-                config_file = upgraded
+                config_file = kin_entry
                 project_root = kin_entry.parent
             else:
                 continue

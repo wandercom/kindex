@@ -50,7 +50,9 @@ def legacy_manifest(config, kin_path: str) -> dict:
         stop.append(command(["dream", "--detach", "--lightweight"], 3, True))
     items = {
         "SessionStart": [command(["prime", "--for", "hook"], 5)],
-        "PreCompact": [command(["compact-hook", "--emit-context"], 10)],
+        # Claude adds no PreCompact output to the context; the SessionStart
+        # it fires after compacting (source "compact") re-primes instead.
+        "PreCompact": [command(["compact-hook"], 10)],
         "UserPromptSubmit": [command(["prompt-check"], 2)],
         "PreToolUse": [command(["attention-hook", "--adapter", "claude", "--event",
                                 "PreToolUse", "--deadline-ms", "3500"], 5)],

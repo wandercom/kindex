@@ -380,10 +380,21 @@ def _project_housekeeping(store: "Store") -> None:
             continue
 
 
+def _cron_lock_path(base_config: "Config"):
+    """Beside the scheduler state, keyed by the base graph; creating it must
+    not create a data directory no pass would otherwise touch."""
+    import hashlib
+
+    from .project_store import project_graph_registry_path
+
+    key = hashlib.sha256(str(base_config.data_path).encode()).hexdigest()[:16]
+    return project_graph_registry_path().parent / f"cron-{key}.lock"
+
+
 def _try_cron_lock(base_config: "Config"):
-    """A non-blocking whole-run lock beside the base graph, or None when
-    another run holds it (or the platform has no flock). Overlapping crontab
-    runs raced on session ingest and every unlocked queue."""
+    """A non-blocking whole-run lock, None when the platform has no flock,
+    or False when another run holds it. Overlapping crontab runs raced on
+    session ingest and every unlocked queue."""
     import os
 
     try:
@@ -391,7 +402,7 @@ def _try_cron_lock(base_config: "Config"):
     except ImportError:
         return None
     try:
-        path = base_config.data_path / "cron.lock"
+        path = _cron_lock_path(base_config)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:

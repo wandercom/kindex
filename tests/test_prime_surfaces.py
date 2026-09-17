@@ -369,3 +369,72 @@ def test_the_cron_embedding_step_skips_the_coverage_scan(store, monkeypatch):
     assert vectors.embedding_status(store, coverage=False)["coverage_complete"] is None
     drained = vectors.drain_embedding_queue(store, store.config, report_coverage=False)
     assert drained["coverage_complete"] is None
+
+
+def test_the_drain_worker_keeps_the_stamp_decision(tmp_path):
+    from kindex.supervisor import config_snapshot, restore_config
+
+    cfg = Config(data_dir=str(tmp_path / "other"))
+    cfg._stamp_on_open = False
+    restored = restore_config(config_snapshot(cfg))
+    assert restored._stamp_on_open is False
+    assert restore_config({"data_dir": str(tmp_path / "x")})._stamp_on_open is True
+
+
+def test_a_failed_cron_says_why_on_stderr(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from kindex import cli
+
+    monkeypatch.setattr(cli, "_record_hook_failure", lambda args, exc: None)
+    args = argparse.Namespace(command="cron", config=None, project_path=None,
+                              profile=None, data_dir=None)
+    cli._degrade_hook_failure(args, ValueError("Ambiguous Kindex scope"))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "kindex cron degraded: ValueError" in captured.err
+
+
+def test_a_current_store_missing_a_column_is_repaired(store):
+    store.conn.execute("ALTER TABLE nodes DROP COLUMN true_of")
+    store.conn.commit()
+    assert store.schema_drift() == {"nodes": {"true_of"}}
+    assert store.repair_schema_drift() == {}
+    assert "true_of" in {row["name"] for row in store.conn.execute("PRAGMA table_info(nodes)")}
+
+
+def test_a_versionless_meta_store_is_migrated_not_stamped(tmp_path):
+    import sqlite3 as _sqlite3
+
+    data = tmp_path / "old"
+    data.mkdir()
+    db = _sqlite3.connect(data / "kindex.db")
+    db.executescript("""
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE nodes (id TEXT PRIMARY KEY, type TEXT NOT NULL DEFAULT 'concept',
+            title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '',
+            aka TEXT NOT NULL DEFAULT '', intent TEXT NOT NULL DEFAULT '',
+            prov_who TEXT NOT NULL DEFAULT '', prov_when TEXT NOT NULL DEFAULT '',
+            prov_activity TEXT NOT NULL DEFAULT '', prov_why TEXT NOT NULL DEFAULT '',
+            prov_source TEXT NOT NULL DEFAULT '', weight REAL NOT NULL DEFAULT 0.5,
+            domains TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_accessed TEXT NOT NULL DEFAULT (datetime('now')),
+            extra TEXT NOT NULL DEFAULT '{}');
+        CREATE TABLE edges (from_id TEXT NOT NULL, to_id TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'relates_to', weight REAL NOT NULL DEFAULT 0.5,
+            provenance TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (from_id, to_id, type));
+        INSERT INTO nodes (id, title) VALUES ('n1', 'Old node');
+    """)
+    db.commit()
+    db.close()
+    graph = Store(Config(data_dir=str(data)))
+    try:
+        assert graph.get_node("n1")["title"] == "Old node"
+        assert graph.schema_drift() == {}
+        from kindex.schema import SCHEMA_VERSION
+        assert graph.get_meta("schema_version") == str(SCHEMA_VERSION)
+    finally:
+        graph.close()

@@ -255,8 +255,8 @@ class TestParentKinWalk:
         # Leaf should come first (most specific)
         assert paths[0] == (deep / ".kin" / "config").resolve()
 
-    def test_auto_upgrades_old_kin_file(self, tmp_path):
-        """Old-style .kin file is auto-upgraded during walk."""
+    def test_reads_old_kin_file_in_place(self, tmp_path):
+        """Old-style .kin file is found during the walk without being rewritten."""
         deep = tmp_path / "child"
         deep.mkdir()
 
@@ -271,10 +271,9 @@ class TestParentKinWalk:
 
         # Both should be found
         assert (deep / ".kin" / "config").resolve() in paths
-        assert (tmp_path / ".kin" / "config").resolve() in paths
-        # Old file should have been upgraded
-        assert (tmp_path / ".kin").is_dir()
-        assert (tmp_path / ".kin" / "config").is_file()
+        assert (tmp_path / ".kin").resolve() in paths
+        # A walk is a read: the old file is untouched
+        assert (tmp_path / ".kin").is_file()
 
     def test_no_kin_files(self, tmp_path):
         subdir = tmp_path / "empty"

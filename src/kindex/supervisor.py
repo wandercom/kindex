@@ -62,16 +62,21 @@ def config_snapshot(config) -> dict:
     return {"data_dir": str(config.data_path), "sim": config.sim.model_dump(),
             "llm": config.llm.model_dump(), "budget": config.budget.model_dump(),
             "active_profile": config.active_profile, "profile_source": config.profile_source,
-            "project_path": str(config._project_path) if config._project_path else None}
+            "project_path": str(config._project_path) if config._project_path else None,
+            # An explicit --data-dir for another graph must not be stamped
+            # with the active profile by the background worker either.
+            "stamp_on_open": bool(getattr(config, "_stamp_on_open", True))}
 
 
 def restore_config(snapshot: dict):
     from .config import Config
     fields = dict(snapshot)
     project = fields.pop("project_path", None)
+    stamp = fields.pop("stamp_on_open", True)
     config = Config(**fields)
     if project:
         config._project_path = Path(project)
+    config._stamp_on_open = bool(stamp)
     return config
 
 

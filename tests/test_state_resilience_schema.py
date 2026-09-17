@@ -481,3 +481,20 @@ def test_p6_2_migration_lock_error_is_visible_and_cannot_stamp_v8(tmp_path):
         lock.rollback()
         lock.close()
     _assert_v7_rollback(db)
+
+
+def test_doctor_fix_adds_the_columns_an_early_v7_store_lacks(tmp_path):
+    """The early v7 injection_pheromone lacked context/last_deposit/last_decay,
+    and reopening never added them (a current store performs no DDL)."""
+    db = _create_v7_fixture(tmp_path)
+    store = Store(Config(data_dir=str(db.parent)))
+    try:
+        assert store.schema_drift() == {
+            "injection_pheromone": {"context", "last_decay", "last_deposit"}}
+        assert store.repair_schema_drift() == {}
+        row = store.conn.execute(
+            "SELECT context, last_deposit FROM injection_pheromone "
+            "WHERE node_id = 'legacy-node'").fetchone()
+        assert row["context"] == "" and row["last_deposit"]
+    finally:
+        store.close()

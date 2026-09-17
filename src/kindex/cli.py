@@ -1404,14 +1404,12 @@ def cmd_doctor(args):
         )
         issues.append(f"Schema drift: {detail} — run `kin doctor --fix`")
         if do_fix:
-            store.close()
-            store = _store(args)
-            remaining = store.schema_drift()
+            remaining = store.repair_schema_drift()
             if remaining:
-                issues[-1] += " (FIX FAILED — migration did not add the columns)"
+                issues[-1] += " (FIX FAILED — columns could not be added in place)"
             else:
                 fixes_applied += 1
-                issues[-1] += " (FIXED: migrations replayed)"
+                issues[-1] += " (FIXED: missing columns added)"
 
     # ── Silently-recovered failures ──
     # Counters bumped by recovery paths. A handled failure still emits a
@@ -7953,6 +7951,13 @@ def _degrade_hook_failure(args, exc: BaseException) -> None:
         output = _degraded_hook_output(args, exc)
         if output:
             print(output, end="")
+        if getattr(args, "command", None) in ("cron", "remind"):
+            # Scheduler entries are not host hooks: a person running them (or
+            # the scheduler's log) sees why nothing happened, still exit 0.
+            from .privacy import safe_error
+            remedy = getattr(exc, "remedy", "") or safe_error(exc)
+            print(f"kindex {args.command} degraded: {type(exc).__name__}: {remedy}",
+                  file=sys.stderr)
 
 
 def _degraded_hook_output(args, exc: BaseException) -> str:
