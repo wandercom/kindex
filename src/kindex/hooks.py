@@ -95,8 +95,11 @@ def prime_context(
         except Exception:
             continue
 
+    from .retrieve import GRAPH_DATA_NOTE, graph_text
+
     lines: list[str] = []
     lines.append("## Kindex Context (auto-primed)")
+    lines.append(GRAPH_DATA_NOTE)
     lines.append("")
 
     # Budget: roughly 3 chars per token, target ~2000-2250 chars for 750 tokens
@@ -108,17 +111,18 @@ def prime_context(
         lines.append("### Key concepts")
         for r in results[:6]:
             try:
-                title = r.get("title", r["id"])
-                ntype = r.get("type", "concept")
-                content = (r.get("content") or "")[:120]
+                title = graph_text(r.get("title", r["id"]), 200, single_line=True)
+                ntype = graph_text(r.get("type", "concept"), 40, single_line=True)
+                content = graph_text(r.get("content") or "", 120, single_line=True)
                 # Search already fenced the neighbours; the client scope that
                 # fenced the results applies to the titles named beside them.
                 edges = [
                     e for e in r.get("edges_out", [])
                     if not adapter_scoped_out(store.get_node_domains(e.get("to_id")), adapter)
                 ]
-                connected = ", ".join(str(e.get("to_title") or e.get("to_id") or "")
-                                      for e in edges[:3])
+                connected = ", ".join(
+                    graph_text(e.get("to_title") or e.get("to_id") or "", 80, single_line=True)
+                    for e in edges[:3])
 
                 entry = f"- **{title}** ({ntype})"
                 if content:
@@ -131,7 +135,7 @@ def prime_context(
                 from .kinbase import evidence_note
                 caveat = evidence_note(r)
                 if caveat:
-                    entry += "\n  " + caveat.replace("\n", "\n  ")
+                    entry += "\n  " + graph_text(caveat).replace("\n", "\n  ")
             except Exception:
                 continue  # one malformed node never zeroes the prime
 
@@ -170,8 +174,8 @@ def prime_context(
             try:
                 extra = c.get("extra")
                 extra = extra if isinstance(extra, dict) else {}
-                action = extra.get("action", "warn")
-                entry = f"- [{action}] {c['title']}"
+                action = graph_text(extra.get("action", "warn"), 20, single_line=True)
+                entry = f"- [{action}] {graph_text(c['title'], 200, single_line=True)}"
             except Exception:
                 continue
             lines.append(entry)
@@ -197,11 +201,11 @@ def prime_context(
                             urgent = f" [{days_left}d left]"
                     except (ValueError, TypeError):
                         pass
-                parts = [f"! {w['title']}{urgent}"]
+                parts = [f"! {graph_text(w['title'], 200, single_line=True)}{urgent}"]
                 if extra.get("owner"):
-                    parts.append(f"@{extra['owner']}")
+                    parts.append(f"@{graph_text(extra['owner'], 60, single_line=True)}")
                 if expires:
-                    parts.append(f"(expires {expires})")
+                    parts.append(f"(expires {graph_text(expires, 30, single_line=True)})")
                 entry = f"- {' '.join(parts)}"
             except Exception:
                 continue
@@ -215,8 +219,8 @@ def prime_context(
             try:
                 extra = d.get("extra")
                 extra = extra if isinstance(extra, dict) else {}
-                scope = extra.get("scope", "")
-                entry = f"- {d['title']}"
+                scope = graph_text(extra.get("scope", ""), 60, single_line=True)
+                entry = f"- {graph_text(d['title'], 200, single_line=True)}"
                 if scope:
                     entry += f" [scope: {scope}]"
             except Exception:
@@ -230,14 +234,16 @@ def prime_context(
     # section and the rest of the prime still renders.
     try:
         yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
-        recent = redact(store.activity_since(yesterday))
+        recent = redact(store.activity_since(yesterday, limit=ACTIVITY_SCAN_LIMIT))
         if recent:
             lines.append("### Recent activity (last 24h)")
             # Group by action. Notable titles for nodes scoped to a different client
             # are dropped so their titles don't echo into the wrong session (the
-            # aggregate counts stay complete — they reveal no titles). Titles of
-            # non-active nodes are dropped too: archiving a node writes the very
-            # activity entry that would otherwise echo its title back into context.
+            # aggregate counts stay complete — they reveal no titles). A title is
+            # shown only for an active, unexpired node that still exists, under
+            # its current name: archiving or deleting a node writes the very entry
+            # that would otherwise echo its title back into context, and a
+            # reminder (not a node) may belong to another conversation.
             scoping = bool(adapter) and adapter != "plain"
             action_counts: dict[str, int] = {}
             notable: list[str] = []
@@ -247,20 +253,21 @@ def prime_context(
                 if len(notable) >= 5:
                     continue
                 try:
-                    target = entry.get("target_title") or entry.get("target_id", "")
-                    if not target:
-                        continue
                     target_id = str(entry.get("target_id") or "")
-                    if target_id:
-                        target_node = store.get_node(target_id)
-                        if target_node is not None and (
-                                target_node.get("status") or "active") != "active":
-                            continue
+                    if not target_id or action.startswith("delete"):
+                        continue
+                    target_node = store.get_node(target_id)
+                    if (target_node is None
+                            or (target_node.get("status") or "active") != "active"
+                            or node_expired(target_node)):
+                        continue
                     if scoping:
                         domains = store.get_node_domains(target_id)
                         if adapter_scoped_out(domains, adapter):
                             continue
-                    notable.append(f"{action}: {target}")
+                    target = graph_text(target_node.get("title") or target_id, 120,
+                                        single_line=True)
+                    notable.append(f"{graph_text(action, 40, single_line=True)}: {target}")
                 except Exception:
                     continue
 
@@ -281,9 +288,10 @@ def prime_context(
             active_tag = None
         if active_tag:
             extra = active_tag.get("extra") or {}
-            tag_name = extra.get("tag", active_tag["title"])
-            focus = extra.get("current_focus", "")
-            remaining = extra.get("remaining", [])
+            tag_name = graph_text(extra.get("tag", active_tag["title"]), 80, single_line=True)
+            focus = graph_text(extra.get("current_focus", ""), 200, single_line=True)
+            remaining = [graph_text(item, 80, single_line=True)
+                         for item in extra.get("remaining", []) or []]
             segments = extra.get("segments", [])
 
             lines.append(f"### Active session: {tag_name}")
@@ -296,7 +304,9 @@ def prime_context(
                 if past:
                     lines.append(f"**Previous segments:** {len(past)}")
                     for seg in past[-2:]:
-                        lines.append(f"  - {seg['focus']}: {seg.get('summary', '')[:80]}")
+                        lines.append(
+                            f"  - {graph_text(seg.get('focus', ''), 80, single_line=True)}: "
+                            f"{graph_text(seg.get('summary', ''), 80, single_line=True)}")
             lines.append("")
     except Exception:
         pass  # Don't break priming if sessions module has issues
@@ -391,22 +401,23 @@ def prime_context(
                         a_status = extra.get("action_status", "pending")
                         action_marker = f" [action: {a_status}]"
                     lines.append(
-                        f"- {prefix}{p_marker}{action_marker}: {r['title']} "
+                        f"- {prefix}{p_marker}{action_marker}: "
+                        f"{graph_text(r['title'], 200, single_line=True)} "
                         f"(due: {r['next_due'][:16]}, id: {r['id']})"
                     )
-                    if extra.get("action_command"):
-                        lines.append(f"  Action: `{extra['action_command']}`")
-                    if extra.get("action_instructions"):
-                        lines.append(f"  Instructions: {extra['action_instructions'][:80]}")
                     if action_marker:
+                        lines.append("  " + reminder_action_summary(extra))
+                        # No call to run it: the preview is not the action,
+                        # and injected context must not ask for an execution.
                         lines.append(
-                            f"  Use `kin remind exec {r['id']}` to run action, "
-                            f"`kin remind done {r['id']}` to dismiss, "
-                            f"or `kin remind snooze {r['id']}`"
+                            f"  Review it with `kin remind show --reminder-id {r['id']} --json`; "
+                            f"dismiss with `kin remind done --reminder-id {r['id']}` "
+                            f"or `kin remind snooze --reminder-id {r['id']}`"
                         )
                     else:
                         lines.append(
-                            f"  Use `kin remind done {r['id']}` or `kin remind snooze {r['id']}`"
+                            f"  Use `kin remind done --reminder-id {r['id']}` or "
+                            f"`kin remind snooze --reminder-id {r['id']}`"
                         )
                 lines.append("")
     except Exception:
@@ -441,7 +452,8 @@ def prime_context(
                 due_str = f" (due: {due[:10]})" if due else ""
                 scope = " [global]" if extra.get("scope") == "global" else ""
                 lines.append(
-                    f"- [{p_label}]{scope} {t['title']}{due_str} (id: {t['id']})"
+                    f"- [{p_label}]{scope} {graph_text(t['title'], 200, single_line=True)}"
+                    f"{graph_text(due_str, 30, single_line=True)} (id: {t['id']})"
                 )
             lines.append(
                 "  Use `task_done <id>` to complete, `task_add` to create new tasks"
@@ -485,6 +497,32 @@ def prime_context(
         _record_section_degraded(section, err, config)
 
     return redact_text("\n".join(lines) + "\n")
+
+
+#: Rows of activity the prime reads for its 24-hour summary.
+ACTIVITY_SCAN_LIMIT = 500
+#: Characters of a reminder action shown in the prime.
+ACTION_PREVIEW_CHARS = 80
+
+
+def reminder_action_summary(extra: dict) -> str:
+    """What `kin remind exec` would run, stated without pretending a preview
+    is the whole action: the resolved mode, the full action's size and
+    digest, and a one-line preview marked when it is cut."""
+    import hashlib
+
+    from .actions import resolve_mode
+    from .retrieve import graph_text
+
+    mode = resolve_mode(extra)
+    full = extra.get("action_instructions") if mode == "claude" else None
+    full = full or extra.get("action_command") or extra.get("action_instructions") or ""
+    full = str(full)
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:12]
+    preview = graph_text(full, ACTION_PREVIEW_CHARS, single_line=True).replace("`", "\u02cb")
+    cut = " …(truncated)" if len(" ".join(full.split())) > ACTION_PREVIEW_CHARS else ""
+    return (f"Action ({mode}, {len(full)} chars, sha256:{digest}): "
+            f"{preview}{cut}")
 
 
 def capture_session_end(

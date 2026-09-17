@@ -107,6 +107,14 @@ class SchemaMigrationError(RuntimeError):
     """A schema migration could not proceed safely or complete."""
 
 
+class SchemaMigrationPending(SchemaMigrationError):
+    """A hook opened a store whose schema needs upgrading. Hooks never
+    migrate: a full-database snapshot under a host's 2-10 s budget was killed
+    mid-copy and left a partial snapshot behind on every invocation."""
+
+    remedy = "run `kin doctor --fix` to upgrade the graph"
+
+
 class CandidateNotFoundError(ValueError):
     """A capture candidate does not exist."""
 
@@ -334,6 +342,7 @@ class Store:
         *,
         sqlite_timeout: float = 5.0,
         migration_step_hook: Callable[[int, str], None] | None = None,
+        migrate: bool = True,
     ):
         self.config = config
         # Support both kindex.db (new) and conv.db (legacy)
@@ -343,6 +352,7 @@ class Store:
         self._conn: sqlite3.Connection | None = None
         self._sqlite_timeout = max(0.0, float(sqlite_timeout))
         self._migration_step_hook = migration_step_hook
+        self._migrate = migrate
         # Profile stamp guard: configs that carry an active_profile (added by
         # the profiles feature) bind this database to that profile name.
         self._expected_profile: str | None = getattr(config, "active_profile", None)
@@ -409,6 +419,17 @@ class Store:
                 f"but the active profile is '{expected}'"
             )
 
+    def _refuse_migration_unless_allowed(self, current: int) -> None:
+        if self._migrate:
+            return
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            conn.close()
+        raise SchemaMigrationPending(
+            f"Database {self.db_path} is at schema {current} and needs "
+            f"migrating to {SCHEMA_VERSION}; {SchemaMigrationPending.remedy}"
+        )
+
     def _init_schema(self) -> None:
         # Check if this is an existing database that needs migration
         # before applying the full schema (which includes triggers
@@ -430,6 +451,7 @@ class Store:
                         "Upgrade Kindex or restore a compatible database backup."
                     )
                 if current < SCHEMA_VERSION:
+                    self._refuse_migration_unless_allowed(current)
                     with self._schema_migration_lock():
                         self._migrate_versioned_schema_after_lock()
                 # An already-current store performs no DDL on reopen. An
@@ -441,6 +463,7 @@ class Store:
             # A daemon and foreground command can discover the same ancient
             # pre-versioning store concurrently. Lock and recheck before even
             # creating meta, just as the versioned path does.
+            self._refuse_migration_unless_allowed(0)
             with self._schema_migration_lock():
                 locked_has_meta = self._conn.execute(
                     "SELECT 1 FROM sqlite_master "
@@ -1430,7 +1453,8 @@ class Store:
 
     # ── Temporal queries ───────────────────────────────────────────────
 
-    def activity_since(self, since_iso: str, action: str | None = None) -> list[dict]:
+    def activity_since(self, since_iso: str, action: str | None = None,
+                       limit: int | None = None) -> list[dict]:
         """Get activity log entries since a timestamp, optionally filtered by action type."""
         try:
             q = "SELECT * FROM activity_log WHERE timestamp >= ? "
@@ -1439,6 +1463,9 @@ class Store:
                 q += "AND action = ? "
                 params.append(action)
             q += "ORDER BY timestamp DESC"
+            if limit is not None:
+                q += " LIMIT ?"
+                params.append(int(limit))
             rows = self.conn.execute(q, params).fetchall()
             result = []
             for r in rows:
