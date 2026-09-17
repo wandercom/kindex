@@ -53,6 +53,31 @@ if [ -f "$ROOT/docs/index.html" ]; then
     fi
 fi
 
+# ── Version surfaces derived from pyproject ───────────────────────────
+# tests/test_release_metadata.py requires every one of these to carry the
+# same version; a release that bumped only pyproject failed CI at publish.
+sync_version_in() {
+    local file="$1" pattern="$2"
+    if [ -f "$ROOT/$file" ]; then
+        sed -i '' -E "$pattern" "$ROOT/$file"
+        if ! git diff --quiet "$ROOT/$file"; then
+            git add "$ROOT/$file"
+            CHANGED=1
+        fi
+    fi
+}
+sync_version_in "src/kindex/__init__.py" \
+    "s/^__version__ = \"[0-9]+\.[0-9]+\.[0-9]+\"/__version__ = \"${VERSION}\"/"
+for json_file in server.json docs/.well-known/mcp/server-card.json \
+        .claude-plugin/plugin.json src/kindex/claude_modern/.claude-plugin/plugin.json; do
+    sync_version_in "$json_file" \
+        "s/\"version\": \"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"${VERSION}\"/g"
+done
+# The changelog entry is written by hand; say so before CI does.
+if ! grep -qE "^## \[${VERSION}\]" "$ROOT/CHANGELOG.md"; then
+    echo "sync-version: CHANGELOG.md has no '## [${VERSION}]' entry; tests/test_release_metadata.py fails until it does" >&2
+fi
+
 if [ "$CHANGED" -eq 1 ]; then
     echo "sync-version: staged updated files"
 fi
