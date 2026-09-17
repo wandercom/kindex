@@ -5034,7 +5034,8 @@ def _collab_unread_messages(store, collab: dict, agent: str) -> list[dict]:
     return out
 
 
-def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
+def _collab_prompt_lines(store, cfg, conversation_id: str,
+                         failures: list | None = None) -> list[str]:
     """Collab updates for the UserPromptSubmit hook.
 
     New targeted/broadcast messages since the agent's read cursor plus standing
@@ -5050,10 +5051,14 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
         return []
 
     agent = resolve_agent_id(cfg)
+    skipped: list | None = None if failures is None else []
     collabs = [
-        c for c in active_collabs_for_agent(store, agent)
+        c for c in active_collabs_for_agent(store, agent, skipped=skipped)
         if c.get("unread_count") or c.get("inject_messages")
     ]
+    if skipped:
+        from .coordination import skipped_conversation_error
+        failures.extend(skipped_conversation_error(cid, error) for cid, error in skipped)
     if not collabs:
         return []
 
@@ -5289,13 +5294,17 @@ def cmd_prompt_check(args):
 
     # Collab updates: new targeted/broadcast messages since the agent's read
     # cursor + standing inject messages, with a per-conversation cooldown.
+    # A failed section is skipped and recorded once the hook has answered:
+    # one invocation that fails as a whole writes only the catch-all's event.
+    section_failures: list[tuple[str, Exception]] = []
     collab_lines: list[str] = []
+    collab_failures: list[Exception] = []
     try:
-        collab_lines = _collab_prompt_lines(store, cfg, conversation_id)
+        collab_lines = _collab_prompt_lines(store, cfg, conversation_id, collab_failures)
     except Exception as exc:
         collab_lines = []
-        from .config import record_degraded
-        record_degraded("prompt-check-collab", exc, config=cfg)
+        section_failures.append(("prompt-check.collabs", exc))
+    section_failures.extend(("prompt-check.collabs", exc) for exc in collab_failures)
 
     due = []
     if cfg.reminders.enabled:
@@ -5307,8 +5316,9 @@ def cmd_prompt_check(args):
                 include_global=True,
                 include_legacy=not strict_scope,
             )
-        except Exception:
+        except Exception as exc:
             due = []
+            section_failures.append(("prompt-check.reminders", exc))
 
     # Also check tasks that are urgent/overdue
     task_lines = []
@@ -5332,12 +5342,18 @@ def cmd_prompt_check(args):
                 p_label = {1: "URGENT", 2: "HIGH"}.get(p, "")
                 task_lines.append(
                     f"  - [{p_label}] {graph_text(t['title'], 200, single_line=True)} (id: {t['id']})")
-    except Exception:
-        pass
+    except Exception as exc:
+        section_failures.append(("prompt-check.tasks", exc))
+
+    def record_section_failures() -> None:
+        from .hooks import _record_section_degraded
+        for section, exc in section_failures:
+            _record_section_degraded(section, exc, cfg)
 
     if (not due and not attention_lines and not task_lines and not sim_lines
             and not collab_lines):
         store.close()
+        record_section_failures()
         return
 
     # Plain text: this block is model context, where terminal colour codes
@@ -5407,6 +5423,7 @@ def cmd_prompt_check(args):
     if rendered:
         print(rendered)
     store.close()
+    record_section_failures()
 
 
 def cmd_attention_hook(args):

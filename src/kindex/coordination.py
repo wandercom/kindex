@@ -578,11 +578,15 @@ def list_inject_messages(store: Store, conversation: str) -> list:
             if isinstance(m, dict) and _inject_live(m)]
 
 
-def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
+def active_collabs_for_agent(store: Store, agent: str,
+                             skipped: list | None = None) -> list[dict]:
     """Live collab summaries for an agent — feeds prime/prompt-check hooks.
 
-    One scan over active coordination nodes; each conversation is processed
-    inside its own try/except so a malformed one cannot break the hook path.
+    One query for the agent's live conversations; each is processed inside
+    its own try/except so a malformed one cannot break the hook path. A
+    skipped conversation is appended to ``skipped`` as ``(id, error)`` for a
+    hook that records its failures once, at the end; without ``skipped`` it
+    is recorded in the degraded ledger at once.
     Returns, per conversation the agent is a member of:
     {name, node_id, task_id, focus, unread_count, inject_messages,
      locked_resources, members}.
@@ -596,10 +600,9 @@ def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
     collabs = []
     try:
         rows = _conversation_rows(store, status="active", member=agent)
-    except sqlite3.Error as error:
-        # A members field that is not an array fails json_each for the whole
-        # query; fall back to reading every active conversation.
-        _record_collab_degraded(store, error)
+    except sqlite3.Error:
+        # Should a members value defeat json_each, read every active
+        # conversation instead; a failure here is the caller's to report.
         rows = _conversation_rows(store, status="active")
     for row in rows:
         try:
@@ -662,20 +665,27 @@ def active_collabs_for_agent(store: Store, agent: str) -> list[dict]:
             })
         except Exception as error:
             # A malformed conversation never breaks the hook path, but it is
-            # recorded rather than silently dropped.
-            _record_collab_degraded(store, error, row.get("id"))
+            # reported rather than silently dropped.
+            if skipped is None:
+                _record_collab_degraded(store, error, row.get("id"))
+            else:
+                skipped.append((row.get("id"), error))
             continue
     collabs.sort(key=lambda c: c["name"])
     return collabs
+
+
+def skipped_conversation_error(conversation_id: str | None, error: Exception) -> RuntimeError:
+    where = f" in conversation {conversation_id}" if conversation_id else ""
+    return RuntimeError(f"{type(error).__name__}{where}: {error}")
 
 
 def _record_collab_degraded(store: Store, error: Exception,
                             conversation_id: str | None = None) -> None:
     try:
         from .config import record_degraded
-        where = f" in conversation {conversation_id}" if conversation_id else ""
-        record_degraded("collab", RuntimeError(
-            f"{type(error).__name__}{where}: {error}"), config=store.config)
+        record_degraded("collab", skipped_conversation_error(conversation_id, error),
+                        config=store.config)
     except Exception:
         pass
 

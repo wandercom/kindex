@@ -720,3 +720,9 @@ def test_a_malformed_conversation_is_recorded(store, monkeypatch):
     assert active_collabs_for_agent(store, "agent-b") == []
     assert [cmd for cmd, _ in recorded] == ["collab"]
     assert bad in recorded[0][1]
+
+    # A hook collects them instead, to record once it has answered.
+    skipped = []
+    assert active_collabs_for_agent(store, "agent-b", skipped=skipped) == []
+    assert [cid for cid, _ in skipped] == [bad]
+    assert len(recorded) == 1

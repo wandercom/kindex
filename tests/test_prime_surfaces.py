@@ -487,3 +487,88 @@ def test_a_broken_read_is_not_an_empty_one(store, monkeypatch):
     monkeypatch.setattr(type(store), "conn", property(lambda self: _Broken()))
     with pytest.raises(_sqlite3.DatabaseError):
         store.recent_activity()
+
+
+def test_scores_scale_by_the_best_match():
+    from kindex.retrieve import _normalize_scores
+
+    assert _normalize_scores([("only", 3.2)]) == [("only", 1.0)]
+    assert _normalize_scores([("a", 2.0), ("b", 2.0)]) == [("a", 1.0), ("b", 1.0)]
+    scaled = dict(_normalize_scores([("best", 4.0), ("weak", 1.0)]))
+    assert scaled == {"best": 1.0, "weak": 0.25}
+    assert dict(_normalize_scores([("none", 0.0)])) == {"none": 0.0}
+    assert dict(_normalize_scores([("low", -1.0), ("high", 1.0)])) == {"low": 0.0, "high": 1.0}
+
+
+def test_text_without_spaces_is_counted_by_its_size():
+    from kindex.retrieve import _estimate_tokens
+
+    assert _estimate_tokens("x" * 4000) >= 1000
+    assert _estimate_tokens("one two three four five " + "/a/b" * 500) >= 500
+    assert _estimate_tokens("the quick brown fox jumps over the lazy dog") == 11
+
+
+def _kinbase_row(n: int) -> dict:
+    return {"id": f"row-{n}", "title": f"Imported fact {n}", "type": "concept",
+            "content": f"Content {n}", "weight": 0.5, "standing": "unruled",
+            "extra": {"kinbase": {"mode": "raw"}}}
+
+
+def test_evidence_notes_name_their_rows_and_only_rendered_ones(store):
+    from kindex.retrieve import format_context_block
+
+    rows = [_kinbase_row(n) for n in range(7)]
+    block = format_context_block(store, rows, query="facts", level="executive",
+                                 max_tokens_approx=100000)
+    assert block.count("Kinbase raw signed evidence") == 5  # the executive top five
+    for n in range(5):
+        assert f"Evidence for Imported fact {n} [row-{n}]:" in block
+    assert "row-5" not in block and "row-6" not in block
+
+
+def test_the_trust_note_counts_every_reason():
+    from kindex.retrieve import build_trust_note
+
+    assert build_trust_note({}) == "(trusted-only admission: no candidates omitted)"
+    note = build_trust_note({"stale_referent": 2, "future_reason": 1, "unverified": 1})
+    assert note == ("(trusted-only omissions: legacy/unverified=1; stale referent=2; "
+                    "future reason=1)")
+
+
+def test_the_prime_budget_is_a_ceiling(store, config, monkeypatch):
+    import datetime
+
+    from kindex import hooks
+    from kindex.hooks import prime_context
+    from kindex.reminders import create_reminder
+
+    for n in range(8):
+        store.add_node(f"Budget topic {n}", content="budget topic detail " * 40,
+                       node_type="concept", prov_activity="test")
+    for n in range(5):
+        store.add_node(f"Watch {n} " + "w" * 150, node_type="watch", prov_activity="test",
+                       extra={"owner": "ops", "expires": "2099-01-01"})
+    for n in range(5):
+        store.add_node(f"Constraint {n} " + "c" * 150, node_type="constraint",
+                       prov_activity="test", extra={"action": "block"})
+    rid = create_reminder(store, "Rotate the deploy key", "in 5 minutes")
+    past = (datetime.datetime.now() - datetime.timedelta(minutes=1)).isoformat(timespec="seconds")
+    store.update_reminder(rid, next_due=past)
+    config.reminders.remind_kindex_usage = False
+
+    roomy = prime_context(store, topic="budget topic", max_tokens=100000, config=config)
+    assert "Left out for the token budget" not in roomy
+    assert roomy.count("- **Budget topic") == 6
+    assert "### Watches" in roomy and "### Recent activity" in roomy
+
+    block = prime_context(store, topic="budget topic", max_tokens=400, config=config)
+    assert len(block) <= 400 * 4 + 1
+    assert "### Key concepts" in block and "Budget topic" in block
+    # Activity and watches give way before constraints; the due reminder stays,
+    # and the closing line says what was left out.
+    assert "### Recent activity" not in block and "### Watches" not in block
+    assert "### Active constraints" in block
+    assert "Rotate the deploy key" in block
+    assert "Left out for the token budget:" in block
+    assert "5 of Watches" in block and "of Recent activity" in block
+    assert hooks.PRIME_TRIM_ORDER[-1] == "### Reminders"

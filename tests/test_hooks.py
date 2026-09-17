@@ -486,7 +486,7 @@ def test_a_failing_collab_section_is_recorded(store, collab_config, monkeypatch)
                         lambda cmd, error, **kw: recorded.append(cmd))
     monkeypatch.setattr(coord, "active_collabs_for_agent", broken)
     assert "Active collabs" not in prime_context(store, topic="x", config=collab_config)
-    assert recorded == ["prime-collabs"]
+    assert recorded == ["prime.collabs"]
     with pytest.raises(RuntimeError):
         _collab_prompt_lines(store, collab_config, "conv-1")
 
