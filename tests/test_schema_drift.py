@@ -227,14 +227,22 @@ CREATE TABLE suggestions (
 def _store_with_pre_v14_suggestions(tmp_path) -> Store:
     """A store whose suggestions table predates `identity_kind`, at v13.
 
-    The exact state of every install that created the table before the
-    column existed: `kin doctor` reported the drift and `--fix` could not add
-    the column because no migration did.
+    The exact state of every install that was already at v12 or v13 when the
+    column was added to the v12 migration: `kin doctor` reported the drift
+    and `--fix` could not add the column because no later migration did. It
+    carries one Dream suggestion (node ids in concept_a/b) and one learned
+    suggestion (titles), written the way those producers wrote them then.
     """
     cfg = Config(data_dir=str(tmp_path))
     store = Store(cfg)
     store.conn.execute("DROP TABLE IF EXISTS suggestions")
     store.conn.executescript(PRE_V14_SUGGESTIONS_TABLE)
+    store.conn.execute(
+        "INSERT INTO suggestions (concept_a, concept_b, source) "
+        "VALUES ('node-aaaa', 'node-bbbb', 'dream-cycle')")
+    store.conn.execute(
+        "INSERT INTO suggestions (concept_a, concept_b, source) "
+        "VALUES ('Alpha Title', 'Beta Title', 'mcp-learn')")
     store.conn.execute(
         "UPDATE meta SET value = '13' WHERE key = 'schema_version'")
     store.conn.commit()
@@ -260,10 +268,18 @@ def test_v14_migration_adds_identity_kind(tmp_path):
     assert "identity_kind" in cols
     assert store.schema_drift() == {}
     assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+    kinds = {
+        row["source"]: row["identity_kind"]
+        for row in store.conn.execute(
+            "SELECT source, identity_kind FROM suggestions")
+    }
+    # A Dream suggestion holds node ids and must say so, or its endpoints
+    # can no longer be resolved; a learned suggestion holds titles.
+    assert kinds == {"dream-cycle": "node_id", "mcp-learn": "title"}
     store.conn.execute(
         "INSERT INTO suggestions (concept_a, concept_b) VALUES ('a', 'b')")
     row = store.conn.execute(
-        "SELECT identity_kind FROM suggestions").fetchone()
+        "SELECT identity_kind FROM suggestions WHERE concept_a = 'a'").fetchone()
     assert row["identity_kind"] == "title"
     with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute(
@@ -274,9 +290,13 @@ def test_v14_migration_adds_identity_kind(tmp_path):
 
 def test_v14_migration_passes_a_table_that_already_has_the_column(tmp_path):
     """A store created at v13 after the column existed must not fail on a
-    duplicate ALTER; it is stamped forward untouched."""
+    duplicate ALTER; it is stamped forward, and a Dream suggestion that was
+    hand-repaired with the column's default is reclassified as node_id."""
     cfg = Config(data_dir=str(tmp_path))
     store = Store(cfg)
+    store.conn.execute(
+        "INSERT INTO suggestions (concept_a, concept_b, source, identity_kind) "
+        "VALUES ('node-aaaa', 'node-bbbb', 'dream-cycle', 'title')")
     store.conn.execute(
         "UPDATE meta SET value = '13' WHERE key = 'schema_version'")
     store.conn.commit()
@@ -284,4 +304,7 @@ def test_v14_migration_passes_a_table_that_already_has_the_column(tmp_path):
     store = Store(Config(data_dir=str(tmp_path)))
     assert store.schema_drift() == {}
     assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+    row = store.conn.execute(
+        "SELECT identity_kind FROM suggestions WHERE source = 'dream-cycle'").fetchone()
+    assert row["identity_kind"] == "node_id"
     store.close()

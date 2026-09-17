@@ -1255,12 +1255,16 @@ class Store:
     def _migrate_v14(self) -> None:
         """Add ``suggestions.identity_kind`` to stores that predate it.
 
-        The column was added to the v13 ``CREATE TABLE IF NOT EXISTS
-        suggestions`` after that shape had shipped, so every store created
-        earlier kept the old table while ``schema_version`` read current;
-        ``kin doctor`` reported the drift and pointed at ``--fix``, which only
-        reopens the store, and no migration added the column. Same failure
-        class as v10. A table that already carries the column passes through.
+        The column and its backfill live in the v12 migration and in
+        ``CREATE TABLE IF NOT EXISTS suggestions``, both of which were extended
+        after v12 had shipped, so a store already at v12 or v13 by then never
+        ran them: the table kept its old shape while ``schema_version`` read
+        current, ``kin doctor`` reported the drift, and ``--fix`` (which only
+        reopens the store) could not add the column. Same failure class as
+        v10. The step mirrors v12 exactly: add the column when absent, then
+        mark every suggestion from a node-id producer as ``node_id`` so its
+        endpoints stay resolvable; a table already in shape passes through
+        with the same backfill, which is idempotent.
         """
         c = self._conn
         c.execute("BEGIN IMMEDIATE")
@@ -1275,11 +1279,26 @@ class Store:
                         "ALTER TABLE suggestions ADD COLUMN identity_kind TEXT NOT NULL "
                         "DEFAULT 'title' CHECK (identity_kind IN ('title', 'node_id'))"
                     )
+                placeholders = ",".join("?" for _ in NODE_ID_SUGGESTION_SOURCES)
+                c.execute(
+                    "UPDATE suggestions SET identity_kind = 'node_id' "
+                    f"WHERE source IN ({placeholders}) AND identity_kind != 'node_id'",
+                    tuple(sorted(NODE_ID_SUGGESTION_SOURCES)),
+                )
                 column = next(row for row in c.execute("PRAGMA table_info(suggestions)")
                               if row["name"] == "identity_kind")
                 if column["type"] != "TEXT" or not column["notnull"]:
                     raise RuntimeError(
                         "v14 migration verification failed: identity_kind column")
+                misclassified = c.execute(
+                    "SELECT COUNT(*) FROM suggestions "
+                    f"WHERE source IN ({placeholders}) AND identity_kind != 'node_id'",
+                    tuple(sorted(NODE_ID_SUGGESTION_SOURCES)),
+                ).fetchone()[0]
+                if misclassified:
+                    raise RuntimeError(
+                        "v14 migration verification failed: node-id suggestions "
+                        f"still marked as titles ({misclassified})")
             c.execute("UPDATE meta SET value = '14' WHERE key = 'schema_version'")
             c.commit()
         except BaseException:
