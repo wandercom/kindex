@@ -6,7 +6,7 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .privacy import redact_text, safe_error
+from .privacy import safe_error
 from .privacy import redacting_print as print
 
 from .routing import (  # noqa: F401  (re-exported for backward compatibility)
@@ -748,16 +748,12 @@ def find_new_sessions(config: "Config", since_iso: str) -> list[Path]:
         # If invalid timestamp, return all files
         since_dt = datetime.datetime.min
 
-    results = []
-    for jsonl_path in projects_dir.rglob("*.jsonl"):
-        try:
-            mtime = datetime.datetime.fromtimestamp(jsonl_path.stat().st_mtime)
-            if mtime > since_dt:
-                results.append(jsonl_path)
-        except OSError:
-            continue
+    from .ingest import session_transcripts
 
-    return sorted(results, key=lambda p: p.stat().st_mtime, reverse=True)
+    return [
+        path for path, mtime in session_transcripts(projects_dir)
+        if datetime.datetime.fromtimestamp(mtime) > since_dt
+    ]
 
 
 def incremental_ingest(
@@ -768,13 +764,12 @@ def incremental_ingest(
     This is a lightweight alternative to full scan_sessions that only
     looks at files modified since the given timestamp.
     """
-    import json
-
     new_files = find_new_sessions(config, since_iso)
     if not new_files:
         return 0
 
     from .extract import keyword_extract
+    from .ingest import _extract_session_text
 
     # Per-profile session routing — same predicate as scan_sessions, so
     # `kin watch` cannot pull foreign-profile sessions into this store.
@@ -791,8 +786,10 @@ def incremental_ingest(
         if store.get_node(session_slug):
             continue
 
-        # Extract text from the session
-        text = _extract_session_text_quick(jsonl_path)
+        # Extract text from the session (the same reader as scan_sessions;
+        # a copy of it read only the old top-level role and found nothing in
+        # current transcripts).
+        text = _extract_session_text(jsonl_path, max_chars=4000)
         if not text or len(text) < 50:
             continue
 
@@ -833,41 +830,3 @@ def incremental_ingest(
                 )
 
     return count
-
-
-def _extract_session_text_quick(jsonl_path: Path, max_chars: int = 4000) -> str:
-    """Quick text extraction from a JSONL session file."""
-    import json
-
-    texts = []
-    total_len = 0
-
-    try:
-        with open(jsonl_path, "r", errors="replace") as f:
-            for line in f:
-                if total_len >= max_chars:
-                    break
-                try:
-                    entry = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-
-                role = entry.get("role", "")
-                if role != "assistant":
-                    continue
-
-                content = entry.get("content", "")
-                if isinstance(content, str):
-                    chunk = redact_text(content)[:800]
-                    texts.append(chunk)
-                    total_len += len(chunk)
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            chunk = redact_text(block.get("text", ""))[:800]
-                            texts.append(chunk)
-                            total_len += len(chunk)
-    except OSError:
-        return ""
-
-    return "\n".join(texts)

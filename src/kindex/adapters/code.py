@@ -938,6 +938,63 @@ def _symbol_id(repo_slug: str, qualified_name: str) -> str:
     return f"code-sym-{repo_slug}-{h}"
 
 
+_RETIRED_BY = "code-ingest"
+
+
+def _reconcile_code_nodes(
+    store: "Store",
+    repo_slug: str,
+    root: Path,
+    directory: Path,
+    *,
+    seen: set[str],
+    retire: bool,
+) -> tuple[int, int]:
+    """Retire this repository's code nodes under ``directory`` that the run
+    did not see, and restore ones it retired that are back. Returns
+    ``(retired, restored)``. Only nodes this adapter wrote for this
+    repository root are touched; a node someone archived by hand stays so.
+    """
+    import datetime
+    import json as _json
+
+    try:
+        scope = directory.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return 0, 0
+    prefixes = (f"code-mod-{repo_slug}-", f"code-sym-{repo_slug}-")
+    rows = store.conn.execute(
+        "SELECT id, status, extra FROM nodes "
+        "WHERE substr(id, 1, ?) = ? OR substr(id, 1, ?) = ?",
+        (len(prefixes[0]), prefixes[0], len(prefixes[1]), prefixes[1]),
+    ).fetchall()
+    retired = restored = 0
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    for row in rows:
+        try:
+            extra = _json.loads(row["extra"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(extra, dict) or extra.get("repo_root") != str(root):
+            continue
+        relative = Path(str(extra.get("relative_path") or ""))
+        if str(scope) not in ("", ".") and not relative.is_relative_to(scope):
+            continue
+        if row["id"] in seen:
+            if row["status"] == "archived" and extra.get("retired_by") == _RETIRED_BY:
+                extra.pop("retired_by", None)
+                extra.pop("retired_at", None)
+                store.update_node(row["id"], status="active", extra=extra)
+                restored += 1
+            continue
+        if retire and row["status"] not in ("archived", "superseded"):
+            extra["retired_by"] = _RETIRED_BY
+            extra["retired_at"] = now
+            store.update_node(row["id"], status="archived", extra=extra)
+            retired += 1
+    return retired, restored
+
+
 def _file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -1529,6 +1586,20 @@ def ingest_code(
 
         if verbose:
             print(f"  tree-sitter: processed {len(file_list)} {language} files")
+
+    # Reconcile: a module or class this run no longer found is retired, and
+    # one that came back is restored. Ingest used to be additive only, so
+    # deleted and renamed files lived on (and were exported) forever. A run
+    # cut short by its limit saw only part of the tree and retires nothing.
+    retired, restored = _reconcile_code_nodes(
+        store, repo_slug, effective_root, directory,
+        seen=set(module_node_ids.values()) | set(symbol_node_ids.values()),
+        retire=not truncated,
+    )
+    if verbose and (retired or restored):
+        print(f"  Retired {retired} and restored {restored} code node(s)")
+    if retired:
+        warnings.append(f"retired {retired} code node(s) whose file or symbol is gone")
 
     # Link all code nodes to project
     _link_to_project(store, repo_slug, all_node_ids)

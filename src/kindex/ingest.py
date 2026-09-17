@@ -192,11 +192,7 @@ def scan_sessions(
         pass
 
     # Find recent JSONL conversation files
-    jsonl_files = sorted(
-        projects_dir.rglob("*.jsonl"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )[:limit]
+    jsonl_files = [path for path, _ in session_transcripts(projects_dir)][:limit]
 
     # Per-profile session routing: an explicit per-pass predicate (set by
     # daemon.cron_run_all / kin cron) wins; otherwise one is built from the
@@ -434,6 +430,25 @@ def _codex_message_texts(content) -> list[str]:
                 texts.append(val)
                 break
     return texts
+
+
+def session_transcripts(projects_dir: Path) -> list[tuple[Path, float]]:
+    """Claude Code session transcripts (``<project>/<session>.jsonl``) and
+    their mtimes, newest first.
+
+    Subagent and workflow transcripts nest below a session's directory; they
+    are not sessions. Scanning them too (most transcripts on a busy machine
+    are) titled nodes after ``subagents`` and crowded real sessions out of
+    each scan. A file that disappears mid-scan is skipped.
+    """
+    found: list[tuple[Path, float]] = []
+    for path in projects_dir.glob("*/*.jsonl"):
+        try:
+            found.append((path, path.stat().st_mtime))
+        except OSError:
+            continue
+    found.sort(key=lambda item: item[1], reverse=True)
+    return found
 
 
 def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
@@ -1142,8 +1157,11 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
         # Query code nodes belonging to this repo by ID prefix
         mod_prefix = f"code-mod-{repo_slug}-"
         sym_prefix = f"code-sym-{repo_slug}-"
+        # A retired module or symbol (its file or class is gone) is not
+        # exported.
         rows = store.conn.execute(
-            "SELECT * FROM nodes WHERE id LIKE ? OR id LIKE ? "
+            "SELECT * FROM nodes WHERE (id LIKE ? OR id LIKE ?) "
+            "AND status NOT IN ('archived', 'superseded') "
             "ORDER BY id ASC",
             (f"{mod_prefix}%", f"{sym_prefix}%"),
         ).fetchall()
