@@ -111,7 +111,12 @@ def prime_context(
                 title = r.get("title", r["id"])
                 ntype = r.get("type", "concept")
                 content = (r.get("content") or "")[:120]
-                edges = r.get("edges_out", [])
+                # Search already fenced the neighbours; the client scope that
+                # fenced the results applies to the titles named beside them.
+                edges = [
+                    e for e in r.get("edges_out", [])
+                    if not adapter_scoped_out(store.get_node_domains(e.get("to_id")), adapter)
+                ]
                 connected = ", ".join(str(e.get("to_title") or e.get("to_id") or "")
                                       for e in edges[:3])
 
