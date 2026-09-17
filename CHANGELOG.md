@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.43.2] - 2026-09-17
+
 ### Added
 - `kin supervisor-register --agent <host> --session <id> [--project <dir>]`
   lets a tool that drives a host non-interactively register the session it
