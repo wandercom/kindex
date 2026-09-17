@@ -802,6 +802,9 @@ class Store:
         if current_version < 13:
             self._migrate_v13()
 
+        if current_version < 14:
+            self._migrate_v14()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -1244,6 +1247,40 @@ class Store:
             if column["type"] != "TEXT" or not column["notnull"]:
                 raise RuntimeError("v13 migration verification failed: standing column")
             c.execute("UPDATE meta SET value = '13' WHERE key = 'schema_version'")
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
+    def _migrate_v14(self) -> None:
+        """Add ``suggestions.identity_kind`` to stores that predate it.
+
+        The column was added to the v13 ``CREATE TABLE IF NOT EXISTS
+        suggestions`` after that shape had shipped, so every store created
+        earlier kept the old table while ``schema_version`` read current;
+        ``kin doctor`` reported the drift and pointed at ``--fix``, which only
+        reopens the store, and no migration added the column. Same failure
+        class as v10. A table that already carries the column passes through.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            table = c.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'suggestions'"
+            ).fetchone()
+            if table is not None:
+                columns = {row["name"] for row in c.execute("PRAGMA table_info(suggestions)")}
+                if "identity_kind" not in columns:
+                    c.execute(
+                        "ALTER TABLE suggestions ADD COLUMN identity_kind TEXT NOT NULL "
+                        "DEFAULT 'title' CHECK (identity_kind IN ('title', 'node_id'))"
+                    )
+                column = next(row for row in c.execute("PRAGMA table_info(suggestions)")
+                              if row["name"] == "identity_kind")
+                if column["type"] != "TEXT" or not column["notnull"]:
+                    raise RuntimeError(
+                        "v14 migration verification failed: identity_kind column")
+            c.execute("UPDATE meta SET value = '14' WHERE key = 'schema_version'")
             c.commit()
         except BaseException:
             c.rollback()

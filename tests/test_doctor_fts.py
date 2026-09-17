@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from kindex.config import Config
+from kindex.schema import SCHEMA_VERSION
 from kindex.store import Store
 
 
@@ -32,7 +33,7 @@ def graph(tmp_path, monkeypatch):
     store.add_node("Alpha", "originalneedle canonical body", node_id="alpha")
     store.add_node("Beta", "betaneedle canonical body", node_id="beta")
     store.add_edge("alpha", "beta", bidirectional=True)
-    assert store.get_meta("schema_version") == "13"
+    assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
     db_path = store.db_path
     store.close()
 
