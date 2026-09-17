@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 STANDINGS = ("unruled", "present", "prevalent", "exemplary", "enforced", "ratified", "authoritative")
 

@@ -802,6 +802,9 @@ class Store:
         if current_version < 13:
             self._migrate_v13()
 
+        if current_version < 14:
+            self._migrate_v14()
+
     def _migrate_v8(self) -> None:
         """Atomically upgrade a version-7 store to the state-resilience schema.
 
@@ -1244,6 +1247,59 @@ class Store:
             if column["type"] != "TEXT" or not column["notnull"]:
                 raise RuntimeError("v13 migration verification failed: standing column")
             c.execute("UPDATE meta SET value = '13' WHERE key = 'schema_version'")
+            c.commit()
+        except BaseException:
+            c.rollback()
+            raise
+
+    def _migrate_v14(self) -> None:
+        """Add ``suggestions.identity_kind`` to stores that predate it.
+
+        The column and its backfill live in the v12 migration and in
+        ``CREATE TABLE IF NOT EXISTS suggestions``, both of which were extended
+        after v12 had shipped, so a store already at v12 or v13 by then never
+        ran them: the table kept its old shape while ``schema_version`` read
+        current, ``kin doctor`` reported the drift, and ``--fix`` (which only
+        reopens the store) could not add the column. Same failure class as
+        v10. The step mirrors v12 exactly: add the column when absent, then
+        mark every suggestion from a node-id producer as ``node_id`` so its
+        endpoints stay resolvable; a table already in shape passes through
+        with the same backfill, which is idempotent.
+        """
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            table = c.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'suggestions'"
+            ).fetchone()
+            if table is not None:
+                columns = {row["name"] for row in c.execute("PRAGMA table_info(suggestions)")}
+                if "identity_kind" not in columns:
+                    c.execute(
+                        "ALTER TABLE suggestions ADD COLUMN identity_kind TEXT NOT NULL "
+                        "DEFAULT 'title' CHECK (identity_kind IN ('title', 'node_id'))"
+                    )
+                placeholders = ",".join("?" for _ in NODE_ID_SUGGESTION_SOURCES)
+                c.execute(
+                    "UPDATE suggestions SET identity_kind = 'node_id' "
+                    f"WHERE source IN ({placeholders}) AND identity_kind != 'node_id'",
+                    tuple(sorted(NODE_ID_SUGGESTION_SOURCES)),
+                )
+                column = next(row for row in c.execute("PRAGMA table_info(suggestions)")
+                              if row["name"] == "identity_kind")
+                if column["type"] != "TEXT" or not column["notnull"]:
+                    raise RuntimeError(
+                        "v14 migration verification failed: identity_kind column")
+                misclassified = c.execute(
+                    "SELECT COUNT(*) FROM suggestions "
+                    f"WHERE source IN ({placeholders}) AND identity_kind != 'node_id'",
+                    tuple(sorted(NODE_ID_SUGGESTION_SOURCES)),
+                ).fetchone()[0]
+                if misclassified:
+                    raise RuntimeError(
+                        "v14 migration verification failed: node-id suggestions "
+                        f"still marked as titles ({misclassified})")
+            c.execute("UPDATE meta SET value = '14' WHERE key = 'schema_version'")
             c.commit()
         except BaseException:
             c.rollback()
