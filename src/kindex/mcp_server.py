@@ -132,6 +132,12 @@ class MemoryUnavailableError(RuntimeError):
 
     def __init__(self, cause: BaseException):
         self.error_class = type(cause).__name__
+        # A configuration refusal (an ambiguous scope, an unknown profile)
+        # is something the caller can act on, so its remedy travels with the
+        # error; a broken database says only its class.
+        self.remedy = (
+            safe_error(cause, limit=600) if isinstance(cause, ValueError) else ""
+        )
         super().__init__(f"memory unavailable ({self.error_class})")
 
 
@@ -162,6 +168,8 @@ def _tool(*dargs, **dkwargs):
                 ) else "success"
                 return result
             except MemoryUnavailableError as e:
+                if e.remedy:
+                    return f"Error: memory unavailable ({e.error_class}): {e.remedy}"
                 return f"Error: memory unavailable ({e.error_class})"
             except sqlite3.Error as e:
                 # The store opened but a query hit a broken/locked DB
@@ -234,6 +242,20 @@ def _default_agent(agent: str = "") -> str:
         return agent.strip()
     from .config import resolve_agent_id
     return resolve_agent_id(_get_config())
+
+
+def _agent_without_legacy_store(agent: str = "") -> str:
+    """An explicit agent, KIN_AGENT_ID, or the configured identity when the
+    legacy store is readable; otherwise empty, and project_scope applies its
+    own default."""
+    if agent and agent.strip():
+        return agent.strip()
+    if os.environ.get("KIN_AGENT_ID", "").strip():
+        return os.environ["KIN_AGENT_ID"].strip()
+    try:
+        return _default_agent("")
+    except MemoryUnavailableError:
+        return ""
 
 
 def _mcp_client() -> str | None:
@@ -2250,10 +2272,16 @@ def task_execute(operation: str, arguments: dict, project_path: str,
     Explicit project/session scope comes from the caller, never the MCP cwd.
     """
     from .integrations import open_project_store, execute_task, project_scope
-    scope = project_scope({
+    # The repo-local lane never needs the legacy store; resolving the agent
+    # through it made one unreadable home scope fail every task call.
+    requested = {
         "project_path": project_path, "session_id": session_id, "profile": profile,
-        "agent": _default_agent(agent), "include_global": include_global,
-    })
+        "include_global": include_global,
+    }
+    resolved_agent = _agent_without_legacy_store(agent)
+    if resolved_agent:
+        requested["agent"] = resolved_agent
+    scope = project_scope(requested)
     if include_global:
         return {"ok": False, "error": {"code": "invalid_scope", "message": "Modern task_execute is repo-local; use explicit legacy task tools for global tasks"}}
     store = open_project_store(scope)

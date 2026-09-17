@@ -255,7 +255,9 @@ class TestAutoEnableLLM:
 
             # Should have tried to create a client (auto-enable)
             if mock_anthropic.Anthropic.called:
-                mock_anthropic.Anthropic.assert_called_once_with(api_key="test-key-12345")
+                # A command's request is bounded (the SDK default waited ten minutes).
+                mock_anthropic.Anthropic.assert_called_once_with(
+                    api_key="test-key-12345", timeout=60.0, max_retries=2)
 
     def test_no_key_no_enable(self):
         """Without API key and not enabled, should return None."""

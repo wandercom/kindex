@@ -438,16 +438,45 @@ def _codex_message_texts(content) -> list[str]:
 
 def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
     """Extract human-readable text from a Claude Code JSONL session file."""
-    texts = []
-    total_len = 0
+    return _extract_session_text_since(
+        jsonl_path, 0, max_chars=max_chars, complete_lines_only=False)[0]
 
+
+def _extract_session_text_since(
+    jsonl_path: Path,
+    start_offset: int,
+    *,
+    max_chars: int = 8000,
+    max_bytes: int = 4 * 1024 * 1024,
+    complete_lines_only: bool = True,
+) -> tuple[str, int, bool]:
+    """Assistant text from ``start_offset`` on, the offset of the first line
+    not consumed, and whether that offset is the end of the file.
+
+    With ``complete_lines_only`` (a live transcript) a line without its
+    newline is still being written and is read next time; a finished file's
+    unterminated last line is read. Reading stops once ``max_chars`` of text or ``max_bytes`` of
+    transcript have been taken, so a long delta is covered over several calls.
+    """
+    texts: list[str] = []
+    total_len = 0
+    offset = start_offset
+    at_end = False
     try:
-        with open(jsonl_path, "r", errors="replace") as f:
-            for line in f:
-                if total_len >= max_chars:
+        with open(jsonl_path, "rb") as f:
+            f.seek(start_offset)
+            while total_len < max_chars and offset - start_offset < max_bytes:
+                raw = f.readline()
+                if not raw:
+                    at_end = True
                     break
+                if not raw.endswith(b"\n"):
+                    at_end = True
+                    if complete_lines_only:
+                        break
+                offset += len(raw)
                 try:
-                    entry = json.loads(line)
+                    entry = json.loads(raw.decode("utf-8", errors="replace"))
                 except (json.JSONDecodeError, ValueError):
                     continue
                 if not isinstance(entry, dict):
@@ -475,10 +504,12 @@ def _extract_session_text(jsonl_path: Path, max_chars: int = 8000) -> str:
                             text = redact_text(block["text"])[:1000]
                             texts.append(text)
                             total_len += len(text)
+            else:
+                at_end = not f.read(1)
     except OSError:
-        return ""
+        return "", start_offset, True
 
-    return "\n".join(texts)
+    return "\n".join(texts), offset, at_end
 
 
 # ── Parent directory .kin walk ────────────────────────────────────────
