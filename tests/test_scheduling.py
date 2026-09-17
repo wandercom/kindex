@@ -346,15 +346,65 @@ def test_a_repack_inside_the_job_reloads_it_only_once_it_is_idle(tmp_path, monke
     monkeypatch.setattr(
         scheduling.subprocess, "Popen", lambda argv, **k: spawned.append((argv, k))
     )
+    config = Config(data_dir=str(tmp_path / "store"))
 
-    result = scheduling._apply_launchd(3600, Config(data_dir=str(tmp_path / "store")))
+    result = scheduling._apply_launchd(3600, config)
 
     assert result["action"] == "updated"
     assert "<integer>3600</integer>" in plist.read_text()
     assert ran == [], "no synchronous launchctl call from inside the job"
     ((argv, kwargs),) = spawned
     assert kwargs["start_new_session"] is True
-    assert argv[-3:] == ["com.kindex.cron", str(plist), "reload"]
+    assert argv[-4:] == [
+        "com.kindex.cron", str(plist), "reload", str(scheduling._reload_lock(config)),
+    ]
+
+
+def _fake_launchctl(tmp_path, busy_lists=1, on_first_load=""):
+    """A launchctl that logs each verb, reports the job running for the first
+    ``busy_lists`` lists, and runs ``on_first_load`` on the first load."""
+    import stat
+
+    calls = tmp_path / "calls"
+    busy = tmp_path / "busy"
+    busy.write_text("x" * busy_lists)
+    loaded = tmp_path / "loaded-once"
+    fake = tmp_path / "bin" / "launchctl"
+    fake.parent.mkdir(exist_ok=True)
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'echo "$1" >> "{calls}"\n'
+        'if [ "$1" = list ]; then\n'
+        f'  left=$(cat "{busy}")\n'
+        '  if [ -n "$left" ]; then\n'
+        f'    printf %s "${{left#x}}" > "{busy}"; echo \'\t"PID" = 4242;\'\n'
+        '  fi\n'
+        'fi\n'
+        f'if [ "$1" = load ] && [ ! -e "{loaded}" ]; then\n'
+        f'  touch "{loaded}"; {on_first_load}\n'
+        'fi\n'
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    return calls, fake.parent
+
+
+def _run_helper(tmp_path, bin_dir, mode="reload", lock=None):
+    import os
+    import subprocess
+
+    from kindex.scheduling import RELOAD_WHEN_IDLE
+
+    plist = tmp_path / "job.plist"
+    if not plist.exists():
+        plist.write_text("300\n")
+    lock = lock or tmp_path / "reload.lock"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    subprocess.run(
+        ["/bin/sh", "-c", RELOAD_WHEN_IDLE, "kindex-reload",
+         "com.kindex.cron", str(plist), mode, str(lock)],
+        env=env, check=True, timeout=30,
+    )
+    return lock
 
 
 @pytest.mark.parametrize("mode, expected", [
@@ -362,35 +412,46 @@ def test_a_repack_inside_the_job_reloads_it_only_once_it_is_idle(tmp_path, monke
     ("unload", ["list", "list", "unload"]),
 ])
 def test_the_reload_helper_waits_for_the_running_job(tmp_path, mode, expected):
-    import os
-    import stat
-    import subprocess
-
-    from kindex.scheduling import RELOAD_WHEN_IDLE
-
-    calls = tmp_path / "calls"
-    running = tmp_path / "running-once"
-    running.write_text("")
-    fake = tmp_path / "bin" / "launchctl"
-    fake.parent.mkdir()
-    # Reports the job running on the first `list`, idle afterwards.
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'echo "$1" >> "{calls}"\n'
-        'if [ "$1" = list ]; then\n'
-        f'  if [ -e "{running}" ]; then rm "{running}"; echo \'\t"PID" = 4242;\'; fi\n'
-        'fi\n'
-    )
-    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    env = {**os.environ, "PATH": f"{fake.parent}:{os.environ['PATH']}"}
-
-    subprocess.run(
-        ["/bin/sh", "-c", RELOAD_WHEN_IDLE, "kindex-reload",
-         "com.kindex.cron", str(tmp_path / "job.plist"), mode],
-        env=env, check=True, timeout=30,
-    )
-
+    calls, bin_dir = _fake_launchctl(tmp_path)
+    lock = _run_helper(tmp_path, bin_dir, mode)
     assert calls.read_text().split() == expected
+    assert not lock.exists(), "the helper releases its lock"
+
+
+def test_a_second_reload_request_leaves_it_to_the_pending_helper(tmp_path):
+    calls, bin_dir = _fake_launchctl(tmp_path)
+    lock = tmp_path / "reload.lock"
+    lock.mkdir()
+    _run_helper(tmp_path, bin_dir, lock=lock)
+    assert not calls.exists(), "no launchctl call while another helper is pending"
+    assert lock.is_dir()
+
+
+def test_a_plist_rewritten_during_the_reload_is_reloaded_again(tmp_path):
+    plist = tmp_path / "job.plist"
+    plist.write_text("300\n")
+    # Another repack rewrites the plist while this helper loads it.
+    calls, bin_dir = _fake_launchctl(
+        tmp_path, on_first_load=f'echo 3600 > "{plist}"'
+    )
+    _run_helper(tmp_path, bin_dir)
+    assert calls.read_text().split() == [
+        "list", "list", "unload", "load", "list", "unload", "load",
+    ]
+
+
+def test_a_lock_left_by_a_dead_helper_is_taken_over(tmp_path):
+    import os
+    import time
+
+    calls, bin_dir = _fake_launchctl(tmp_path, busy_lists=0)
+    lock = tmp_path / "reload.lock"
+    lock.mkdir()
+    old = time.time() - 2 * 3600
+    os.utime(lock, (old, old))
+    _run_helper(tmp_path, bin_dir, lock=lock)
+    assert calls.read_text().split() == ["list", "unload", "load"]
+    assert not lock.exists()
 
 
 def test_setup_cron_keeps_the_repacked_interval(tmp_path, monkeypatch):

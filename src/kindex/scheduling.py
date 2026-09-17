@@ -189,18 +189,45 @@ def applied_interval(config: "Config") -> int | None:
 
 
 CRON_LABEL = "com.kindex.cron"
-# Waits (at most an hour, the maintenance cadence) until launchd reports the
-# job not running, then reloads it, or only unloads it when "$3" is "unload".
-RELOAD_WHEN_IDLE = (
-    'label="$1"; plist="$2"; n=0; '
-    'while launchctl list "$label" 2>/dev/null | grep -q \'"PID" = \'; do '
-    'n=$((n + 1)); [ "$n" -ge 3600 ] && break; sleep 1; done; '
-    'launchctl unload "$plist" >/dev/null 2>&1; '
-    '[ "$3" = unload ] || launchctl load "$plist" >/dev/null 2>&1'
-)
+# One helper at a time holds "$4" (a directory, so taking it is atomic). It
+# waits, at most an hour (the maintenance cadence), until launchd reports the
+# job not running, then reloads it, or only unloads it when "$3" is
+# "unload". A reload request that finds the lock held exits: the holder
+# re-reads the plist after releasing the lock and reloads again if it changed
+# since its own load, so the newest interval is the one launchd runs. Two
+# helpers reloading side by side unloaded the run the other had just started.
+RELOAD_WHEN_IDLE = r"""
+label="$1"; plist="$2"; mode="$3"; lock="$4"
+acquire() {
+  mkdir "$lock" 2>/dev/null && return 0
+  # A lock older than the longest wait belongs to a helper that died.
+  [ -n "$(find "$lock" -maxdepth 0 -mmin +90 2>/dev/null)" ] || return 1
+  rm -rf "$lock" && mkdir "$lock" 2>/dev/null
+}
+acquire || exit 0
+while :; do
+  n=0
+  while launchctl list "$label" 2>/dev/null | grep -q '"PID" = '; do
+    n=$((n + 1)); [ "$n" -ge 3600 ] && break; sleep 1
+  done
+  loaded=$(cksum < "$plist" 2>/dev/null)
+  launchctl unload "$plist" >/dev/null 2>&1
+  if [ "$mode" = unload ]; then rmdir "$lock" 2>/dev/null; exit 0; fi
+  launchctl load "$plist" >/dev/null 2>&1
+  rmdir "$lock" 2>/dev/null
+  [ "$(cksum < "$plist" 2>/dev/null)" = "$loaded" ] && exit 0
+  acquire || exit 0
+done
+"""
 
 
-def _reload_when_idle(plist_path: Path, mode: str = "reload") -> None:
+def _reload_lock(config: "Config") -> Path:
+    path = _scheduler_state_path(config).with_name("launchd-reload.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _reload_when_idle(plist_path: Path, config: "Config", mode: str = "reload") -> None:
     """Reload (or unload) the maintenance job once it is not running.
 
     The maintenance run is this job, and it repacks at the end of the run:
@@ -212,7 +239,7 @@ def _reload_when_idle(plist_path: Path, mode: str = "reload") -> None:
     """
     subprocess.Popen(
         ["/bin/sh", "-c", RELOAD_WHEN_IDLE, "kindex-reload",
-         CRON_LABEL, str(plist_path), mode],
+         CRON_LABEL, str(plist_path), mode, str(_reload_lock(config))],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -255,7 +282,7 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
         return {"action": "skipped", "reason": "no plist installed"}
 
     if interval == 0:
-        _reload_when_idle(plist_path, mode="unload")
+        _reload_when_idle(plist_path, config, mode="unload")
         return {"action": "disabled", "reload": "when-idle"}
 
     # Read current plist, update the interval
@@ -271,7 +298,7 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
         return {"action": "skipped", "reason": "plist format unrecognized"}
 
     plist_path.write_text(new_content)
-    _reload_when_idle(plist_path)
+    _reload_when_idle(plist_path, config)
     return {"action": "updated", "reload": "when-idle"}
 
 
