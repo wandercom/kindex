@@ -383,13 +383,35 @@ def _native(store, name, value, scope, operation_id, owner):
     return {"ok": True, "native_result": output, "receipt": result}
 
 
+def _record_refused_hook(raw) -> None:
+    """A supervisor hook that declined its scope still ran; leave the receipt.
+
+    Health treats natively observed activity with no hook receipt as a missed
+    hook, so a session outside any Git worktree raised missing_hooks on every
+    check while the adapter answered every call. The receipt is the shape a
+    disabled supervisor already leaves; scope validation and swallowing stay
+    inside record_health, and nothing is stored under the refused scope.
+    """
+    if not isinstance(raw, dict):
+        return
+    from .supervisor import record_health
+    record_health({"project_path": raw.get("project_path"), "session_id": raw.get("session_id"),
+                   "agent": raw.get("agent", "claude")},
+                  "hook", source="hook", state="refused", reason="invalid_scope")
+
+
 def dispatch(request: dict) -> dict:
     """Bounded, structured stdin/stdout RPC. Errors never fall back to native tasks."""
     try:
         if not isinstance(request, dict) or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1:
             raise IntegrationError("invalid_protocol", "Unsupported Kindex integration protocol")
-        scope = project_scope(request.get("scope"))
         action = request.get("action")
+        try:
+            scope = project_scope(request.get("scope"))
+        except IntegrationError as error:
+            if error.code == "invalid_scope" and action == "supervisor":
+                _record_refused_hook(request.get("scope"))
+            raise
         if action == "describe":
             return {"ok": True, **describe(scope)}
         store = open_project_store(scope)

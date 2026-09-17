@@ -465,3 +465,44 @@ def test_reconcile_cli_dispatches_explicit_project_and_bounds(scope, monkeypatch
     parsed.func(parsed)
     assert seen[0][0]["project_path"] == scope["project_path"] and seen[0][1] == 3
     assert json.loads(capsys.readouterr().out)["pending"] == 0
+
+
+def test_refused_supervisor_scope_leaves_a_hook_receipt(tmp_path, monkeypatch):
+    """Outside any Git worktree the supervisor hook is refused, and the refusal is a receipt.
+
+    Without it, natively observed activity with no receipt raised missing_hooks on
+    every check for an adapter that answered every call.
+    """
+    from kindex import supervisor_health, supervisor_health_activity
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(tmp_path / "health"))
+    monkeypatch.setattr(supervisor_health_activity, "observe_activity", lambda now: {})
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    scope = {"project_path": str(plain), "session_id": "bare-session", "agent": "claude"}
+    now = time.time()
+    for at in (now - 400, now - 5):
+        supervisor_health.record(scope, "activity", {"source": "native", "active": True, "timestamp": at})
+    without_receipt = supervisor_health.check_health(now=now)
+    assert any(issue["code"] == "missing_hooks" for issue in without_receipt["issues"])
+
+    result = integrations.dispatch({"protocol_version": 1, "scope": scope, "action": "supervisor", "text": "work"})
+    assert result["error"]["code"] == "invalid_scope"
+    assert not (plain / ".kin").exists()
+
+    with_receipt = supervisor_health.check_health(now=time.time())
+    assert not any(issue["code"] == "missing_hooks" for issue in with_receipt["issues"])
+    session = next(s for s in with_receipt["sessions"] if s["session_id"] == "bare-session")
+    assert session["counts"]["hook"] == 1
+    assert session["hook_state"] == "refused"
+
+
+def test_refused_non_supervisor_action_leaves_no_receipt(tmp_path, monkeypatch):
+    """Only the supervisor action carries the hook receipt, refused or not."""
+    from kindex import supervisor_health
+    monkeypatch.setenv("KIN_HEALTH_DIR", str(tmp_path / "health"))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    scope = {"project_path": str(plain), "session_id": "bare-session", "agent": "claude"}
+    result = integrations.dispatch({"protocol_version": 1, "scope": scope, "action": "capture", "text": "a" * 40})
+    assert result["error"]["code"] == "invalid_scope"
+    assert supervisor_health.status()["sessions"] == []
