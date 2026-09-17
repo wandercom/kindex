@@ -389,3 +389,61 @@ def test_an_interrupted_runner_takes_its_group_with_it(tmp_path, monkeypatch):
         time.sleep(0.05)
     else:
         pytest.fail("the interrupted command is still alive")
+
+
+def test_a_failed_claude_run_keeps_its_stderr(config, store, monkeypatch):
+    from kindex import actions
+    from kindex.actions import execute_action
+
+    monkeypatch.setattr(actions, "_run_process", lambda cmd, **kw: (
+        1, json.dumps({"type": "result", "subtype": "error_during_execution",
+                       "is_error": True, "result": ""}),
+        "Error: authentication expired; run claude login"))
+    monkeypatch.setattr(actions, "_resolve_cli", lambda name: f"/opt/bin/{name}")
+    rid = store.add_reminder("agent", past(),
+                             extra={"action_instructions": "x", "action_mode": "claude"})
+    result = execute_action(store, store.get_reminder(rid), config)
+    assert result["status"] == "failed"
+    assert "error_during_execution" in result["output"]
+    assert "authentication expired" in result["output"]
+
+
+def test_a_long_agent_output_keeps_its_end(config, store, monkeypatch):
+    from kindex import actions
+    from kindex.actions import RESULT_LIMIT, execute_action
+
+    noise = "progress line\n" * 2000
+    monkeypatch.setattr(actions, "_run_process", lambda cmd, **kw: (
+        1, "codex started\n" + noise, "fatal: the real cause"))
+    monkeypatch.setattr(actions, "_resolve_cli", lambda name: f"/opt/bin/{name}")
+    rid = store.add_reminder("agent", past(), extra={
+        "action_instructions": "x", "action_mode": "codex", "wake_client": "codex",
+        "wake_cwd": str(store.config.data_dir)})
+    result = execute_action(store, store.get_reminder(rid), config)
+    stored = store.get_reminder(rid)["extra"]["action_result"]
+    for text in (result["output"], stored):
+        assert text.startswith("codex started")
+        assert text.endswith("fatal: the real cause")
+        assert "characters omitted" in text
+        assert len(text) <= RESULT_LIMIT + 80
+
+
+@pytest.mark.parametrize("mode,extra", [
+    ("codex", {"wake_session_id": "--dangerously-bypass-approvals-and-sandbox"}),
+    ("codex", {"wake_model": "-c"}),
+    ("opencode", {"wake_agent": "--print-logs"}),
+    ("opencode", {"wake_cwd": "relative/dir"}),
+])
+def test_a_stored_wake_value_never_becomes_an_option(config, store, monkeypatch, mode, extra):
+    from kindex import actions
+    from kindex.actions import execute_action
+
+    calls = []
+    monkeypatch.setattr(actions, "_run_process", lambda cmd, **kw: calls.append(cmd))
+    monkeypatch.setattr(actions, "_resolve_cli", lambda name: f"/opt/bin/{name}")
+    rid = store.add_reminder("agent", past(), extra={
+        "action_instructions": "x", "action_mode": mode, "wake_client": mode, **extra})
+    result = execute_action(store, store.get_reminder(rid), config)
+    assert calls == []
+    assert result["status"] == "exhausted"
+    assert result["output"].startswith("Refused:")

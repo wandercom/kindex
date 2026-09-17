@@ -7847,9 +7847,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--wake", dest="wake_client", choices=["codex", "opencode"],
                    help="Wake a headless agent when due")
     s.add_argument("--wake-session", "--session", dest="wake_session_id",
-                   help="Host session id to resume for --wake; use 'last' for latest")
+                   help="Host session id to resume for --wake; 'last' is resolved to "
+                        "the current (or newest Codex) session when the reminder is created")
     s.add_argument("--wake-cwd", "--cwd", dest="wake_cwd",
-                   help="Working directory for the wake run")
+                   help="Working directory for the wake run (default: the current directory)")
     s.add_argument("--wake-model", dest="wake_model",
                    help="Model override for the wake run")
     s.add_argument("--wake-agent", dest="wake_agent",

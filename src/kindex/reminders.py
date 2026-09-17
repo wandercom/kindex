@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import os
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .scoping import item_matches_conversation
@@ -15,6 +17,130 @@ if TYPE_CHECKING:
 
 _VALID_PRIORITIES = ("low", "normal", "high", "urgent")
 _VALID_WAKE_CLIENTS = ("codex", "opencode")
+
+#: A session id, model or agent name as it may appear in an agent's argv: it
+#: cannot start with "-" (it would be read as an option) or hold whitespace.
+WAKE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,199}")
+#: Spellings of "the newest session" the wake runners understand.
+LAST_SESSION = frozenset({"last", "--last", "continue", "--continue"})
+#: The host's own session id, when a reminder is created from inside it.
+_HOST_SESSION_ENV = {
+    "codex": ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_CONVERSATION_ID"),
+    "opencode": ("OPENCODE_SESSION_ID",),
+}
+
+
+def _newest_codex_session(codex_home: Path) -> str:
+    """The id of the most recently written Codex rollout, or ''.
+
+    Rollouts live under sessions/YYYY/MM/DD; only the newest few day
+    directories are read.
+    """
+    root = codex_home / "sessions"
+
+    def newest_dirs(path: Path, depth: int) -> list[Path]:
+        if depth == 0:
+            return [path]
+        try:
+            children = sorted((c for c in path.iterdir() if c.is_dir()), reverse=True)
+        except OSError:
+            return []
+        found: list[Path] = []
+        for child in children:
+            found.extend(newest_dirs(child, depth - 1))
+            if len(found) >= 3:
+                break
+        return found[:3]
+
+    rollouts: list[tuple[float, Path]] = []
+    for day in newest_dirs(root, 3):
+        try:
+            rollouts.extend((f.stat().st_mtime, f) for f in day.glob("*.jsonl"))
+        except OSError:
+            continue
+    for _, path in sorted(rollouts, reverse=True):
+        session = _codex_rollout_id(path)
+        if WAKE_TOKEN.fullmatch(session):
+            return session
+    return ""
+
+
+def _codex_rollout_id(path: Path) -> str:
+    """The session id in a rollout's session_meta line (one of its first)."""
+    import json
+
+    try:
+        with open(path, errors="replace") as handle:
+            for _, line in zip(range(20), handle):
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and entry.get("type") == "session_meta":
+                    payload = entry.get("payload")
+                    return str(payload.get("id") or "") if isinstance(payload, dict) else ""
+    except OSError:
+        pass
+    return ""
+
+
+def _checked_wake(
+    store: "Store",
+    client: str,
+    session_id: str,
+    cwd: str,
+    model: str,
+    agent: str,
+) -> dict:
+    """Validate a wake's options and pin what they mean now.
+
+    ``last`` is resolved to a concrete session when the reminder is created:
+    resolved when it fires, it resumed whichever session happened to be
+    newest then. The working directory defaults to the creator's, made
+    absolute, since a scheduler starts jobs somewhere else (Codex refuses to
+    run outside a trusted project).
+    """
+    session_id, cwd = session_id.strip(), cwd.strip()
+    model, agent = model.strip(), agent.strip()
+    if not client:
+        if session_id or cwd or model or agent:
+            raise ValueError(
+                "wake session, cwd, model and agent options need a wake client "
+                "(--wake codex|opencode)")
+        return {}
+    if agent and client != "opencode":
+        raise ValueError("A wake agent applies only to OpenCode wakes")
+    for name, value in (("model", model), ("agent", agent)):
+        if value and not WAKE_TOKEN.fullmatch(value):
+            raise ValueError(f"Invalid wake {name} {value!r}")
+
+    if session_id.lower() in LAST_SESSION:
+        current = next((os.environ[key].strip() for key in _HOST_SESSION_ENV[client]
+                        if os.environ.get(key, "").strip()), "")
+        if not current and client == "codex":
+            home = os.environ.get("CODEX_HOME") or str(store.config.codex_path)
+            current = _newest_codex_session(Path(home).expanduser())
+        if not current:
+            raise ValueError(
+                f"Cannot resolve the latest {client} session now; pass its id "
+                "(resolved when the reminder fires, 'last' could resume an unrelated "
+                "newer session)")
+        session_id = current
+    if session_id and not WAKE_TOKEN.fullmatch(session_id):
+        raise ValueError(f"Invalid wake session id {session_id!r}")
+
+    directory = Path(cwd or os.getcwd()).expanduser()
+    if not directory.is_absolute():
+        directory = Path(os.getcwd()) / directory
+    if not directory.is_dir():
+        raise ValueError(f"Wake directory does not exist: {directory}")
+    return {
+        "wake_client": client,
+        "wake_session_id": session_id,
+        "wake_cwd": str(directory.resolve()),
+        "wake_model": model,
+        "wake_agent": agent,
+    }
 
 
 def _try_repack(store: "Store") -> None:
@@ -302,6 +428,8 @@ def create_reminder(
             )
         action_mode = wake_client
 
+    wake = _checked_wake(store, wake_client, wake_session_id, wake_cwd,
+                         wake_model, wake_agent)
     next_due, schedule, reminder_type = parse_time_spec(time_spec)
 
     extra: dict | None = None
@@ -321,14 +449,7 @@ def create_reminder(
                 "action_mode": action_mode,
                 "action_status": "pending",
             })
-        if wake_client:
-            extra.update({
-                "wake_client": wake_client,
-                "wake_session_id": wake_session_id,
-                "wake_cwd": wake_cwd,
-                "wake_model": wake_model,
-                "wake_agent": wake_agent,
-            })
+        extra.update(wake)
         if attention_triggers:
             extra["attention_triggers"] = attention_triggers
         if conversation_id:
@@ -547,6 +668,15 @@ _CHECK_LOCK_KEY = "reminder_check_lock"
 _CHECK_LOCK_TTL = 120  # seconds — well past a normal sweep, short enough that
                        # a crashed holder only delays the next check briefly
 
+#: A sweep's action subprocess budget, in seconds.
+_ACTION_TIMEOUT = 300
+#: The lease renewed before each reminder: one reminder's worst case (its
+#: action budget, the kill and reap after a timeout, and every notification
+#: channel's own timeout) with room to spare. Renewing to the base TTL let
+#: the lock expire while an action was still running, so a contender could
+#: take it and fire the same reminder.
+_FIRE_LEASE = _ACTION_TIMEOUT + 120
+
 
 def _acquire_check_lock(store: Store, ttl: int = _CHECK_LOCK_TTL) -> str | None:
     """Atomically claim this graph's reminder-sweep lock, or return None.
@@ -676,11 +806,11 @@ def _check_and_fire_locked(
             # Don't fire; leave as-is so it fires when user returns
             continue
 
-        # Heartbeat before each reminder: dispatch + action can take minutes
-        # (300s subprocess budget apiece), far past the base TTL. Losing the
-        # lock means a contender legitimately reclaimed it — stop rather than
-        # risk double-firing what it is now processing.
-        if not _renew_check_lock(store, token):
+        # Heartbeat before each reminder, for as long as that one reminder can
+        # take (dispatch plus a 300 s action). Losing the lock means a
+        # contender legitimately reclaimed it — stop rather than risk
+        # double-firing what it is now processing.
+        if not _renew_check_lock(store, token, ttl=_FIRE_LEASE):
             break
 
         # One reminder that cannot be processed is set aside and reported;
@@ -736,7 +866,7 @@ def _fire_one(store: Store, config: Config, r: dict) -> bool:
     stale = _action_is_stale(r, config)
     if config.reminders.action_enabled and not stale:
         if has_action(r):
-            result = execute_action(store, r, config)
+            result = execute_action(store, r, config, timeout=_ACTION_TIMEOUT)
             if result.get("status") == "completed":
                 if r["reminder_type"] == "recurring":
                     advance_recurring(store, r["id"])

@@ -2854,8 +2854,9 @@ def remind_create(text: str, when: str, priority: str = "normal",
         conversation_id: Optional chat/session id for scoped hook injection.
         scope: Reminder visibility for hook injection: chat or global.
         wake: Wake an agent when due: codex or opencode.
-        wake_session: Optional host session id to resume; use 'last' for latest.
-        wake_cwd: Optional working directory for the wake run.
+        wake_session: Optional host session id to resume; 'last' is resolved to the
+            current (or newest Codex) session now, not when the reminder fires.
+        wake_cwd: Working directory for the wake run (default: this project).
         wake_model: Optional model override for the wake run.
         wake_agent: Optional OpenCode agent override for the wake run.
     """
@@ -2877,7 +2878,8 @@ def remind_create(text: str, when: str, priority: str = "normal",
             action_instructions=instructions,
             wake_client=wake,
             wake_session_id=wake_session,
-            wake_cwd=wake_cwd,
+            # The server's own directory is not necessarily the project's.
+            wake_cwd=wake_cwd or (_mcp_project_path() if wake else ""),
             wake_model=wake_model,
             wake_agent=wake_agent,
             conversation_id=conversation_id,
