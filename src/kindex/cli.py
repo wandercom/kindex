@@ -5878,6 +5878,8 @@ def cmd_integration_doctor(args):
         cfg = _config(args)
         record = cfg.claude_path / "kindex-adapter.json"
         result["adapter"] = json.loads(record.read_text()) if record.exists() else {"mode": "unmanaged"}
+    except ConfigResolutionError:
+        raise  # a command: main() prints the remedy and exits 2
     except Exception as error:
         result = {"ok": False, "error": safe_error(error)}
     print(json.dumps(result, indent=2))

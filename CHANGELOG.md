@@ -13,9 +13,12 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   keyed on a hook's exit 2 for a configuration error must read the ledger.
 - `attention-hook` records a failure in the degraded ledger instead of
   swallowing it.
-- A refusal recorded before any configuration loaded goes to the global
-  configuration's `data_dir` (else `~/.kindex`), and `kin status` / `kin doctor`
-  read every ledger an event may have been written to.
+- A refusal recorded before any configuration loaded goes to
+  `~/.kindex/degraded.jsonl` (an explicit `--data-dir` keeps its own ledger),
+  and `kin status` / `kin doctor` read every ledger an event may have been
+  written to, merged in time order.
+- `degraded.jsonl` timestamps carry microseconds, so events merged from two
+  ledgers keep their order.
 - The degraded ledger keeps mode 0600 when its size cap rewrites it.
 - A supervisor review allowance that runs out is no longer reported as a
   sustained review failure.

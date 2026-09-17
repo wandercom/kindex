@@ -1102,7 +1102,10 @@ def record_degraded(cmd: str, error: BaseException,
         path = degraded_ledger_path(config, override_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         event = redact({
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            # Microseconds: events from two ledgers are merged by ts, and a
+            # tie at one-second resolution could report an older failure as
+            # the latest.
+            "ts": datetime.now().isoformat(timespec="microseconds"),
             "cmd": cmd,
             # Every field is bounded (msg by safe_error, profile here), so a
             # line stays a single small write (R2.6).
@@ -1126,6 +1129,14 @@ def record_degraded(cmd: str, error: BaseException,
         _try_cap_degraded_ledger(path)
     except Exception:
         pass
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write may write less than asked; a replacement ledger that stopped
+    part-way would replace good lines with a truncated one."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def _try_cap_degraded_ledger(path: Path) -> None:
@@ -1169,7 +1180,7 @@ def _try_cap_degraded_ledger(path: Path) -> None:
             try:
                 try:
                     os.fchmod(fd, 0o600)
-                    os.write(fd, trimmed)
+                    _write_all(fd, trimmed)
                 finally:
                     os.close(fd)
                 os.replace(tmp, path)
@@ -1187,7 +1198,7 @@ def _try_cap_degraded_ledger(path: Path) -> None:
                 if tail.strip():
                     new_fd = os.open(str(path), os.O_WRONLY | os.O_APPEND, 0o600)
                     try:
-                        os.write(new_fd, tail)
+                        _write_all(new_fd, tail)
                     finally:
                         os.close(new_fd)
         finally:

@@ -91,8 +91,9 @@ def isolate_global_config(monkeypatch, home):
     return global_config
 
 
-def test_non_hook_command_still_refuses_the_ambiguous_scope(ambiguous_world):
-    result = run_kin(ambiguous_world, "status", "--json")
+@pytest.mark.parametrize("command", [["status", "--json"], ["integration-doctor"]])
+def test_non_hook_command_still_refuses_the_ambiguous_scope(ambiguous_world, command):
+    result = run_kin(ambiguous_world, *command)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "Ambiguous Kindex scope" in result.stderr
 
@@ -180,9 +181,8 @@ def test_status_reads_both_ledgers(tmp_path, monkeypatch):
     record_degraded("prompt-check", ValueError("recorded without a config"))
     project_cfg = Config(data_dir=str(tmp_path / "repo" / ".kin" / "local" / "kindex"))
     record_degraded("attention-hook", ValueError("recorded with a config"), config=project_cfg)
-    # Timestamps are to the second; both must be found, order within a second is not meaningful.
-    messages = sorted(event["msg"] for event in read_degraded_events(project_cfg))
-    assert messages == ["recorded with a config", "recorded without a config"]
+    assert [event["msg"] for event in read_degraded_events(project_cfg)] == [
+        "recorded without a config", "recorded with a config"], "merged in the order they happened"
     assert read_degraded_events(project_cfg, override_dir=str(tmp_path / "elsewhere")) == [], \
         "an explicit --data-dir reads only its own ledger"
 
@@ -215,3 +215,30 @@ def test_ledger_trim_keeps_mode_0600(tmp_path, monkeypatch):
     ledger = degraded_ledger_path(None)
     assert len(ledger.read_text().splitlines()) <= 4, "the cap ran"
     assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
+
+
+def test_ledger_trim_survives_short_writes(tmp_path, monkeypatch):
+    """os.write may write part of a buffer; the trimmed ledger must still be
+    whole lines, every one of them valid."""
+    import kindex.config as config
+    from kindex.config import degraded_ledger_path, record_degraded
+    isolate_global_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "_DEGRADED_MAX_BYTES", 256)
+    monkeypatch.setattr(config, "_DEGRADED_KEEP_LINES", 3)
+    for index in range(10):
+        record_degraded("prompt-check", ValueError(f"condition {index}"))
+    real_write, real_cap = os.write, config._try_cap_degraded_ledger
+
+    def cap_with_short_writes(path):
+        # Only the cap's rewrite; the append itself is one small write (R2.6).
+        os.write = lambda fd, data: real_write(fd, bytes(data[:7]))
+        try:
+            real_cap(path)
+        finally:
+            os.write = real_write
+    monkeypatch.setattr(config, "_try_cap_degraded_ledger", cap_with_short_writes)
+    record_degraded("prompt-check", ValueError("written in pieces"))
+    lines = degraded_ledger_path(None).read_text().splitlines()
+    assert len(lines) <= 4, "the cap ran"
+    assert json.loads(lines[-1])["msg"] == "written in pieces"
+    assert all(json.loads(line)["cmd"] == "prompt-check" for line in lines)
