@@ -308,9 +308,16 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
             results.append(_one(cfg, None))
 
     # Project-local .kin graphs, deduped against the dirs already swept.
+    from .project_store import tracked_store_refusal
     for project_root, data_dir in sorted(project_registry.items()):
         if not Path(data_dir).exists():
             continue  # project deleted since registration — ages out on scan
+        refusal = tracked_store_refusal(Path(data_dir))
+        if refusal:
+            # Registered before the tracked-store rule, or tracked since.
+            results.append({"profile": project_root, "fired": 0, "auto_snoozed": 0,
+                             "error": refusal})
+            continue
         cfg = base_config.model_copy(deep=True)
         cfg.data_dir = data_dir
         # Anchor scheduler logs to the base dir (see cron_run_all).

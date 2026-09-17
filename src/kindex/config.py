@@ -682,6 +682,9 @@ class Config(BaseModel):
     # cron legacy-remainder pass can find the legacy graph even when this
     # invocation resolved to a profile.
     _legacy_data_dir: str | None = PrivateAttr(default=None)
+    # Keys a repository's .kin/config set that only the user's own config may
+    # set; they were ignored (see _PROJECT_LAYER_UNTRUSTED_KEYS).
+    _ignored_project_keys: list[str] = PrivateAttr(default_factory=list)
 
     data_dir: str = "~/.kindex"
     user: str = ""  # current user identity (auto-detected if empty)
@@ -864,6 +867,19 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+# Settings that execute, spend, redirect ingestion or claim an identity. A
+# repository's .kin/config (and anything it inherits) arrives with a clone, so
+# it is evidence, not authority: these keys come only from the user's own
+# config, as trusted_supervisor_config already does for the hook lane.
+_PROJECT_LAYER_UNTRUSTED_KEYS = frozenset({
+    "sim", "llm", "embedding", "budget", "agents",
+    "profiles", "default_profile",
+    "project_dirs", "claude_dir", "codex_dir", "gemini_dir", "antigravity_dir",
+    "antigravity_cli_dir", "opencode_dir", "cursor_dir",
+    "user", "agent_id",
+})
+
+
 def load_config(
     config_path: str | Path | None = None,
     project_path: str | Path | None = None,
@@ -915,9 +931,12 @@ def load_config(
 
     # Layer 2: local config (project-level) merges over global
     kin_profile = merged.pop("profile", None)
+    ignored_project_keys: list[str] = []
     for p in project_layers:
         if p.is_file():
             data = _load_kin_config_with_inheritance(p)
+            ignored_project_keys = sorted(k for k in data if k in _PROJECT_LAYER_UNTRUSTED_KEYS)
+            data = {k: v for k, v in data.items() if k not in _PROJECT_LAYER_UNTRUSTED_KEYS}
             if "profile" in data:
                 kin_profile = data.pop("profile")
             # A relative data_dir in a project config means "inside this
@@ -930,10 +949,16 @@ def load_config(
             if raw_dd and not Path(str(raw_dd)).expanduser().is_absolute():
                 config_root = p.parent.parent if p.parent.name == ".kin" else p.parent
                 data["data_dir"] = str(config_root / Path(str(raw_dd)).expanduser())
+            if data.get("data_dir"):
+                # A repository may name its own local store; it may not name
+                # one that a clone delivered.
+                from .project_store import refuse_tracked_store
+                refuse_tracked_store(Path(str(data["data_dir"])))
             merged = _deep_merge(merged, data)
             break  # use first local found
 
     cfg = Config(**merged) if merged else Config()
+    cfg._ignored_project_keys = ignored_project_keys
     cfg = _resolve_profile(cfg, profile, kin_profile)
     cfg = _contain_data_dir(cfg)
     # Explicit project callers and existing repo-local configurations share the

@@ -346,6 +346,10 @@ class Store:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
+            # A repo-local store is never meant for version control; the
+            # legacy lane created one without saying so.
+            from .project_store import ensure_local_ignored
+            ensure_local_ignored(self.config.data_path)
             self.config.data_path.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(
                 str(self.db_path),
