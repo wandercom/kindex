@@ -16,7 +16,12 @@ migration required).
 from __future__ import annotations
 
 import datetime
+import json
+import os
+import shutil
 import subprocess
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .privacy import redact_text, safe_error
@@ -77,6 +82,12 @@ def resolve_mode(fields: dict) -> str:
 # ── Execution ──────────────────────────────────────────────────────
 
 
+# A failing action is retried on later sweeps, but not forever: each
+# occurrence gets this many attempts before it is set aside as exhausted.
+MAX_ACTION_ATTEMPTS = 3
+_SWEEP_SKIPS = ("completed", "paused", "exhausted")
+
+
 def execute_action(
     store: Store,
     reminder: dict,
@@ -89,26 +100,22 @@ def execute_action(
 
     Updates the reminder's ``extra`` with ``action_status`` and ``action_result``.
     ``manual=True`` marks a deliberate user invocation (``kin remind exec`` /
-    MCP ``remind_exec``): it may resume a ``paused`` action, which automated
-    sweeps must skip.
+    MCP ``remind_exec``): it may resume a ``paused`` or ``exhausted`` action,
+    which automated sweeps must skip.
+
+    The action is claimed from the stored row, not from ``reminder``: a sweep
+    passes a snapshot that can be minutes old, and a run finished meanwhile
+    (a manual exec, another sweep) must not run again.
     """
-    fields = get_action_fields(reminder)
     if not has_action(reminder):
         return {"status": "skipped", "reason": "no action defined"}
-
-    if fields["action_status"] == "completed":
-        return {"status": "skipped", "reason": "already completed"}
-    if fields["action_status"] == "paused" and not manual:
-        # Parked by the staleness guard — only a deliberate exec resumes it.
-        return {"status": "skipped", "reason": "paused (stale); run kin remind exec to resume"}
-    if fields["action_status"] == "running" and not _running_is_stale(reminder, timeout):
-        return {"status": "skipped", "reason": "already running"}
-
+    claimed = _claim_action(store, reminder["id"], manual=manual, timeout=timeout)
+    if "skipped" in claimed:
+        return {"status": "skipped", "reason": claimed["skipped"]}
+    reminder = claimed["reminder"]
+    fields = get_action_fields(reminder)
     mode = resolve_mode(fields)
     rid = reminder["id"]
-
-    # Mark as running (race guard for concurrent daemon cycles)
-    _update_action_status(store, rid, reminder, "running", "")
 
     try:
         if mode == "shell":
@@ -120,15 +127,68 @@ def execute_action(
         elif mode == "opencode":
             result = _run_opencode(reminder, fields, store, timeout=timeout)
         else:
-            result = {"ok": False, "output": f"Unknown mode: {mode}"}
-
-        status = "completed" if result["ok"] else "failed"
-        _update_action_status(store, rid, reminder, status, result["output"])
-        return {"status": status, "output": result["output"]}
-
+            result = {"ok": False, "output": f"Unknown mode: {mode}", "terminal": True}
     except Exception as e:
-        _update_action_status(store, rid, reminder, "failed", safe_error(e))
+        result = {"ok": False, "output": safe_error(e)}
+
+    if result["ok"]:
+        status = "completed"
+    elif result.get("terminal") or claimed["attempts"] >= MAX_ACTION_ATTEMPTS:
+        # Retrying cannot help (a spend or turn limit, an unknown mode) or
+        # has not: stop until this occurrence ends or someone runs it by hand.
+        status = "exhausted"
+    else:
+        status = "failed"
+    try:
+        _update_action_status(store, rid, reminder, status, result["output"])
+    except Exception as e:
         return {"status": "failed", "output": safe_error(e)}
+    return {"status": status, "output": result["output"]}
+
+
+def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int) -> dict:
+    """Mark the stored action running if it may run now, in one write.
+
+    Returns ``{"reminder": fresh_row, "attempts": n}`` when claimed, or
+    ``{"skipped": reason}``. Attempts count per occurrence (``next_due``).
+    """
+    conn = store.conn
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
+        if row is None:
+            conn.rollback()
+            return {"skipped": "reminder no longer exists"}
+        fresh = store._reminder_to_dict(row)
+        if fresh.get("status") in ("cancelled", "completed"):
+            conn.rollback()
+            return {"skipped": f"reminder is {fresh['status']}"}
+        status = get_action_fields(fresh)["action_status"]
+        if status == "completed":
+            conn.rollback()
+            return {"skipped": "already completed"}
+        if status in ("paused", "exhausted") and not manual:
+            conn.rollback()
+            if status == "paused":
+                return {"skipped": "paused (stale); run kin remind exec to resume"}
+            return {"skipped": "attempts exhausted for this occurrence; run kin remind exec to retry"}
+        if status == "running" and not _running_is_stale(fresh, timeout):
+            conn.rollback()
+            return {"skipped": "already running"}
+        extra = dict(fresh.get("extra") or {})
+        occurrence = fresh.get("next_due") or ""
+        if extra.get("action_attempt_occurrence") != occurrence or manual:
+            extra["action_attempts"] = 0
+            extra["action_attempt_occurrence"] = occurrence
+        extra["action_attempts"] = int(extra.get("action_attempts") or 0) + 1
+        extra["action_status"] = "running"
+        extra["action_executed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+        store.update_reminder(reminder_id, extra=extra)  # commits the claim
+    except BaseException:
+        conn.rollback()
+        raise
+    fresh["extra"] = extra
+    return {"reminder": fresh, "attempts": extra["action_attempts"]}
 
 
 # ── Internal helpers ───────────────────────────────────────────────
@@ -164,19 +224,122 @@ def _update_action_status(
     )
 
 
+def _run_process(
+    cmd,
+    *,
+    shell: bool = False,
+    input_text: str | None = None,
+    timeout: int = 300,
+    grace: float = 2.0,
+) -> tuple[int | None, str, str]:
+    """Run ``cmd`` and return ``(returncode, stdout, stderr)``; the return
+    code is None when the run timed out and its process group was killed.
+
+    Output is decoded leniently: an undecodable byte is not a failed run.
+    The run ends when the command exits, not when every descendant has
+    closed its pipes, so a command that starts a background service
+    finishes; output that follows within ``grace`` seconds is kept.
+    """
+    import selectors
+    import signal
+
+    proc = subprocess.Popen(
+        cmd, shell=shell, start_new_session=True,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    chunks: dict = {proc.stdout: [], proc.stderr: []}
+    selector = selectors.DefaultSelector()
+    for stream in chunks:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    # The prompt is fed as the child reads it, alongside its output: writing
+    # it all first deadlocks a child that fills its output pipe before
+    # reading its input.
+    pending = memoryview(input_text.encode("utf-8", errors="replace")) if input_text is not None else None
+    if pending is not None:
+        os.set_blocking(proc.stdin.fileno(), False)
+        selector.register(proc.stdin, selectors.EVENT_WRITE)
+    deadline = time.monotonic() + timeout
+    exited_at = None
+    timed_out = False
+    while selector.get_map():
+        now = time.monotonic()
+        if exited_at is None and proc.poll() is not None:
+            exited_at = now
+        if exited_at is not None and now - exited_at > grace:
+            break  # a descendant still holds the pipes
+        if now >= deadline:
+            timed_out = exited_at is None
+            break
+        for key, _ in selector.select(timeout=min(0.1, max(0.0, deadline - now))):
+            if key.fileobj is proc.stdin:
+                try:
+                    pending = pending[os.write(proc.stdin.fileno(), pending[:65536]):]
+                except BlockingIOError:
+                    continue
+                except (BrokenPipeError, OSError):
+                    pending = pending[:0]
+                if not pending:
+                    selector.unregister(proc.stdin)
+                    proc.stdin.close()
+                continue
+            try:
+                data = os.read(key.fileobj.fileno(), 65536)
+            except BlockingIOError:
+                continue
+            if data:
+                chunks[key.fileobj].append(data)
+            else:
+                selector.unregister(key.fileobj)
+    selector.close()
+    if proc.stdin is not None and not proc.stdin.closed:
+        proc.stdin.close()
+    if timed_out:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        returncode = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        returncode = None
+    for stream in chunks:
+        stream.close()
+    decode = lambda parts: b"".join(parts).decode("utf-8", errors="replace")  # noqa: E731
+    return (None if timed_out else returncode,
+            decode(chunks[proc.stdout]), decode(chunks[proc.stderr]))
+
+
+def _resolve_cli(name: str) -> str | None:
+    """An agent CLI's absolute path. A scheduler starts jobs with a bare
+    system PATH, so the usual install locations are searched as well."""
+    found = shutil.which(name)
+    if found:
+        return found
+    extra = [
+        "/opt/homebrew/bin", "/usr/local/bin",
+        str(Path.home() / ".local" / "bin"), str(Path.home() / ".npm-global" / "bin"),
+        str(Path.home() / ".bun" / "bin"), str(Path.home() / ".cargo" / "bin"),
+    ]
+    return shutil.which(name, path=os.pathsep.join(extra))
+
+
+def _missing_cli(name: str) -> dict:
+    return {"ok": False, "terminal": True,
+            "output": f"{name} CLI not found (searched PATH={os.environ.get('PATH', '')} "
+                      "and the usual install directories)"}
+
+
 def _run_shell(command: str, *, timeout: int = 300) -> dict:
     """Run a shell command.  Returns ``{"ok": bool, "output": str}``."""
-    try:
-        proc = subprocess.run(
-            command, shell=True,
-            capture_output=True, text=True, timeout=timeout,
-        )
-        output = proc.stdout
-        if proc.stderr:
-            output += "\n[stderr]\n" + proc.stderr
-        return {"ok": proc.returncode == 0, "output": redact_text(output.strip())}
-    except subprocess.TimeoutExpired:
+    returncode, stdout, stderr = _run_process(command, shell=True, timeout=timeout)
+    if returncode is None:
         return {"ok": False, "output": f"Timed out after {timeout}s"}
+    output = stdout
+    if stderr:
+        output += "\n[stderr]\n" + stderr
+    return {"ok": returncode == 0, "output": redact_text(output.strip())}
 
 
 def _build_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
@@ -219,25 +382,37 @@ def _run_claude(
     """Launch ``claude -p`` with assembled context.  Returns ``{"ok": bool, "output": str}``."""
     prompt = _build_claude_prompt(reminder, fields, store)
 
-    cmd = ["claude", "-p", prompt]
+    claude = _resolve_cli("claude")
+    if claude is None:
+        return _missing_cli("claude")
+    cmd = [claude, "-p", prompt, "--output-format", "json"]
 
     model = config.reminders.channels.claude.headless_model
     if model:
         cmd.extend(["--model", model])
 
+    # The configured spend cap is the cap. A five-turn limit stood in for it,
+    # failed every task needing a sixth turn, and was retried all day.
     budget = config.reminders.channels.claude.max_budget_usd
     if budget:
-        cmd.extend(["--max-turns", "5"])
+        cmd.extend(["--max-budget-usd", str(budget)])
 
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-        )
-        return {"ok": proc.returncode == 0, "output": redact_text(proc.stdout.strip())[:4000]}
-    except subprocess.TimeoutExpired:
+    returncode, stdout, stderr = _run_process(cmd, timeout=timeout)
+    if returncode is None:
         return {"ok": False, "output": f"claude -p timed out after {timeout}s"}
-    except FileNotFoundError:
-        return {"ok": False, "output": "claude CLI not found in PATH"}
+    try:
+        report = json.loads(stdout)
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        return {"ok": returncode == 0, "output": redact_text((stdout or stderr).strip())[:4000]}
+    text = str(report.get("result") or "")
+    subtype = str(report.get("subtype") or "")
+    if report.get("is_error") or returncode != 0:
+        detail = text or subtype or stderr.strip() or f"exit {returncode}"
+        return {"ok": False, "terminal": subtype.startswith("error_max"),
+                "output": redact_text(detail)[:4000]}
+    return {"ok": True, "output": redact_text(text.strip())[:4000]}
 
 
 def _run_codex(
@@ -249,7 +424,10 @@ def _run_codex(
 ) -> dict:
     """Launch a headless Codex wake via ``codex exec``."""
     prompt = _build_agent_prompt(reminder, fields, store)
-    cmd = ["codex", "exec"]
+    codex = _resolve_cli("codex")
+    if codex is None:
+        return _missing_cli("codex")
+    cmd = [codex, "exec"]
 
     if fields.get("wake_cwd"):
         cmd.extend(["--cd", fields["wake_cwd"]])
@@ -267,18 +445,13 @@ def _run_codex(
     else:
         cmd.append("-")
 
-    try:
-        proc = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
-        )
-        output = proc.stdout
-        if proc.stderr:
-            output += "\n[stderr]\n" + proc.stderr
-        return {"ok": proc.returncode == 0, "output": redact_text(output.strip())[:4000]}
-    except subprocess.TimeoutExpired:
+    returncode, stdout, stderr = _run_process(cmd, input_text=prompt, timeout=timeout)
+    if returncode is None:
         return {"ok": False, "output": f"codex exec timed out after {timeout}s"}
-    except FileNotFoundError:
-        return {"ok": False, "output": "codex CLI not found in PATH"}
+    output = stdout
+    if stderr:
+        output += "\n[stderr]\n" + stderr
+    return {"ok": returncode == 0, "output": redact_text(output.strip())[:4000]}
 
 
 def _run_opencode(
@@ -290,7 +463,10 @@ def _run_opencode(
 ) -> dict:
     """Launch a headless OpenCode wake via ``opencode run``."""
     prompt = _build_agent_prompt(reminder, fields, store)
-    cmd = ["opencode", "run"]
+    opencode = _resolve_cli("opencode")
+    if opencode is None:
+        return _missing_cli("opencode")
+    cmd = [opencode, "run"]
 
     session_id = str(fields.get("wake_session_id") or "").strip()
     if session_id:
@@ -307,15 +483,10 @@ def _run_opencode(
 
     cmd.append(prompt)
 
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-        )
-        output = proc.stdout
-        if proc.stderr:
-            output += "\n[stderr]\n" + proc.stderr
-        return {"ok": proc.returncode == 0, "output": redact_text(output.strip())[:4000]}
-    except subprocess.TimeoutExpired:
+    returncode, stdout, stderr = _run_process(cmd, timeout=timeout)
+    if returncode is None:
         return {"ok": False, "output": f"opencode run timed out after {timeout}s"}
-    except FileNotFoundError:
-        return {"ok": False, "output": "opencode CLI not found in PATH"}
+    output = stdout
+    if stderr:
+        output += "\n[stderr]\n" + stderr
+    return {"ok": returncode == 0, "output": redact_text(output.strip())[:4000]}

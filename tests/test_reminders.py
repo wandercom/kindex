@@ -673,9 +673,10 @@ class TestExecuteWakeActions:
         def fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
             seen["kwargs"] = kwargs
-            return subprocess.CompletedProcess(cmd, 0, stdout="codex done", stderr="")
+            return 0, "codex done", ""
 
-        monkeypatch.setattr("kindex.actions.subprocess.run", fake_run)
+        monkeypatch.setattr("kindex.actions._run_process", fake_run)
+        monkeypatch.setattr("kindex.actions._resolve_cli", lambda name: name)
         rid = store.add_reminder(
             "Continue Codex", "2099-03-01T10:00:00",
             extra={
@@ -696,7 +697,7 @@ class TestExecuteWakeActions:
             "codex", "exec", "--cd", str(tmp_path), "--model", "gpt-5",
             "resume", "--last", "-",
         ]
-        assert "Pick up the interrupted task." in seen["kwargs"]["input"]
+        assert "Pick up the interrupted task." in seen["kwargs"]["input_text"]
 
     def test_opencode_wake_uses_run_session(self, store, config, monkeypatch, tmp_path):
         from kindex.actions import execute_action
@@ -706,9 +707,10 @@ class TestExecuteWakeActions:
         def fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
             seen["kwargs"] = kwargs
-            return subprocess.CompletedProcess(cmd, 0, stdout="opencode done", stderr="")
+            return 0, "opencode done", ""
 
-        monkeypatch.setattr("kindex.actions.subprocess.run", fake_run)
+        monkeypatch.setattr("kindex.actions._run_process", fake_run)
+        monkeypatch.setattr("kindex.actions._resolve_cli", lambda name: name)
         rid = store.add_reminder(
             "Continue OpenCode", "2099-03-01T10:00:00",
             extra={

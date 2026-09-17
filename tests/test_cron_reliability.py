@@ -1089,8 +1089,8 @@ class TestSchedulerCommandShape:
 
         logs = str(config.scheduler_log_path)
         existing = (
-            f"2-59/30 * * * * /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
-            f"*/5 * * * * /usr/local/bin/kin remind check --all-profiles "
+            f"2-59/30 * * * * PATH=/usr/bin:/bin /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
+            f"*/5 * * * * PATH=/usr/bin:/bin /usr/local/bin/kin remind check --all-profiles "
             f">> {logs}/reminders.log 2>&1\n"
         )
         calls = []
@@ -1135,8 +1135,8 @@ class TestSchedulerCommandShape:
         existing = (
             "0 3 * * * cp ~/.kindex/kindex.db /backups/\n"
             "# kindex jobs below\n"
-            f"2-59/30 * * * * /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
-            f"*/5 * * * * /usr/local/bin/kin remind check --all-profiles "
+            f"2-59/30 * * * * PATH=/usr/bin:/bin /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
+            f"*/5 * * * * PATH=/usr/bin:/bin /usr/local/bin/kin remind check --all-profiles "
             f">> {logs}/reminders.log 2>&1\n"
         )
         calls = []
@@ -1193,8 +1193,8 @@ class TestSchedulerCommandShape:
 
         logs = str(config.scheduler_log_path)
         existing = (
-            f"*/7 * * * * /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
-            f"*/5 * * * * /usr/local/bin/kin remind check --all-profiles "
+            f"*/7 * * * * PATH=/usr/bin:/bin /usr/local/bin/kin cron >> {logs}/cron.log 2>&1\n"
+            f"*/5 * * * * PATH=/usr/bin:/bin /usr/local/bin/kin remind check --all-profiles "
             f">> {logs}/reminders.log 2>&1\n"
         )
         calls = []
