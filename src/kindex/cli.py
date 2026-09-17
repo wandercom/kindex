@@ -4437,11 +4437,12 @@ def cmd_coord(args):
             payload = read_messages(
                 store,
                 ref,
-                since_id=getattr(args, "since_id", 0) or 0,
+                since_id=getattr(args, "since_id", None),
                 limit=getattr(args, "limit", 50) or 50,
                 agent=agent,
             )
-            print(_dumps(payload) if getattr(args, "json", False) else format_messages(payload))
+            print(_dumps(payload) if getattr(args, "json", False)
+                  else format_messages(payload, since_flag="--since-id "))
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
 
@@ -5016,23 +5017,26 @@ def _collab_prompt_lines(store, cfg, conversation_id: str) -> list[str]:
         except ValueError:
             pass
 
+    from .coordination import render_field
+
     lines = ["COLLAB UPDATES"]
     for c in collabs[:3]:
-        name = c.get("name", "")
+        name = render_field(c.get("name", ""))
+        ref = render_field(c.get("node_id") or c.get("name", ""))
         unread = int(c.get("unread_count", 0) or 0)
         if unread:
             lines.append(f"  [{name}] {unread} new message(s):")
             for m in _collab_unread_messages(store, c, agent)[-3:]:
-                body = " ".join(str(m.get("body", "")).split())[:200]
-                author = m.get("author", "")
+                body = render_field(m.get("body", ""), 200)
+                author = render_field(m.get("author", ""))
                 target = " (to you)" if (m.get("to") or "").strip() == agent else ""
                 lines.append(f"    - {author}{target}: {body}")
         for m in (c.get("inject_messages") or [])[:3]:
-            text = " ".join(str(m.get("text", "")).split())[:200]
-            set_by = (m.get("set_by") or "").strip()
+            text = render_field(m.get("text", ""), 200)
+            set_by = render_field(m.get("set_by") or "")
             who = f" (from {set_by})" if set_by else ""
             lines.append(f"  [{name}] COLLAB MSG: {text}{who}")
-        lines.append(f"  Check the collab: coord_read {name}")
+        lines.append(f"  Check the collab: coord_read {ref}")
     if len(collabs) > 3:
         lines.append(f"  +{len(collabs) - 3} more collabs")
 
@@ -7730,7 +7734,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent", help="Agent name (default: resolved agent id)")
     s.add_argument("--task-id", help="Related task id")
     s.add_argument("--ttl", type=int, default=240, help="Conversation TTL in minutes")
-    s.add_argument("--since-id", type=int, default=0, help="Read messages after id")
+    s.add_argument("--since-id", type=int, default=None,
+                   help="Read messages after id (0 for all); without it, read from your cursor")
     s.add_argument("--limit", type=int, default=50, help="Read/list limit")
     s.add_argument("--status", default="active", help="Filter: active, ended, all")
     s.add_argument("--project", action="store_true", help="Filter by current project")

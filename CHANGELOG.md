@@ -64,6 +64,21 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   agent CLIs are also looked up in the usual install locations. Re-run
   `kin setup-cron` to update an installed scheduler; each re-run refreshes
   the PATH and keeps a crontab line's schedule.
+- Coordination names address one conversation: starting a second live
+  conversation with an active one's name is refused (it silently took over
+  every post, read, inject and end addressed by that name), a name that
+  reaches more than one live conversation is refused with their ids, and the
+  hooks point at the conversation's id.
+- `coord_read` honours an explicit `since_id` for a member (it was raised to
+  the member's read cursor, so a re-read from 0 printed "No messages.") and
+  leaves the cursor alone; a cursor read that finds nothing says how many
+  messages were already read.
+
+### Security
+- Collab text from peers (authors, lock holders, standing-message setters,
+  titles, focus, bodies) is rendered on one bounded line with `<`, `>` and
+  `#` neutralized, so it cannot close the hook's context envelope or forge a
+  Kindex heading.
 
 ## [0.40.0] - 2026-09-17
 

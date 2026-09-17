@@ -48,6 +48,14 @@ def _ttl_from_extra(extra: dict) -> int:
     return _DEFAULT_TTL_MINUTES
 
 
+def render_field(value: object, limit: int = 80) -> str:
+    """Peer-supplied collab text as it may appear in hook context: one line,
+    bounded, and unable to open or close a tag (an author, lock holder or
+    message could otherwise end the context envelope or forge a heading)."""
+    text = " ".join(str(value or "").split())[:limit]
+    return text.replace("<", "\u2039").replace(">", "\u203a").replace("#", "\uff03")
+
+
 def _slug(name: str) -> str:
     name = name.strip().lower()
     name = re.sub(r"[^a-z0-9\s-]", "", name)
@@ -101,16 +109,31 @@ def create_conversation(
         "resources": [],
         "inject_messages": [],
     }
-    conv_id = store.add_node(
-        conv_name,
-        node_type="coordination",
-        content="Short-lived agent coordination state.",
-        weight=0.01,
-        prov_activity="coordination",
-        prov_source=project_path or "",
-        prov_who=[created_by] if created_by else [],
-        extra=extra,
-    )
+    # One live conversation per name: a second one with the same name took
+    # over every name-addressed post, read, inject and end, while members
+    # of the first kept seeing it in their hooks with nothing unread.
+    conn = store.conn
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = _live_named(store, conv_name)
+        if existing:
+            raise ValueError(
+                f"A conversation named '{conv_name}' is already active "
+                f"({existing[0]['id']}); join it or end it first")
+        conv_id = store.add_node(
+            conv_name,
+            node_type="coordination",
+            content="Short-lived agent coordination state.",
+            weight=0.01,
+            prov_activity="coordination",
+            prov_source=project_path or "",
+            prov_who=[created_by] if created_by else [],
+            extra=extra,
+        )
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     if task_id and store.get_node(task_id):
         store.add_edge(conv_id, task_id, "context_of", weight=0.4)
     return conv_id
@@ -123,15 +146,42 @@ def get_conversation(store: Store, ref: str) -> dict | None:
         return node
 
     name = _slug(ref)
-    rows = store.all_nodes(node_type="coordination", status="active", limit=500)
-    for row in rows:
-        extra = row.get("extra") or {}
-        if (
-            extra.get("coord_kind") == "conversation"
-            and extra.get("name") == name
-        ):
-            return row
-    return None
+    named = _named(store, name)
+    live = [row for row in named if _is_live(row)]
+    if len(live) > 1:
+        raise ValueError(
+            f"More than one active conversation is named '{name}' "
+            f"({', '.join(row['id'] for row in live)}); use its id")
+    if live:
+        return live[0]
+    # An expired one is still found, so the caller can say it expired.
+    return named[0] if named else None
+
+
+def _named(store: Store, name: str) -> list[dict]:
+    """Every active conversation row with this name, newest first. Asked of
+    the database by name: a window of recent rows could miss a live
+    namesake behind newer expired ones."""
+    rows = store.conn.execute(
+        "SELECT * FROM nodes WHERE type = 'coordination' AND status = 'active' "
+        "AND json_valid(extra) "
+        "AND json_extract(extra, '$.coord_kind') = 'conversation' "
+        "AND json_extract(extra, '$.name') = ? "
+        "ORDER BY updated_at DESC, id",
+        (name,),
+    ).fetchall()
+    return [store._row_to_dict(row) for row in rows]
+
+
+def _is_live(row: dict) -> bool:
+    extra = row.get("extra") or {}
+    return (extra.get("coord_status", "active") == "active"
+            and not _is_expired(extra.get("expires_at")))
+
+
+def _live_named(store: Store, name: str) -> list[dict]:
+    """Active, unexpired conversations with this name."""
+    return [row for row in _named(store, name) if _is_live(row)]
 
 
 def list_conversations(
@@ -252,18 +302,20 @@ def read_messages(
     store: Store,
     conversation: str,
     *,
-    since_id: int | None = 0,
+    since_id: int | None = None,
     limit: int = 50,
     agent: str | None = None,
 ) -> dict:
     """Read messages from a coordination conversation.
 
-    When ``agent`` is given and is a member, delivery is contiguous from
-    their read cursor (oldest first, up to ``limit``), so a backlog larger
-    than ``limit`` is never skipped — repeated reads paginate forward and
-    the cursor (``last_read_id``) advances only past messages actually
-    returned. Agentless (or non-member) reads keep the newest window and
-    never touch cursors.
+    When ``agent`` is given and is a member and ``since_id`` is omitted,
+    delivery is contiguous from their read cursor (oldest first, up to
+    ``limit``), so a backlog larger than ``limit`` is never skipped —
+    repeated reads paginate forward and the cursor (``last_read_id``)
+    advances only past messages actually returned. An explicit ``since_id``
+    is honoured as given (it used to be raised to the cursor, so a re-read
+    from 0 found nothing) and leaves the cursor alone. Agentless (or
+    non-member) reads keep the newest window and never touch cursors.
     """
     node = get_conversation(store, conversation)
     if not node:
@@ -276,22 +328,21 @@ def read_messages(
         mine = next(
             (m for m in _members_of(extra) if m.get("agent") == agent), None)
 
+    cursor_read = mine is not None and since_id is None
     floor = int(since_id or 0)
-    if mine is not None:
-        floor = max(floor, int(mine.get("last_read_id", 0) or 0))
-    messages = [
-        m for m in extra.get("messages", [])
-        if int(m.get("id", 0)) > floor
-    ]
+    if cursor_read:
+        floor = int(mine.get("last_read_id", 0) or 0)
+    all_messages = [m for m in extra.get("messages", []) if isinstance(m, dict)]
+    messages = [m for m in all_messages if int(m.get("id", 0)) > floor]
     total = len(messages)
     if mine is not None:
-        # Member read: oldest-first slice from the cursor — contiguous.
+        # Member read: oldest-first slice from the floor — contiguous.
         returned = messages[:limit]
     else:
         # Agentless/legacy read: newest window, no cursor to maintain.
         returned = messages[-limit:]
 
-    if mine is not None and returned:
+    if cursor_read and returned:
         max_seen = max(int(m.get("id", 0)) for m in returned)
         if max_seen > int(mine.get("last_read_id", 0) or 0):
 
@@ -316,6 +367,13 @@ def read_messages(
         "total": total,
         "remaining": total - len(returned),
         "remaining_kind": "newer" if mine is not None else "older",
+        "already_read": (len(all_messages) - total) if cursor_read else 0,
+        # An explicit read does not move the cursor, so it names where the
+        # next page starts.
+        "next_since_id": (
+            max(int(m.get("id", 0)) for m in returned)
+            if mine is not None and not cursor_read and returned else None
+        ),
     }
 
 
@@ -539,9 +597,15 @@ def format_conversations(conversations: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_messages(payload: dict) -> str:
+def format_messages(payload: dict, *, since_flag: str = "since_id=") -> str:
+    """Render a read. ``since_flag`` is how the caller names the since id
+    ("since_id=" for the MCP tool, "--since-id " for the CLI)."""
     messages = payload.get("messages") or []
     if not messages:
+        earlier = int(payload.get("already_read") or 0)
+        if earlier:
+            return (f"No new messages ({earlier} already read; "
+                    f"pass {since_flag}0 to read them again).")
         return "No messages."
     lines = [
         f"Conversation: {payload.get('name')} ({payload.get('status')})",
@@ -555,8 +619,12 @@ def format_messages(payload: dict) -> str:
     remaining = int(payload.get("remaining") or 0)
     if remaining > 0:
         kind = payload.get("remaining_kind") or "more"
-        hint = ("read again to continue" if kind == "newer"
-                else "pass since_id or a larger limit to see them")
+        if payload.get("next_since_id") is not None:
+            hint = f"pass {since_flag}{payload['next_since_id']} to continue"
+        elif kind == "newer":
+            hint = "read again to continue"
+        else:
+            hint = f"pass {since_flag.rstrip('= ')} or a larger limit to see them"
         lines.append(
             f"  (showing {len(messages)} of {payload.get('total', len(messages))}"
             f" — {remaining} {kind} message(s) not shown; {hint})"

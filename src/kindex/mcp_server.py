@@ -2363,15 +2363,17 @@ def coord_post(conversation: str, agent: str = "", message: str = "",
 
 
 @_tool()
-def coord_read(conversation: str, since_id: int = 0, limit: int = 50,
+def coord_read(conversation: str, since_id: int | None = None, limit: int = 50,
                agent: str = "") -> str:
     """Read messages from a coordination conversation.
 
-    Advances the reading agent's member cursor (unread tracking).
+    Without since_id, reads from the agent's member cursor and advances it
+    (unread tracking).
 
     Args:
         conversation: Conversation ID or name.
-        since_id: Only return messages with a higher id.
+        since_id: Only return messages with a higher id (0 for all); leaves
+            the read cursor unchanged.
         limit: Maximum messages to return.
         agent: Reading agent name (default: resolved agent id).
     """
