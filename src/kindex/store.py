@@ -4533,6 +4533,48 @@ class Store:
         self.update_reminder(reminder_id, status="completed")
         self._log("complete_reminder", reminder_id)
 
+    def settle_reminder(self, reminder_id: str, status: str, **fields) -> bool:
+        """Set a sweep outcome unless the reminder was closed meanwhile.
+
+        A reminder cancelled (or completed) while its action ran stays that
+        way; the sweep's later write used to reopen it. Returns whether the
+        row changed. Only status and the listed timestamp columns are set.
+        """
+        allowed = {"last_fired", "next_due", "snooze_until"}
+        columns = ["status = ?", "updated_at = ?"]
+        values: list = [status, _now()]
+        for key, value in fields.items():
+            if key in allowed:
+                columns.append(f"{key} = ?")
+                values.append(value)
+        values.append(reminder_id)
+        cursor = self.conn.execute(
+            f"UPDATE reminders SET {', '.join(columns)} "
+            "WHERE id = ? AND status NOT IN ('cancelled', 'completed')",
+            values,
+        )
+        self.conn.commit()
+        if cursor.rowcount and status == "completed":
+            self._log("complete_reminder", reminder_id)
+        return bool(cursor.rowcount)
+
+    def quarantine_reminder_action(self, reminder_id: str, reason: str) -> None:
+        """Park an action whose stored row cannot be rewritten through the
+        normal path (a legacy command the credential guard now refuses): the
+        command is left exactly as stored and only the action state changes
+        (an ``extra`` that is not a JSON object is kept verbatim under
+        ``unparsed_extra``)."""
+        self.conn.execute(
+            "UPDATE reminders SET extra = CASE "
+            "WHEN json_valid(extra) AND json_type(extra) = 'object' "
+            "THEN json_set(extra, '$.action_status', 'paused', '$.action_result', ?1) "
+            "ELSE json_object('action_status', 'paused', 'action_result', ?1, "
+            "'unparsed_extra', extra) END, updated_at = ?2 "
+            "WHERE id = ?3",
+            (redact_text(reason)[:400], _now(), reminder_id),
+        )
+        self.conn.commit()
+
     def _reminder_to_dict(self, row: sqlite3.Row) -> dict:
         """Convert a reminder row to dict with JSON parsing."""
         d = dict(row)

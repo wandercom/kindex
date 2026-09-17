@@ -43,6 +43,27 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   replaced by one that stops spending for the rest of that day, instead of
   failing every LLM feature or forgetting what was spent. A ledger that can
   be neither read nor kept is left alone and stops spending on every day.
+- Reminder actions:
+  - an action is claimed from the stored reminder, so a sweep never reruns
+    an action finished meanwhile (by `kin remind exec` or another sweep), and
+    a reminder cancelled while its action runs stays cancelled;
+  - a failing action gets three attempts per occurrence (a recurring
+    reminder stays on its occurrence, retried after the automatic snooze,
+    and a worker that died mid-run used its attempt) and is then set aside
+    (`exhausted`) until the next occurrence or a manual exec;
+  - claude actions are capped by `max_budget_usd` (`--max-budget-usd`), not
+    by five turns, and a spent budget or turn limit is final;
+  - a runner finishes when its command exits even if the command started a
+    background service, decodes output leniently, and kills the whole process
+    group on timeout (also when the command closed its output first) or when
+    the runner itself is interrupted;
+  - one reminder the store refuses to rewrite is paused and reported instead
+    of ending the sweep for every reminder after it.
+- Scheduled jobs (launchd and cron) run with the installing shell's PATH and
+  the agent CLIs' directories, and launchd jobs start in the home directory;
+  agent CLIs are also looked up in the usual install locations. Re-run
+  `kin setup-cron` to update an installed scheduler; each re-run refreshes
+  the PATH and keeps a crontab line's schedule.
 
 ## [0.40.0] - 2026-09-17
 

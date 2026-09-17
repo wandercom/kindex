@@ -940,6 +940,8 @@ def install_launchd(config: "Config", dry_run: bool = False) -> list[str]:
         interval=interval,
         stdout_path=f"{log_dir}/cron.log",
         stderr_path=f"{log_dir}/cron-error.log",
+        environment={"PATH": scheduler_path(), "HOME": str(Path.home())},
+        working_directory=str(Path.home()),
     )
 
     if not dry_run:
@@ -968,8 +970,44 @@ def _launchctl_reload(plist_path: Path) -> None:
                    capture_output=True, timeout=5)
 
 
+def cron_path_assignment() -> str:
+    """``PATH=...`` for a crontab line. cron turns an unescaped ``%`` into a
+    newline even inside shell quotes, which would split the command."""
+    import shlex
+
+    return "PATH=" + shlex.quote(scheduler_path()).replace("%", "\\%")
+
+
+def scheduler_path() -> str:
+    """The PATH a scheduled kin job runs with.
+
+    launchd and cron start jobs with a bare system PATH, where claude, codex,
+    opencode, gh and Homebrew tools are not found, so every scheduled agent
+    action failed while a manual `kin remind exec` worked. The job gets the
+    installing shell's PATH plus the directories those tools live in.
+    Relative entries are dropped.
+    """
+    import shutil
+
+    directories: list[str] = []
+    for name in ("kin", "claude", "codex", "opencode", "git", "gh"):
+        found = shutil.which(name)
+        if found:
+            directories.append(str(Path(found).parent))
+    directories += os.environ.get("PATH", "").split(os.pathsep)
+    directories += ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                    "/usr/sbin", "/sbin"]
+    kept: list[str] = []
+    for directory in directories:
+        if directory and os.path.isabs(directory) and directory not in kept:
+            kept.append(directory)
+    return os.pathsep.join(kept)
+
+
 def _launchd_plist(*, label: str, program_args: list[str], interval: int,
-                   stdout_path: str, stderr_path: str) -> str:
+                   stdout_path: str, stderr_path: str,
+                   environment: dict[str, str] | None = None,
+                   working_directory: str | None = None) -> str:
     """Render a launchd plist for a periodic kin job.
 
     ``program_args`` is emitted one <string> per argv element so the
@@ -979,6 +1017,16 @@ def _launchd_plist(*, label: str, program_args: list[str], interval: int,
     arg_lines = "\n".join(
         f"        <string>{escape(part)}</string>" for part in program_args
     )
+    extra_keys = ""
+    if environment:
+        pairs = "\n".join(
+            f"        <key>{escape(key)}</key>\n        <string>{escape(value)}</string>"
+            for key, value in environment.items()
+        )
+        extra_keys += f"    <key>EnvironmentVariables</key>\n    <dict>\n{pairs}\n    </dict>\n"
+    if working_directory:
+        extra_keys += (f"    <key>WorkingDirectory</key>\n"
+                       f"    <string>{escape(working_directory)}</string>\n")
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -997,7 +1045,7 @@ def _launchd_plist(*, label: str, program_args: list[str], interval: int,
     <string>{escape(stderr_path)}</string>
     <key>RunAtLoad</key>
     <true/>
-</dict>
+{extra_keys}</dict>
 </plist>
 """
 
@@ -1075,14 +1123,24 @@ def install_crontab(config: "Config", dry_run: bool = False) -> list[str]:
     log_dir = config.scheduler_log_path
 
     # Maintenance runs at :02/:32 so it is never phase-locked with the
-    # reminder checker's :00/:05/... schedule.
+    # reminder checker's :00/:05/... schedule. Each job carries the PATH its
+    # actions need (cron's own PATH finds no agent CLI), refreshed on every
+    # install.
+    env = cron_path_assignment()
     wanted = [
         (f"{kin_path} cron >> {log_dir}/cron.log 2>&1",
-         f"2-59/30 * * * * {kin_path} cron >> {log_dir}/cron.log 2>&1"),
+         f"2-59/30 * * * * {env} {kin_path} cron >> {log_dir}/cron.log 2>&1"),
         (f"remind check --all-profiles >> {log_dir}/reminders.log 2>&1",
-         f"*/5 * * * * {kin_path} remind check --all-profiles "
+         f"*/5 * * * * {env} {kin_path} remind check --all-profiles "
          f">> {log_dir}/reminders.log 2>&1"),
     ]
+
+    def refreshed(line: str, default_line: str) -> str:
+        # Keep the schedule an adaptive repack may have chosen; everything
+        # after it (the PATH, the command) is rewritten, so a PATH from an
+        # earlier install cannot hide a newly installed CLI.
+        schedule = line.split()[:5]
+        return " ".join(schedule + default_line.split(None, 5)[5:])
 
     # Check existing crontab
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
@@ -1098,10 +1156,11 @@ def install_crontab(config: "Config", dry_run: bool = False) -> list[str]:
     for fingerprint, default_line in wanted:
         match = next((l for l in pool if fingerprint in l), None)
         if match is not None:
-            # Current command + log target: keep as-is (preserves an
-            # adaptively repacked schedule).
+            # Current command + log target: keep its schedule.
             pool.remove(match)
-            final.append(match)
+            line = refreshed(match, default_line)
+            changed = changed or line != match
+            final.append(line)
         else:
             final.append(default_line)
             changed = True
@@ -1163,6 +1222,8 @@ def install_reminder_daemon(config: "Config", dry_run: bool = False) -> list[str
         interval=interval,
         stdout_path=f"{log_dir}/reminders.log",
         stderr_path=f"{log_dir}/reminders-error.log",
+        environment={"PATH": scheduler_path(), "HOME": str(Path.home())},
+        working_directory=str(Path.home()),
     )
 
     if not dry_run:
