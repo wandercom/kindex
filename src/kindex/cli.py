@@ -5144,6 +5144,30 @@ def cmd_supervisor_hook(args):
                                              ("PreInvocation" if args.adapter == "antigravity" else "UserPromptSubmit"))))
 
 
+def cmd_supervisor_register(args):
+    """Record a native session a launcher started for its own automation.
+
+    A tool that drives a host non-interactively (Kinbase's Antigravity
+    classifier, for one) leaves transcripts with no workspace mapping, and
+    supervisor health reported each one as unscoped host activity. The
+    launcher holds the identity the host returned and registers it here, as
+    Kindex's own review launcher already does; nothing else is recorded.
+    """
+    from .supervisor_health import register_reviewer_session
+
+    project = str(Path(args.project or os.getcwd()).expanduser().resolve())
+    try:
+        result = register_reviewer_session(args.agent, args.session, project)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        print(f"Error: session not registered ({type(error).__name__}: {error})",
+              file=sys.stderr)
+        sys.exit(2)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(f"Registered {result['agent']} session {result['session_id']} as automation.")
+
+
 def cmd_prompt_check(args):
     """UserPromptSubmit hook: inject due reminders into conversation context.
 
@@ -7949,6 +7973,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="How long to wait for this prompt's attention review (default 1000)")
     _common(s)
     s.set_defaults(func=cmd_prompt_check)
+
+    s = sub.add_parser(
+        "supervisor-register",
+        help="Register a native session a launcher started for automation, "
+             "so supervisor health does not count it as host activity")
+    s.add_argument("--agent", required=True,
+                   choices=["claude", "codex", "opencode", "antigravity", "cursor"])
+    s.add_argument("--session", required=True,
+                   help="Session id the host reported to the launcher")
+    s.add_argument("--project",
+                   help="Absolute directory the session ran in (default: current directory)")
+    _common(s)
+    s.set_defaults(func=cmd_supervisor_register)
 
     s = sub.add_parser("supervisor-hook", help="Shared scoped advisory direction and diligence lookback")
     s.add_argument("--adapter", required=True, choices=["claude", "codex", "opencode", "antigravity", "cursor"])

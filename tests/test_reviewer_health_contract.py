@@ -135,3 +135,46 @@ def test_h3_registration_resolves_existing_alerts_without_erasing_history(box):
                for alert in after["alerts"]), "H3: registration resolves the existing occurrence, preserving its record"
     assert after["unread_count"] == 0
     assert events(box) == evidence, "H3: reconciliation must not fake a hook or delete native evidence"
+
+
+def test_a_launcher_registers_its_automation_session_through_the_cli(box, monkeypatch, capsys):
+    """Kinbase's Antigravity classifier runs leave transcripts with no
+    workspace; the launcher registers each one with `kin supervisor-register`."""
+    import sys
+
+    from kindex import cli
+
+    identity = scope(box, sid="classifier-turn", agent="antigravity")
+    box["files"]["antigravity"].append(agy_trace(box, identity["session_id"]))
+    unregistered = health.check_health(now=NOW, notify=False)
+    assert unregistered["coverage"]["antigravity"]["unidentified"] == 1
+
+    monkeypatch.setattr(sys, "argv", [
+        "kin", "supervisor-register", "--agent", "antigravity",
+        "--session", identity["session_id"], "--project", identity["project_path"], "--json",
+    ])
+    cli.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["registered"] is True and out["session_id"] == "classifier-turn"
+
+    registered = health.check_health(now=NOW + 1, notify=False)
+    assert registered["coverage"]["antigravity"].get("unidentified", 0) == 0
+    assert not [issue for issue in registered["issues"]
+                if issue["code"] == "observation_unavailable"]
+
+
+def test_supervisor_register_refuses_a_bad_identity_without_a_traceback(box, monkeypatch, capsys):
+    import sys
+
+    from kindex import cli
+
+    monkeypatch.setattr(sys, "argv", [
+        "kin", "supervisor-register", "--agent", "antigravity",
+        "--session", "bad\nid", "--project", box["project"],
+    ])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("Error: session not registered")
+    assert "Traceback" not in err

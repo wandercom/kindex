@@ -4,6 +4,13 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+- `kin supervisor-register --agent <host> --session <id> [--project <dir>]`
+  lets a tool that drives a host non-interactively register the session it
+  started as automation. Supervisor health excludes it as it does Kindex's
+  own review sessions; Kinbase's Antigravity classifier runs were reported
+  as unscoped host activity (`observation_unavailable`).
+
 ## [0.43.1] - 2026-09-17
 
 ### Fixed
