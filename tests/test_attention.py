@@ -6,6 +6,7 @@ import json
 import time
 from types import SimpleNamespace
 
+import kindex.attention as attention
 from kindex.agent_adapters import (
     adapter_scoped_out,
     permission_gate_output,
@@ -511,10 +512,19 @@ def test_async_attention_drops_stale_deferred_result(tmp_path, monkeypatch):
     store.close()
 
 
-def test_wait_for_pending_attention_returns_empty_at_deadline(tmp_path):
+def test_wait_for_pending_attention_returns_empty_at_deadline(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     store = Store(cfg)
-    start = time.monotonic()
+    clock = [100.0]
+    monkeypatch.setattr(
+        attention,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: clock[0],
+            sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        ),
+    )
+    start = clock[0]
     injections = wait_for_pending_attention(
         store,
         cfg,
@@ -525,7 +535,7 @@ def test_wait_for_pending_attention_returns_empty_at_deadline(tmp_path):
         deadline=start + 0.05,
     )
     assert injections == []
-    assert time.monotonic() - start < 0.2
+    assert clock[0] - start == 0.05
     store.close()
 
 
