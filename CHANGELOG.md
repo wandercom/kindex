@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-09-17
+
 ### Fixed
 - An empty project store (any read creates one) no longer makes every
   unscoped call in the repository ambiguous while the home store holds work;
