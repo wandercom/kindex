@@ -1258,9 +1258,14 @@ def drain_attention_queue(
     flagged = 0
     for job in jobs:
         try:
+            # The hook judged with its client's and instance's overrides (an
+            # instance may enable attention the base config leaves off); the
+            # drain resolves the same overrides, or the job is dropped as
+            # disabled or judged under the wrong budget.
+            job_config = _job_config(config, job)
             prepared = _prepare_attention_job(
                 store,
-                config,
+                job_config,
                 str(job.get("snippet") or ""),
                 str(job.get("conversation_id") or ""),
                 force=bool(job.get("force", False)),
@@ -1277,11 +1282,13 @@ def drain_attention_queue(
             judge_job["force"] = bool(job.get("force", False))
             # Carry the originating client so a retried job keeps adapter scoping.
             judge_job["adapter"] = job.get("adapter")
+            judge_job["client"] = job.get("client")
+            judge_job["agent_instance"] = job.get("agent_instance")
             candidates = [AttentionCandidate(**item) for item in judge_job.get("candidates") or []]
             injections, judge = judge_candidates(
-                config,
+                job_config,
                 ledger,
-                str(judge_job.get("snippet") or "")[: config.attention.max_context_chars],
+                str(judge_job.get("snippet") or "")[: job_config.attention.max_context_chars],
                 candidates,
                 str(judge_job.get("conversation_id") or ""),
                 client=client,
@@ -1315,6 +1322,15 @@ def drain_attention_queue(
 
     pending = len(_read_meta_list(store, ATTENTION_PENDING_META))
     return {"status": "ok", "reviewed": reviewed, "flagged": flagged, "pending": pending}
+
+
+def _job_config(config: Config, job: dict) -> Config:
+    client = job.get("client")
+    if not client:
+        return config
+    from .agent_settings import apply_agent_overrides
+    return apply_agent_overrides(
+        config, client=str(client), instance_key=str(job.get("agent_instance") or "") or None)
 
 
 def spawn_background_attention_drain(config: Config) -> bool:
@@ -1426,11 +1442,15 @@ def prepare_async_attention_review(
     *,
     force: bool = False,
     adapter: str | None = None,
+    client: str | None = None,
+    agent_instance: str | None = None,
 ) -> dict:
     """Queue raw hook context; the responder does selection + LLM arbitration.
 
     ``adapter`` is persisted on the job so the background drain can scope
-    candidate selection to the client that originated the request.
+    candidate selection to the client that originated the request;
+    ``client`` and ``agent_instance`` so it applies the same overrides
+    ``config`` carries.
     """
     if not conversation_id:
         return {"status": "missing_conversation_id", "injections": []}
@@ -1445,6 +1465,8 @@ def prepare_async_attention_review(
         "snippet": snippet[: config.attention.max_context_chars],
         "force": force,
         "adapter": adapter,
+        "client": client,
+        "agent_instance": agent_instance,
         "at": _now(),
         "attempts": 0,
     }

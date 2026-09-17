@@ -4,6 +4,25 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- The Stop/PreCompact capture hook extracts only transcript text it has not
+  extracted before. It read the transcript from the top on every turn, paying
+  for the same LLM extraction each time and never reaching later turns.
+- Hook LLM requests are bounded by the hook's budget with no retries, and
+  every other request by a 60-second timeout (the SDK default was ten
+  minutes with two retries); a timed-out extraction counts its input against
+  the budget. `prompt-check` queues its attention review and waits at most
+  `--deadline-ms` (default 1000) instead of judging inline.
+- Antigravity hooks that cannot resolve their workspace still answer in the
+  protocol (a PreToolUse decision, JSON on PreInvocation and Stop), and the
+  permission gate runs before the workspace is resolved.
+- kin-mcp returns the remedy with a configuration refusal ("Ambiguous Kindex
+  scope ... Select --project-path ..."), and `task_execute` no longer needs
+  the legacy store to name the agent.
+- A queued attention review (from `attention-hook` or `prompt-check`) is
+  judged with its client's and instance's `agents` overrides; one an instance
+  enabled was dropped as disabled by the background drain.
+
 ## [0.40.0] - 2026-09-17
 
 ### Fixed

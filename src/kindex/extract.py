@@ -16,7 +16,7 @@ from .privacy import redact, redact_text
 from .privacy import redacting_print as print
 
 
-def _get_client(config: Config):
+def _get_client(config: Config, timeout: float | None = None):
     # Key resolution has ONE authority: llm.resolve_api_key. This used to do a
     # bare os.environ.get(config.llm.api_key_env), which silently broke every
     # install using the comma-separated fallback syntax that llm.py has always
@@ -36,14 +36,14 @@ def _get_client(config: Config):
               f"Falling back to keyword extraction.", file=sys.stderr)
         return None
     if config.llm.enabled:
-        return get_client(config)
+        return get_client(config, timeout=timeout)
     # Auto-enable path: llm.get_client refuses when `enabled` is false, so
     # build the same provider-aware client against a temporary enabled copy
     # rather than reimplementing provider dispatch here. This module used to
     # hardcode `import anthropic`, which sent an OpenAI key to Anthropic's SDK
     # whenever provider was openai.
     return get_client(config.model_copy(update={
-        "llm": config.llm.model_copy(update={"enabled": True})}))
+        "llm": config.llm.model_copy(update={"enabled": True})}), timeout=timeout)
 
 
 # ── LLM extraction ─────────────────────────────────────────────────────
@@ -89,12 +89,15 @@ def llm_extract(
     existing_titles: list[str],
     config: Config,
     ledger: BudgetLedger,
+    timeout: float | None = None,
 ) -> dict | None:
-    """Run LLM extraction pass. Returns structured dict or None if unavailable."""
+    """Run LLM extraction pass. Returns structured dict or None if unavailable.
+
+    ``timeout`` bounds the request (a hook passes its own budget)."""
     if not ledger.can_spend():
         return None
 
-    client = _get_client(config)
+    client = _get_client(config) if timeout is None else _get_client(config, timeout=timeout)
     if client is None:
         return None
 
@@ -125,7 +128,15 @@ def llm_extract(
             text_out = text_out.split("```")[1].split("```")[0]
 
         return redact(json.loads(text_out))
-    except Exception:
+    except Exception as error:
+        if "timeout" in type(error).__name__.lower():
+            # The request was sent and may have been billed; the budget
+            # counts its input rather than nothing.
+            ledger.record(
+                _estimate_cost(config.llm.model, len(prompt) // 4, 0),
+                model=config.llm.model, purpose="extract",
+                estimate=_estimate_cost(config.llm.model, len(prompt) // 4, 1000),
+            )
         return None
 
 
@@ -376,9 +387,10 @@ def extract(
     existing_titles: list[str],
     config: Config,
     ledger: BudgetLedger,
+    timeout: float | None = None,
 ) -> dict:
     """Extract knowledge — LLM if available, keyword fallback otherwise."""
-    result = llm_extract(text, existing_titles, config, ledger)
+    result = llm_extract(text, existing_titles, config, ledger, timeout=timeout)
     if result is not None:
         return result
     return keyword_extract(text, existing_titles=existing_titles)

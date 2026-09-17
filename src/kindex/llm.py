@@ -121,8 +121,9 @@ def is_configured(config: Config) -> bool:
 class _OpenAIResponsesMessages:
     """Small adapter that exposes the Anthropic-like messages.create shape."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, timeout: float = 30):
         self.api_key = api_key
+        self.timeout = timeout
 
     def create(self, *, model: str, max_tokens: int, messages: list[dict]) -> SimpleNamespace:
         messages = redact(messages)
@@ -147,7 +148,7 @@ class _OpenAIResponsesMessages:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             # Provider response bodies can echo prompts or authorization data.
@@ -175,8 +176,8 @@ class _OpenAIResponsesMessages:
 
 
 class _OpenAIResponsesClient:
-    def __init__(self, api_key: str):
-        self.messages = _OpenAIResponsesMessages(api_key)
+    def __init__(self, api_key: str, timeout: float = 30):
+        self.messages = _OpenAIResponsesMessages(api_key, timeout)
 
 
 def _extract_openai_text(data: dict) -> str:
@@ -236,7 +237,13 @@ def _usage_value(usage, *names: str) -> int:
     return 0
 
 
-def get_client(config: Config):
+# A request with no deadline waited up to the SDK default of ten minutes with
+# two retries. Commands get a minute; a hook passes its own budget, retries
+# nothing, and so finishes (and records its spend) before the host kills it.
+DEFAULT_LLM_TIMEOUT_SECONDS = 60.0
+
+
+def get_client(config: Config, timeout: float | None = None):
     """Get configured LLM client, or None if not available."""
     if not config.llm.enabled:
         return None
@@ -251,7 +258,8 @@ def get_client(config: Config):
 
     provider = config.llm.provider.lower()
     if provider == "openai":
-        return _PrivateClient(_OpenAIResponsesClient(api_key))
+        return _PrivateClient(_OpenAIResponsesClient(
+            api_key, timeout if timeout is not None else 30))
 
     if provider != "anthropic":
         print(
@@ -263,7 +271,11 @@ def get_client(config: Config):
 
     try:
         import anthropic
-        return _PrivateClient(anthropic.Anthropic(api_key=api_key))
+        return _PrivateClient(anthropic.Anthropic(
+            api_key=api_key,
+            timeout=timeout if timeout is not None else DEFAULT_LLM_TIMEOUT_SECONDS,
+            max_retries=0 if timeout is not None else 2,
+        ))
     except ImportError:
         print("Warning: LLM enabled but 'anthropic' package not installed. "
               "Install with: pip install kindex[llm]", file=sys.stderr)

@@ -2150,18 +2150,69 @@ def cmd_compact_hook(args):
     except Exception:
         pass
 
-    if is_envelope:
-        # Extracting from the envelope itself would mint one junk node per
-        # JSON field (issue #14). Substitute the real conversation text
-        # from the transcript file the envelope points at.
-        from .ingest import _extract_session_text
-        text = _extract_session_text(Path(tpath)) if tpath else ""
-
     # Envelope-derived transcripts get a higher floor (real conversations
     # are long; short residue means extraction failed). Plain piped text
     # keeps the original threshold so short direct captures still work.
     min_len = 50 if is_envelope else 10
+    read_state_key = ""
+    read_state: dict = {}
+    next_offset = 0
+    topic = ""
+    if is_envelope:
+        # Extracting from the envelope itself would mint one junk node per
+        # JSON field (issue #14). Substitute the real conversation text
+        # from the transcript file the envelope points at: the part not yet
+        # extracted. Stop fires after every assistant turn, and reading the
+        # transcript from the top each time paid for the same extraction on
+        # every turn and never reached anything said after the first few.
+        import hashlib
+        from .ingest import _extract_session_text_since
+        read_state_key = "compact_hook.read." + hashlib.sha256(
+            str(tpath).encode("utf-8")).hexdigest()[:32]
+        try:
+            read_state = json.loads(store.get_meta(read_state_key) or "{}")
+        except (TypeError, ValueError):
+            read_state = {}
+        if not isinstance(read_state, dict):
+            read_state = {}
+        start = int(read_state.get("offset", 0) or 0)
+        try:
+            if Path(tpath).stat().st_size < start:
+                start = 0  # the transcript was replaced
+                read_state = {}
+        except OSError:
+            start = 0
+        text, next_offset, at_end = _extract_session_text_since(Path(tpath), start)
+        text_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # The conversation's topic (for --emit-context) is kept with the
+        # cursor: once a turn is consumed, its text is not read again.
+        topic = str(read_state.get("topic") or "") or _topic_line(text)
+        if not topic and getattr(args, "emit_context", False):
+            topic = _transcript_topic(Path(tpath))
+
+        if len(text.strip()) < min_len:
+            # Too little to extract. Keep it for the next turn unless the
+            # read stopped short of the end (a long stretch with no assistant
+            # text), which is skipped rather than re-read every turn.
+            if not at_end:
+                _save_capture_state(store, read_state_key, topic, offset=next_offset)
+            elif topic != read_state.get("topic", ""):
+                _save_capture_state(store, read_state_key, topic, **{
+                    k: v for k, v in read_state.items() if k != "topic"})
+            _emit_compact_context(store, args, topic)
+            store.close()
+            return
+        if text_digest == read_state.get("digest"):
+            _save_capture_state(store, read_state_key, topic,
+                                offset=next_offset, digest=text_digest)
+            _emit_compact_context(store, args, topic)
+            store.close()
+            return
+    else:
+        topic = _topic_line(text or "")
+
     if not text or len(text.strip()) < min_len:
+        _emit_compact_context(store, args, topic)
         store.close()
         return
 
@@ -2169,19 +2220,25 @@ def cmd_compact_hook(args):
 
     existing = [n["title"] for n in store.all_nodes(limit=200)]
     try:
-        extraction = extract(text, existing, cfg, ledger)
+        # The host allows this hook ten seconds; the request gets six, so it
+        # ends (and records its spend) before the host would kill it.
+        extraction = extract(text, existing, cfg, ledger, timeout=6.0)
     except Exception as exc:
         try:
             from .config import record_degraded
             record_degraded("compact-hook-extract", exc, config=cfg)
         except Exception:
             pass
+        _emit_compact_context(store, args, topic)
         store.close()
         return
 
     import hashlib
 
     source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if read_state_key:
+        _save_capture_state(store, read_state_key, topic,
+                            offset=next_offset, digest=source_digest)
     staged_ids: list[str] = []
     proposals = extraction.get("connections", [])
     if not isinstance(proposals, list):
@@ -2232,16 +2289,58 @@ def cmd_compact_hook(args):
     count = len(staged_ids)
 
     # Output context at executive level for re-injection after compaction
-    if count > 0 or args.emit_context:
-        if count > 0:
-            print(f"# Kindex: staged {count} capture candidate(s) for review.")
-        from .retrieve import format_context_block, hybrid_search
-        topic = text[:100].split("\n")[0]
-        results = hybrid_search(store, topic, top_k=5)
-        block = format_context_block(store, results, query=topic, level="executive")
-        print(block)
+    if count > 0:
+        print(f"# Kindex: staged {count} capture candidate(s) for review.")
+    _emit_compact_context(store, args, topic, force=count > 0)
 
     store.close()
+
+
+def _save_capture_state(store, key: str, topic: str, **fields) -> None:
+    if topic:
+        fields["topic"] = topic
+    store.set_meta(key, json.dumps(fields))
+
+
+def _topic_line(text: str) -> str:
+    """A context query from conversation text: its first non-empty line,
+    bounded (the text is already redacted)."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:100]
+    return ""
+
+
+_TOPIC_SCAN_BYTES = 64 * 1024 * 1024
+
+
+def _transcript_topic(path: Path) -> str:
+    """The first assistant text in a transcript, past any stretch of tool
+    output, within a bounded read."""
+    from .ingest import _extract_session_text_since
+    offset = 0
+    while offset < _TOPIC_SCAN_BYTES:
+        text, following, at_end = _extract_session_text_since(
+            path, offset, max_chars=200, complete_lines_only=False)
+        if text.strip():
+            return _topic_line(text)
+        if at_end or following <= offset:
+            return ""
+        offset = following
+    return ""
+
+
+def _emit_compact_context(store, args, topic: str, *, force: bool = False) -> None:
+    """Print the executive context block when it was asked for.
+
+    Requested context does not depend on whether this run extracted
+    anything: a Stop hook may already have consumed the transcript.
+    """
+    if not (force or getattr(args, "emit_context", False)) or not topic:
+        return
+    from .retrieve import format_context_block, hybrid_search
+    results = hybrid_search(store, topic, top_k=5)
+    print(format_context_block(store, results, query=topic, level="executive"))
 
 
 # ── prime ─────────────────────────────────────────────────────────────
@@ -4982,6 +5081,11 @@ def cmd_prompt_check(args):
     Outputs plain text to stdout that Claude Code adds as visible context.
     Designed to be fast (<2s). Outputs nothing if no reminders are due.
     """
+    import time
+
+    # Measured from process start: the host's two seconds include the shell
+    # and the imports that ran before this line.
+    deadline = time.monotonic() + max(0, int(getattr(args, "deadline_ms", 1000) or 0)) / 1000.0
     store = _store(args)
     cfg = _config(args)
 
@@ -5003,11 +5107,11 @@ def cmd_prompt_check(args):
             extract_conversation_text,
             format_attention_injections,
             pop_pending_attention_injections,
+            prepare_async_attention_review,
             read_hook_payload,
             resolve_conversation_id,
-            run_attention_check,
+            wait_for_pending_attention,
         )
-        from .budget import BudgetLedger
 
         hook_payload = read_hook_payload()
         strict_scope = strict_scope or bool(hook_payload)
@@ -5058,19 +5162,47 @@ def cmd_prompt_check(args):
                     ]},
                     display=cfg.attention.display,
                 ))
-            ledger = BudgetLedger(cfg.ledger_path, cfg.budget)
-            attention_result = run_attention_check(
+            # The judgement runs in the background drain, which records its
+            # own spend; this hook waits only as long as its budget allows. A
+            # synchronous call with no deadline was killed by the host
+            # mid-request, losing the tick, the answer and the spend record.
+            prepared = prepare_async_attention_review(
                 store,
                 cfg,
-                ledger,
                 conversation_text,
                 conversation_id,
                 force=getattr(args, "force_attention", False),
                 adapter=scope_adapter(adapter),
+                client=adapter,
+                agent_instance=agent_instance,
             )
-            attention_lines = format_attention_injections(
-                attention_result, display=cfg.attention.display
-            )
+            job = prepared.get("job") or {}
+            if job and time.monotonic() < deadline:
+                judged = wait_for_pending_attention(
+                    store,
+                    cfg,
+                    conversation_id,
+                    conversation_text,
+                    tick=int(prepared.get("ticks", 0) or 0),
+                    job_id=str(job.get("job_id") or ""),
+                    deadline=deadline,
+                )
+                if judged:
+                    _record_attention_delivery(store, cfg, conversation_id, judged)
+                    # After the queued lines popped above, not instead of them.
+                    attention_lines += format_attention_injections(
+                        {"injections": [
+                            {
+                                "id": item.id,
+                                "title": item.title,
+                                "message": item.message,
+                                "reason": item.reason,
+                                "confidence": item.confidence,
+                            }
+                            for item in judged
+                        ]},
+                        display=cfg.attention.display,
+                    )
     except Exception:
         attention_lines = []
 
@@ -5245,13 +5377,15 @@ def cmd_attention_hook(args):
         or "PreToolUse"
     )
     adapter = normalize_adapter(getattr(args, "adapter", "claude"))
-    if adapter == "antigravity" and payload.get("workspacePaths"):
-        from .agent_adapters import hook_project_path
-        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
+    # The permission gate needs no scope, so a workspace Kindex cannot resolve
+    # never stands between it and the host.
     gate = permission_gate_output(adapter=adapter, event=event, payload=payload)
     if gate:
         print(gate)
         return
+    if adapter == "antigravity" and payload.get("workspacePaths"):
+        from .agent_adapters import hook_project_path
+        args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
 
     supervisor_context = ""
     if event in ("UserPromptSubmit", "PostToolUse"):
@@ -5312,6 +5446,8 @@ def cmd_attention_hook(args):
             conversation_id,
             force=getattr(args, "force", False),
             adapter=scope_adapter(adapter),
+            client=adapter,
+            agent_instance=agent_instance,
         )
         job = prepared.get("job") or {}
         if job and time.monotonic() < deadline:
@@ -5371,7 +5507,7 @@ def cmd_attention_hook(args):
         # `kin doctor`; recording can never stand between the host and the
         # allow.
         try:
-            _degrade_hook_failure(args, exc)
+            _record_hook_failure(args, exc)
         except Exception:
             pass
         allow_if_needed()
@@ -7709,6 +7845,8 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["plain", "claude", "codex", "antigravity", "opencode"],
                    help="Render hook output for a client protocol")
     s.add_argument("--agent-instance", help="Agent instance/conversation override key")
+    s.add_argument("--deadline-ms", type=int, default=1000,
+                   help="How long to wait for this prompt's attention review (default 1000)")
     _common(s)
     s.set_defaults(func=cmd_prompt_check)
 
@@ -7767,7 +7905,43 @@ def _is_hook_surface(args) -> bool:
 def _degrade_hook_failure(args, exc: BaseException) -> None:
     """Record a degraded-ledger event and emit the per-hook degraded
     shape: prime-type hooks print one context line, guard-type hooks fail
-    open with empty output, capture/maintenance hooks stay silent."""
+    open with empty output, capture/maintenance hooks stay silent. A client
+    whose protocol requires a reply (Antigravity's PreToolUse decision, its
+    JSON-only PreInvocation and Stop surfaces) gets that reply."""
+    try:
+        _record_hook_failure(args, exc)
+    finally:
+        output = _degraded_hook_output(args, exc)
+        if output:
+            print(output, end="")
+
+
+def _degraded_hook_output(args, exc: BaseException) -> str:
+    from .agent_adapters import normalize_adapter, render_hook_context
+
+    command = getattr(args, "command", None)
+    line = (f"# kindex degraded: {type(exc).__name__} — "
+            "session starting without memory context")
+    if command == "prime":
+        return line + "\n"
+    adapter = normalize_adapter(getattr(args, "adapter", None) or "plain")
+    if command == "agent-prime-hook":
+        rendered = render_hook_context(
+            line, adapter=adapter, event=getattr(args, "event", None) or "PreInvocation")
+        return rendered if rendered.endswith("\n") else rendered + "\n"
+    if adapter != "antigravity":
+        return ""
+    event = {
+        "attention-hook": getattr(args, "event", None) or "PreToolUse",
+        "agent-stop-hook": "Stop",
+    }.get(command)
+    if event is None:
+        return ""
+    return render_hook_context(
+        f"kindex degraded: {type(exc).__name__}", adapter=adapter, event=event) + "\n"
+
+
+def _record_hook_failure(args, exc: BaseException) -> None:
     from .config import load_config, record_degraded
 
     cfg = None
@@ -7781,9 +7955,6 @@ def _degrade_hook_failure(args, exc: BaseException) -> None:
         cfg = None
     record_degraded(getattr(args, "command", None) or "unknown", exc,
                     config=cfg, override_dir=getattr(args, "data_dir", None))
-    if getattr(args, "command", None) in ("prime", "agent-prime-hook"):
-        print(f"# kindex degraded: {type(exc).__name__} — "
-              "session starting without memory context")
 
 
 def main():
