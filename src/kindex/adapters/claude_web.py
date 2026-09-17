@@ -51,6 +51,10 @@ def _conversation_summary(conv: dict) -> str:
     return f"{name}{proj_tag} ({created}, {len(msgs)} msgs)"
 
 
+# Metadata the export determines; re-ingest replaces these as a set.
+_EXPORT_KEYS = frozenset({"uuid", "name", "message_count", "source", "project"})
+
+
 class ClaudeWebAdapter:
     meta = AdapterMeta(
         name="claude-web",
@@ -180,10 +184,14 @@ class ClaudeWebAdapter:
                     # upsert reset weight, audience, aka, intent, standing
                     # and the clocks the user had set.
                     old_extra = existing.get("extra") or {}
+                    # The export owns its own keys (a conversation moved out
+                    # of a project loses `project`); anything else stays.
+                    kept = {key: value for key, value in old_extra.items()
+                            if key not in _EXPORT_KEYS}
                     fields = {
                         "content": content,
                         "domains": domains,
-                        "extra": {**old_extra, **extra, "name": name},
+                        "extra": {**kept, **extra},
                     }
                     if existing.get("title") == old_extra.get("name"):
                         fields["title"] = name  # not renamed by hand

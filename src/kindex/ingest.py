@@ -1180,13 +1180,15 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
     elif include_private:
         # Explicitly private index: the repo owner opted in to a full snapshot.
         rows = store.conn.execute(
-            "SELECT * FROM nodes ORDER BY id ASC LIMIT ?",
+            "SELECT * FROM nodes WHERE status NOT IN ('archived', 'superseded') "
+            "ORDER BY id ASC LIMIT ?",
             (500,),
         ).fetchall()
         nodes = [store._row_to_dict(r) for r in rows]
     else:
         rows = store.conn.execute(
             "SELECT * FROM nodes WHERE audience IN ('public', 'team') "
+            "AND status NOT IN ('archived', 'superseded') "
             "ORDER BY id ASC LIMIT ?",
             (500,),
         ).fetchall()

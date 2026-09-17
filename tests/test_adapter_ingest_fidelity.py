@@ -197,3 +197,84 @@ def test_the_session_scan_skips_subagents(tmp_path):
     (projects / "p" / "session.jsonl").write_text("{}\n")
     (projects / "p" / "s" / "subagents" / "workflows" / "wf_1" / "agent.jsonl").write_text("{}\n")
     assert [path.name for path, _ in session_transcripts(projects)] == ["session.jsonl"]
+
+
+def test_a_changed_file_that_returns_is_restored(store, tmp_path, local_code):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text("class Keep:\n    pass\nclass Gone:\n    pass\n")
+    code.ingest_code(store, repo)
+    (repo / "mod.py").unlink()
+    code.ingest_code(store, repo)
+    assert live_code_titles(store) == []
+    (repo / "mod.py").write_text("class Keep:\n    x = 1\nclass Gone:\n    y = 2\n")
+    code.ingest_code(store, repo)
+    assert live_code_titles(store) == ["Gone", "Keep", "mod.py"]
+
+
+def test_a_failed_parse_does_not_retire_classes(store, tmp_path, local_code, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text("class Keep:\n    pass\n")
+    code.ingest_code(store, repo)
+    monkeypatch.setattr(code, "_run_ctags", lambda files, root: [])
+    (repo / "mod.py").write_text("class Keep:\n    changed = True\n")
+    code.ingest_code(store, repo)
+    assert "Keep" in live_code_titles(store)
+
+
+def test_deleting_the_last_file_retires_its_nodes(store, tmp_path, local_code):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "only.py").write_text("class Only:\n    pass\n")
+    code.ingest_code(store, repo)
+    (repo / "only.py").unlink()
+    result = code.ingest_code(store, repo)
+    assert live_code_titles(store) == []
+    assert any("retired 2" in warning for warning in result.warnings)
+
+
+def test_a_deleted_file_git_still_lists_is_retired(store, tmp_path, local_code, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("class A:\n    pass\n")
+    (repo / "b.py").write_text("class B:\n    pass\n")
+    listed = [repo / "a.py", repo / "b.py"]
+    monkeypatch.setattr(code, "_get_file_list", lambda *args, **kwargs: list(listed))
+    code.ingest_code(store, repo)
+    (repo / "b.py").unlink()
+    code.ingest_code(store, repo)
+    assert live_code_titles(store) == ["A", "a.py"]
+
+
+def test_a_non_git_index_skips_retired_nodes(store, tmp_path):
+    from kindex.ingest import write_kin_index
+
+    store.add_node("retired module", "gone", node_id="gone", audience="team")
+    store.add_node("live module", "here", node_id="here", audience="team")
+    store.update_node("gone", status="archived")
+    out = tmp_path / "plain"
+    out.mkdir()
+    write_kin_index(store, out)
+    index = json.loads((out / ".kin" / "index.json").read_text())
+    ids = {node.get("id") for node in index.get("nodes", [])}
+    assert "here" in ids and "gone" not in ids
+
+
+def test_claude_web_drops_a_project_the_export_no_longer_names(store, tmp_path):
+    from kindex.adapters.claude_web import ClaudeWebAdapter
+
+    exports = tmp_path / "web"
+    exports.mkdir()
+    (exports / "abc-123.json").write_text(json.dumps(conversation("abc-123", 2)))
+    adapter = ClaudeWebAdapter()
+    adapter.ingest(store, directory=str(exports))
+    store.update_node("claude-web-abc-123",
+                      extra={**store.get_node("claude-web-abc-123")["extra"], "my_note": "keep"})
+    moved = conversation("abc-123", 4)
+    moved.pop("_project_name")
+    (exports / "abc-123.json").write_text(json.dumps(moved))
+    adapter.ingest(store, directory=str(exports))
+    extra = store.get_node("claude-web-abc-123")["extra"]
+    assert "project" not in extra
+    assert extra["my_note"] == "keep"
