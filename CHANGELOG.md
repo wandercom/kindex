@@ -17,11 +17,13 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   `.kin/config` it found, reconfiguring every sibling repository.
 - A new store is created and version-stamped in one transaction. A store an
   earlier build left half-created (tables but no version) is finished on
-  open; it was migrated from v1 on every open and never opened.
+  open, with its full-text index rebuilt; it was migrated from v1 on every
+  open and never opened.
 - The full-text index is updated only when a node's text changes (title,
   content, aka, intent, domains); every weight and access-time write rewrote
-  the node's indexed text. Existing stores get the narrower trigger on open,
-  with no migration or snapshot.
+  the node's indexed text. Existing stores get the narrower trigger on open
+  as a definition-only repair (no data changes, so no versioned migration
+  or full-database snapshot; see REVIEW.md).
 - Reading a node records its access at most once every ten minutes instead of
   taking the write lock on every read.
 

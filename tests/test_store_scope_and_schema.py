@@ -175,3 +175,83 @@ def test_reads_write_last_accessed_at_most_once_an_interval(tmp_path):
     store.get_node("n")
     assert store.conn.total_changes == changes
     store.close()
+
+
+def test_config_set_follows_a_symlinked_project_file(home, project):
+    from kindex.cli import _config_write
+    (project / ".kin" / "config").unlink()
+    (project / "kindex.yaml").write_text("data_dir: kdata\n")
+    (project / "kin.yaml").symlink_to("kindex.yaml")
+    _config_write("llm.model", "fixture-model", None, global_=False, project_path=str(project))
+    assert not (project / ".kin" / "config").exists()
+    assert "fixture-model" in (project / "kindex.yaml").read_text()
+
+
+def corrupt(directory):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "kindex.db").write_bytes(b"not a database" * 100)
+
+
+def test_explicit_choices_do_not_open_stores_they_did_not_choose(home, project, tmp_path):
+    corrupt(project / ".kin" / "local" / "kindex")
+    config_dir = home / ".config" / "kindex"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kin.yaml").write_text(f"data_dir: {tmp_path / 'custom'}\n")
+    assert load_config().data_path.resolve() == (tmp_path / "custom").resolve()
+
+    (config_dir / "kin.yaml").unlink()
+    (project / ".kin" / "local" / "kindex" / "kindex.db").unlink()
+    corrupt(home / ".kindex")
+    selected = load_config(project_path=project).data_path.resolve()
+    assert selected == (project / ".kin" / "local" / "kindex").resolve()
+
+
+def test_a_half_created_store_with_rows_is_searchable(tmp_path):
+    data = tmp_path / "data"
+    script = CREATE_TABLES[:CREATE_TABLES.index("-- FTS5 full-text search")]
+    data.mkdir()
+    with sqlite3.connect(data / "kindex.db") as conn:
+        conn.executescript(script)
+        conn.execute(
+            "INSERT INTO nodes (id, title, content, type, status, weight, created_at, updated_at) "
+            "VALUES ('kept', 'kept note', 'body', 'concept', 'active', 0.5, '2026-01-01', '2026-01-01')")
+    store = Store(Config(data_dir=str(data)))
+    assert [row["id"] for row in store.fts_search("kept")] == ["kept"]
+    store.update_node("kept", title="renamed note")
+    assert [row["id"] for row in store.fts_search("renamed")] == ["kept"]
+    store.close()
+
+
+def test_a_half_created_store_gets_the_narrow_trigger(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    wide = CREATE_TABLES.replace(
+        "AFTER UPDATE OF title, content, aka, intent, domains ON nodes", "AFTER UPDATE ON nodes")
+    with sqlite3.connect(data / "kindex.db") as conn:
+        conn.executescript(wide[:wide.index("CREATE TABLE IF NOT EXISTS meta")])
+    store = Store(Config(data_dir=str(data)))
+    assert "UPDATE OF" in trigger_sql(store).upper()
+    store.close()
+
+
+def test_concurrent_readers_record_one_access(tmp_path, monkeypatch):
+    import kindex.store as kstore
+    data = tmp_path / "data"
+    store = Store(Config(data_dir=str(data)))
+    store.add_node("note", node_id="n")
+    store.conn.execute("UPDATE nodes SET last_accessed = '2020-01-01T00:00:00' WHERE id = 'n'")
+    store.conn.commit()
+    other = sqlite3.connect(data / "kindex.db")
+    real = kstore._minutes_ago
+
+    def another_reader_writes_first(minutes):
+        other.execute("UPDATE nodes SET last_accessed = '2999-01-01T00:00:00' WHERE id = 'n'")
+        other.commit()
+        return real(minutes)
+
+    monkeypatch.setattr(kstore, "_minutes_ago", another_reader_writes_first)
+    store.get_node("n")
+    assert store.conn.execute(
+        "SELECT last_accessed FROM nodes WHERE id = 'n'").fetchone()[0] == "2999-01-01T00:00:00"
+    other.close()
+    store.close()

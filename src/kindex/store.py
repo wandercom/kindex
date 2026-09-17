@@ -514,17 +514,24 @@ class Store:
 
     def _create_fresh_schema(self) -> None:
         """Every table, index and trigger plus the version stamp, as one
-        transaction (idempotent: an interrupted create is finished)."""
+        transaction (idempotent: an interrupted create is finished).
+
+        The full-text index is rebuilt from ``nodes`` in the same
+        transaction, so rows a half-created store already held are
+        searchable, and a trigger an earlier build left is narrowed.
+        """
         try:
             self._conn.executescript(
                 "BEGIN IMMEDIATE;\n"
                 + CREATE_TABLES
+                + "\nINSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');"
                 + "\nINSERT OR REPLACE INTO meta (key, value) "
                 + f"VALUES ('schema_version', '{int(SCHEMA_VERSION)}');\nCOMMIT;"
             )
         except BaseException:
             self._conn.rollback()
             raise
+        self._narrow_fts_update_trigger()
 
     def _narrow_fts_update_trigger(self) -> None:
         """Re-index full text only when text changes.
@@ -1813,10 +1820,14 @@ class Store:
             return None
         # A read writes at most once per interval: every read used to take
         # the write lock (and hooks wait only 0.25 s for it).
-        now = _now()
-        if (row["last_accessed"] or "") < _minutes_ago(_ACCESS_WRITE_MINUTES):
+        cutoff = _minutes_ago(_ACCESS_WRITE_MINUTES)
+        if (row["last_accessed"] or "") < cutoff:
+            # The cutoff is rechecked in the write, so concurrent readers
+            # record one access, not one each.
             self.conn.execute(
-                "UPDATE nodes SET last_accessed = ? WHERE id = ?", (now, node_id))
+                "UPDATE nodes SET last_accessed = ? WHERE id = ? "
+                "AND (last_accessed IS NULL OR last_accessed < ?)",
+                (_now(), node_id, cutoff))
             self.conn.commit()
         return self._row_to_dict(row)
 
