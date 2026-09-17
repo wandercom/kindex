@@ -4,6 +4,28 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-09-17
+
+### Added
+- Schema v14: `suggestions.identity_kind` is added, with its node-id backfill, to
+  stores that were already at v12 or v13 when the column was introduced;
+  `kin doctor` no longer reports drift that `--fix` cannot repair.
+- A supervisor hook refused for a non-worktree scope leaves a `refused` health
+  receipt, so `missing_hooks` stops firing on deliberate non-repo sessions, and
+  session summaries show `hook_state`.
+
+### Fixed
+- The pre-commit version sync counts MCP tools registered through the `_tool`
+  guard, no longer fails half way on a zero count, and syncs every release
+  surface from `pyproject.toml`.
+
+### Notes
+- Every store takes its usual pre-migration snapshot on first open with this
+  version; restart long-lived `kin-mcp` servers after upgrading, since an older
+  build refuses a migrated store.
+- 0.39.0 was tagged but never published (its publish workflow failed on release
+  metadata); 0.39.1 supersedes it.
+
 ## [0.38.0] - 2026-09-13
 
 ### Added
