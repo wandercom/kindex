@@ -452,15 +452,15 @@ def _node_for_write_or_exit(store, ref: str):
     try:
         return store.resolve_node_for_write(ref)
     except AmbiguousTitleError as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(f"Error: title_collision: {error}", file=sys.stderr)
         store.close()
         sys.exit(1)
 
 
 def _resolve_cli_node(store, identity: str) -> dict:
-    """The node a mutating command means (AmbiguousTitleError, a ValueError,
-    when a title names more than one)."""
-    node = store.resolve_node_for_write(identity)
+    """The node a mutating command means; a title that names more than one
+    node is refused with exit 1."""
+    node = _node_for_write_or_exit(store, identity)
     if node is None:
         raise ValueError(f"Node not found: {identity}")
     return node
@@ -4482,7 +4482,7 @@ def cmd_coord(args):
             store.close()
             return
         target = " ".join(words)
-        node = store.get_node(target) or store.get_node_by_title(target)
+        node = _node_for_write_or_exit(store, target)
         try:
             resources = attach_resource(store, ref, node["id"] if node else target)
             print(f"Attached. Resources: {', '.join(resources)}")

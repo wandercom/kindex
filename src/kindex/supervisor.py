@@ -216,34 +216,38 @@ def _allowance_notice(store, config, conversation, *, deliver=True):
         return "", {"state": "unavailable", "reason": "review_accounting_unavailable"}
 
 
-def record_hook_receipt(scope: dict, launch_path=None, **details) -> None:
-    """The hook ran: a receipt under the repository scope, and under the
-    directory the session was launched from when that differs.
+def record_hook_receipt(scope: dict, launch_paths=(), **details) -> None:
+    """The hook ran: a receipt under the repository scope, and under each
+    directory the session was launched from (as the host reported it) when
+    that differs.
 
     Native activity is observed under the transcript's own cwd, while hook
     scopes are normalized to the Git toplevel; a session started in a
     subdirectory otherwise looked like one whose hooks never fired.
     """
     record_health(scope, "hook", source="hook", **details)
-    if not launch_path:
-        return
-    try:
-        launched = str(Path(launch_path).resolve())
-    except (OSError, TypeError, ValueError):
-        return
-    if launched != scope.get("project_path"):
-        record_health({**scope, "project_path": launched}, "hook", source="hook", **details)
+    recorded = {scope.get("project_path")}
+    for launch_path in launch_paths or ():
+        if not launch_path:
+            continue
+        try:
+            launched = str(Path(launch_path).resolve())
+        except (OSError, TypeError, ValueError):
+            continue
+        if launched not in recorded:
+            recorded.add(launched)
+            record_health({**scope, "project_path": launched}, "hook", source="hook", **details)
 
 
 def supervisor_tick(store, config, scope: dict, *, text: str, goal=None, initial_goal=None,
                     event_id=None, transcript_path=None, deliver: bool = True,
-                    text_is_goal: bool = True, launch_path=None) -> dict:
+                    text_is_goal: bool = True, launch_paths=()) -> dict:
     if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
         return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "review_worker"}}
     from .sim import (enqueue_sim_review, pop_pending_sim_injection, format_sim_injection,
                       sim_effective_enabled, spawn_background_drain)
     conversation = session_key(scope)
-    record_hook_receipt(scope, launch_path)
+    record_hook_receipt(scope, launch_paths)
     diagnostics = {"data_dir": str(config.data_path), "db_path": str(store.db_path),
                    "session_id": scope["session_id"], "agent": scope.get("agent", "")}
     if not sim_effective_enabled(store, config):
@@ -329,6 +333,10 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
     import sqlite3
     from .agent_adapters import hook_project_path
     cursor_event = str(payload.get("hook_event_name") or "") if adapter == "cursor" else ""
+    # Where the host says the session runs, before any workspace choice
+    # below: native activity is recorded there.
+    launch_paths = [value for value in (project_path, payload.get("cwd"), payload.get("project_path"))
+                    if isinstance(value, str) and value and os.path.isabs(value)]
     deliver = True
     if adapter == "cursor":
         # A tool's cwd may differ from the native workspace. User hook processes
@@ -360,6 +368,7 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
             return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "use_receipt"}}
     launch_path = str(Path(project_path or payload.get("cwd") or
                            payload.get("project_path") or os.getcwd()).resolve())
+    launch_paths.append(launch_path)
     preliminary = config or trusted_supervisor_config(root, str(project_data_path(root)))
     if not preliminary.sim.enabled:
         enabled = False
@@ -376,7 +385,7 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
         if not enabled:
             if sid:
                 disabled_scope = {"project_path": str(root), "agent": adapter, "session_id": sid}
-                record_hook_receipt(disabled_scope, launch_path, state="disabled")
+                record_hook_receipt(disabled_scope, launch_paths, state="disabled")
                 record_health(disabled_scope, "review", source="hook", state="disabled", reason="disabled", event_id="disabled")
             return {"ok": True, "context": "", "supervisor": {"state": "disabled"}}
     scope = project_scope({"session_id": sid, "agent": adapter, "project_path": launch_path})
@@ -396,7 +405,7 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
                                event_id=event_id, deliver=deliver,
                                text_is_goal=adapter != "cursor" or cursor_event == "beforeSubmitPrompt",
                                transcript_path=payload.get("transcript_path") or payload.get("transcriptPath"),
-                               launch_path=launch_path)
+                               launch_paths=launch_paths)
     finally:
         store.close()
 

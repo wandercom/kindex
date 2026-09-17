@@ -412,7 +412,7 @@ def dispatch(request: dict) -> dict:
                 return supervisor_tick(store, store.config, scope, text=str(request.get("text", "")),
                                        goal=request.get("goal"), initial_goal=request.get("initial_goal"), event_id=request.get("event_id"),
                                        transcript_path=request.get("transcript_path"), deliver=request.get("deliver") is not False,
-                                       launch_path=(request.get("scope") or {}).get("project_path"))
+                                       launch_paths=[(request.get("scope") or {}).get("project_path")])
             if action == "task":
                 result = redact(execute_task(store, request["operation"], request.get("args", {}), scope,
                                             source_tool=request.get("source_tool", "kindex.task"), expected_owner=request.get("expected_owner")))

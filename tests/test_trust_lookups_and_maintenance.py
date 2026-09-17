@@ -165,3 +165,37 @@ def test_the_stale_reindex_reaches_past_its_first_page(store, monkeypatch):
     assert [node["id"] for node in selected] == [f"n{n:02d}" for n in range(10, 20)]
     plain = vectors.select_reindex_nodes(store, status="active", limit=5)
     assert [node["id"] for node in plain] == [f"n{n:02d}" for n in range(5)]
+
+
+@pytest.mark.parametrize("command", [
+    ["verify", TITLE, "--by", "me", "--method", "manual-review"],
+    ["invalidate", TITLE, "--by", "me", "--code", "superseded"],
+    ["coord", "attach", "room", TITLE],
+])
+def test_cli_writes_refuse_an_ambiguous_title_with_exit_1(store, tmp_path, command):
+    import os
+    import sys
+    from kindex.coordination import create_conversation
+    twins(store)
+    create_conversation(store, "room")
+    store.close()
+    env = dict(os.environ, HOME=str(tmp_path / "home"))
+    result = subprocess.run(
+        [sys.executable, "-m", "kindex.cli", *command, "--data-dir", str(tmp_path / "kindex")],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "title_collision" in result.stderr
+
+
+def test_a_cursor_subdirectory_session_has_its_hook_receipt(tmp_path, monkeypatch):
+    from kindex import supervisor
+
+    recorded = []
+    monkeypatch.setattr(supervisor, "record_health",
+                        lambda scope, kind, **details: recorded.append((scope["project_path"], kind)))
+    repo = tmp_path / "repo"
+    subdir = repo / "pkg"
+    subdir.mkdir(parents=True)
+    scope = {"project_path": str(repo), "agent": "cursor", "session_id": "s"}
+    supervisor.record_hook_receipt(scope, [str(subdir), str(subdir), None, str(repo)])
+    assert recorded == [(str(repo), "hook"), (str(subdir.resolve()), "hook")]
