@@ -23,7 +23,10 @@ TOOLS = {"search", "context", "ask", "show", "add", "edit", "learn", "link",
          "task_add", "task_list", "task_done", "task_update", "task_claim",
          "task_release", "task_get", "task_execute", "tag_start", "tag_resume",
          "tag_update", "status", "list_nodes", "suggest", "graph_stats",
-         "watch_add", "watch_resolve", "coord_read", "coord_post"}
+         "watch_add", "watch_resolve", "coord_read", "coord_post",
+         "supersede", "verify", "invalidate", "changelog",
+         # kindex-modern plugin tools (mcp__kindex-modern__memory / __task).
+         "memory", "task"}
 DEFAULTS = {"enabled": False, "mail_enabled": False, "desktop_enabled": True,
             "desktop_command": "/usr/bin/osascript", "active_seconds": 1200, "hook_grace_seconds": 300,
             "use_grace_seconds": 1800, "queue_grace_seconds": 900,

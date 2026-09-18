@@ -9,6 +9,7 @@ from itertools import islice
 import time
 import os
 from pathlib import Path
+import re
 import sqlite3
 
 MAX_FILES = 64
@@ -182,6 +183,54 @@ def _tool_name(raw):
     return None
 
 
+# `kin <subcommand>` at a command position: line start, after ; & | ( or $(,
+# optionally behind VAR=value assignments or a path to the executable.
+_KIN_CLI = re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?kin[ \t]+([a-z][a-z-]*)(?:[ \t]+([a-z][a-z-]*))?")
+_CLI_ALIASES = {"list": "list_nodes", "tag segment": "tag_update", "tag end": "tag_update"}
+_SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell"}
+
+
+def _cli_uses(command):
+    """Kindex tools invoked through the `kin` CLI in one shell command string.
+
+    CLAUDE.md tells agents to capture with `kin add`, so a shell call is Kindex
+    use as much as an MCP call is. The command is read here and never stored.
+    """
+    from .supervisor_health import TOOLS
+    found = []
+    for match in islice(_KIN_CLI.finditer(command[:WINDOW]), 8):
+        sub, action = match.groups()
+        pair = sub + " " + action if action else None
+        name = _CLI_ALIASES.get(pair) or (sub + "_" + action if action and sub + "_" + action in TOOLS else None) \
+            or _CLI_ALIASES.get(sub, sub)
+        if name in TOOLS:
+            found.append(name)
+    return found
+
+
+def _call_uses(call):
+    """Kindex tool names one native tool call used: MCP by name, CLI by command."""
+    name = _tool_name(call.get("name"))
+    if name:
+        return [name]
+    if call.get("name") not in _SHELL_TOOLS:
+        return []
+    args = call.get("input")
+    if args is None and isinstance(call.get("arguments"), str):
+        try:
+            args = json.loads(call["arguments"])
+        except ValueError:
+            return []
+    if not isinstance(args, dict):
+        return []
+    command = args.get("command", args.get("cmd"))
+    if isinstance(command, list):
+        parts = [part for part in command if isinstance(part, str)]
+        # ["kin", "add", ...] joins to a command; ["bash", "-lc", "kin add"] holds one.
+        return _cli_uses(" ".join(parts)) or [name for part in parts for name in _cli_uses(part)]
+    return _cli_uses(command) if isinstance(command, str) else []
+
+
 def _jsonl(agent, path, now, projects):
     from .supervisor_health import _time, is_reviewer_session, record
     head, tail = list(_rows(path, head=True)), list(_rows(path))
@@ -237,10 +286,11 @@ def _jsonl(agent, path, now, projects):
         for call in calls:
             if not isinstance(call, dict):
                 continue
-            name = _tool_name(call.get("name"))
-            if name:
+            for index, name in enumerate(_call_uses(call)):
+                ident = str(call.get("id") or call.get("call_id") or name)
                 record(scope, "use", {"at": at, "tool": name, "outcome": "observed", "source": "native",
-                                      "initiator": "agent", "event_id": "native:" + key + ":" + str(call.get("id") or call.get("call_id") or name)})
+                                      "initiator": "agent",
+                                      "event_id": "native:" + key + ":" + ident + (":" + str(index) if index else "")})
     return True if observed else None
 
 

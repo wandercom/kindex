@@ -4,6 +4,23 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- Per-prompt Kindex context reaches the model again on Claude Code 2.1.274.
+  The modern adapter's `prompt.submit` hook attached retrieval and supervisor
+  context after `next()` resolved, which 2.1.274 discards ("not attached, the
+  prompt had entered"). It now computes the context first and passes it down
+  with the prompt. The kin side still redacts the query and lookback, and
+  session state keeps only the text that entered after inner redaction.
+- Supervisor health no longer reports `missing_use` for sessions that use
+  Kindex through the CLI. Native observation now counts `kin <subcommand>` run
+  through Bash or Codex's shell tools, the kindex-modern `memory` and `task`
+  tools, and `supersede`, `verify`, `invalidate` and `changelog`. Command text
+  is classified in memory and never stored.
+
+### Changed
+- The modern Claude adapter is qualified on Claude Code 2.1.274; `kin
+  setup-hooks --mode modern` now requires that version.
+
 ## [0.43.2] - 2026-09-17
 
 ### Added

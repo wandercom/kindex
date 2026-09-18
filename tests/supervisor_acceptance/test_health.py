@@ -244,6 +244,28 @@ def test_automatic_retrieval_does_not_mask_missing_agent_use(b):
     assert session(result)["use_evidence"] == "observed"
 
 
+@pytest.mark.parametrize("call,counts", [
+    ({"name": "Bash", "input": {"command": "cd /tmp && kin add 'E2b result' --tags x"}}, True),
+    ({"name": "mcp__kindex-modern__memory", "input": {}}, True),
+    ({"name": "Bash", "input": {"command": "grep -rn 'kin add' src; ls -la"}}, False),
+])
+def test_native_cli_and_plugin_use_count_as_agent_use(b, call, counts):
+    """H2 missing use. Mutation: only MCP names from the kindex server count."""
+    b.record("activity", -2000, active=True, source="native")
+    b.record("hook", -1990)
+    path = b.home / ".claude/projects" / str(b.project).replace("/", "-") / "independent-session.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"type": "assistant", "uuid": "native-call-1",
+                                "sessionId": b.scope["session_id"], "cwd": str(b.project),
+                                "timestamp": b.iso(-2),
+                                "message": {"role": "assistant", "content": [
+                                    {"type": "tool_use", "id": "toolu_native_1", **call}]}}) + "\n")
+    result = b.check()
+    assert bool(issues(result, "missing_use")) is not counts
+    assert session(result)["use_evidence"] == ("observed" if counts else "not_observed")
+    assert "E2b result" not in json.dumps(result)
+
+
 def test_queued_review_grace_then_delivery_resolves(b):
     """H2 prolonged queues/H4 grace. Mutation: queue never ages or delivery ignored."""
     b.seed_active()
