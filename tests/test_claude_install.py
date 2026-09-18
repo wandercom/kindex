@@ -27,7 +27,7 @@ def test_modern_switch_removes_only_owned_handlers_and_legacy_rolls_back(tmp_pat
     import kindex.setup as setup
     monkeypatch.setattr(setup, "_find_kin_path", lambda: "/usr/bin/kin")
     monkeypatch.setattr(installer.shutil, "which", lambda name: "/usr/bin/" + name)
-    monkeypatch.setattr(installer.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="2.1.263 (Claude Code)\n"))
+    monkeypatch.setattr(installer.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="2.1.274 (Claude Code)\n"))
     cfg = Config(claude_dir=str(tmp_path / "claude"))
     cfg.claude_path.mkdir()
     foreign = {"type": "command", "command": "foreign-policy-check"}

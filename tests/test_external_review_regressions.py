@@ -80,6 +80,7 @@ registerHooks({
 
 const callbacks = new Map();
 const calls = [];
+const downstream = [];
 let phase = 'registration';
 let currentSession = fixture.firstSession;
 const on = (name, callback) => {
@@ -114,7 +115,10 @@ async function fire(name, event) {
   if (!handlers || handlers.length === 0) throw new Error('Public hook not registered: ' + name);
   let current = event;
   for (const handler of handlers) {
-    const result = await handler($, current, async (nextEvent = current) => nextEvent);
+    const result = await handler($, current, async (nextEvent = current) => {
+      if (name === 'prompt.submit') downstream.push(nextEvent);
+      return nextEvent;
+    });
     if (result !== undefined) current = result;
   }
   return current;
@@ -135,7 +139,7 @@ phase = 'second-prompt';
 await fire('prompt.submit', {text: fixture.newText});
 phase = 'second-context';
 await fire('prompt.context', {blocks: []});
-process.stdout.write(JSON.stringify({calls}));
+process.stdout.write(JSON.stringify({calls, downstream}));
 '''
 
 
@@ -190,3 +194,8 @@ def test_modern_plugin_second_session_does_not_inherit_first_goal_or_work(tmp_pa
         assert new_work in request["text"]
         assert old_goal not in json.dumps(request)
         assert old_work not in json.dumps(request)
+    # Context must ride down with the prompt: Claude 2.1.274 drops context a
+    # hook puts on the result after next() resolves.
+    downstream = json.loads(result.stdout)["downstream"]
+    assert len(downstream) == 2
+    assert all("synthetic" in (event.get("context") or []) for event in downstream)

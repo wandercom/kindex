@@ -5,7 +5,7 @@ host-wide redaction for local coding agents. **Signet** is the separate product
 for models acting outside the local coding environment; it is not a third
 installation dependency for this integration.
 
-The optional function-hook adapter is qualified against Claude Code **2.1.263**.
+The optional function-hook adapter is qualified against Claude Code **2.1.274**.
 The host interface is early access, not Kindex's stable core API. The installer
 sets `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in Claude's user settings. A normal stable Homebrew cask
 may lag the `claude-code@latest` channel.

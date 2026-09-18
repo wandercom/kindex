@@ -25,7 +25,7 @@ Docs: [kindex.tools](https://kindex.tools/) is the canonical public site, served
 Development preview: [Claude function hooks and signet-eval coexistence](docs/claude-function-hooks.md)
 adds repo-local durable tasks, secret minimization at Kindex-owned boundaries,
 and separately selectable modern/legacy adapters. The default remains compatible
-legacy hooks. Function hooks are qualified on Claude Code 2.1.263; this is not a
+legacy hooks. Function hooks are qualified on Claude Code 2.1.274; this is not a
 promise that all Claude logs can be redacted or a published 1.0 release.
 
 Pick whichever installer you already use. They all install the same `kin` and `kin-mcp` binaries.

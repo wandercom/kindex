@@ -29,7 +29,7 @@ def _atomic_json(path: Path, value: dict) -> None:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
-QUALIFIED_CLAUDE_VERSION = "2.1.263"
+QUALIFIED_CLAUDE_VERSION = "2.1.274"
 PLUGIN_NAME = "kindex-modern"
 
 
@@ -154,7 +154,7 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
         unresolved = unresolved_handlers(data)
         if unresolved:
             raise ValueError("Unrecognized Kindex wrappers remain; inspect and explicitly retire with --retire-command: " + json.dumps(unresolved))
-        # Verified on 2.1.263: persistent settings env activates modules even
+        # Verified on 2.1.263 and 2.1.274: persistent settings env activates modules even
         # when the launching shell does not export the early-access flag.
         data.setdefault("env", {})["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] = "1"
         for name in ("kindex@kindex", "kindex@skills-dir"):
@@ -162,7 +162,7 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
                 enabled[name] = False
         claude = shutil.which("claude")
         if not claude:
-            raise ValueError("Modern adapter requires Claude Code 2.1.263 on PATH")
+            raise ValueError(f"Modern adapter requires Claude Code {QUALIFIED_CLAUDE_VERSION} on PATH")
         version = subprocess.run([claude, "--version"], capture_output=True, text=True,
                                  timeout=10, check=True).stdout.split()[0]
         if version != QUALIFIED_CLAUDE_VERSION:

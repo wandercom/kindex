@@ -1,4 +1,4 @@
-/** Claude Code 2.1.263 early-access contract. No legacy shell hooks or host-wide
+/** Claude Code 2.1.274 early-access contract. No legacy shell hooks or host-wide
  * redaction here: signet-eval owns the latter; Kindex protects its own sinks. */
 import type { Register, EngineInterface } from "claude-code";
 import runtime from "./runtime";
@@ -81,6 +81,38 @@ function degraded($: EngineInterface) {
   $.ui.status("Kindex unavailable — durable task writes blocked; run kin integration-doctor");
 }
 
+// Context rides down with the prompt: the host drops context put on the
+// result after next() resolves ("not attached, the prompt had entered").
+// The kin side redacts the query and lookback before use; session state
+// keeps only the text that actually entered, after inner redaction.
+async function promptContext($: EngineInterface, state: SessionState, text: string): Promise<string[]> {
+  let supervision: RpcReply;
+  try {
+    supervision = await rpc($, state, {action: "supervisor", text: (state.recentWork + "\nUSER: " + text).slice(-12000),
+      initial_goal: state.originalGoal || text.slice(0, 2000)});
+  } catch {
+    supervision = {ok: false, context: "Kindex supervisor unavailable; no fresh lookback completed."};
+  }
+  if (!state.current) return [];
+  const advisory = supervision.context ? [supervision.context] : [];
+  try {
+    const context = await rpc($, state, {action: "context", query: text});
+    if (!state.current) return [];
+    if (!context.ok || !context.context) throw new Error("Unavailable");
+    if (context.policy_owner !== state.expectedOwner) {
+      state.qualified = false;
+      $.ui.status("Kindex policy owner changed — reload plugins to explicitly renegotiate");
+    } else {
+      $.ui.status(`Kindex .kin/ · ${context.open_tasks}${context.tasks_truncated ? "+" : ""} open · ${context.retrieved} relevant · supervisor: ${isObject(supervision.supervisor) ? supervision.supervisor.state : "failed"} · policy: ${state.expectedOwner}`);
+    }
+    return [context.context, ...advisory];
+  } catch {
+    if (!state.current) return [];
+    degraded($);
+    return [...advisory, "Kindex context retrieval failed this turn. Previously confirmed task writes remain durable; do not claim fresh retrieval succeeded."];
+  }
+}
+
 export const register: Register = (on) => {
   let activeState = newSession();
 
@@ -128,35 +160,13 @@ export const register: Register = (on) => {
 
   on("prompt.submit", async ($, e, next) => {
     const state = activeState;
-    // Ask inner redaction middleware first. Never persist raw prompt text here.
-    const r = await next(e);
-    if (!state.current || r.drop) return r;
+    if (!state.current) return next(e);
+    const context = await promptContext($, state, e.text);
+    const r = await next(context.length ? {...e, context: [...(e.context ?? []), ...context]} : e);
+    if (!state.current || r.drop !== undefined) return r;
     state.originalGoal ||= r.text.slice(0, 2000);
     state.recentWork = (state.recentWork + "\nUSER: " + r.text).slice(-12000);
-    let supervision: RpcReply;
-    try {
-      supervision = await rpc($, state, {action: "supervisor", text: state.recentWork, initial_goal: state.originalGoal});
-    } catch {
-      supervision = {ok: false, context: "Kindex supervisor unavailable; no fresh lookback completed."};
-    }
-    if (!state.current) return r;
-    const advisory = supervision.context ? [supervision.context] : [];
-    try {
-      const context = await rpc($, state, {action: "context", query: r.text});
-      if (!state.current) return r;
-      if (!context.ok || !context.context) throw new Error("Unavailable");
-      if (context.policy_owner !== state.expectedOwner) {
-        state.qualified = false;
-        $.ui.status("Kindex policy owner changed — reload plugins to explicitly renegotiate");
-      } else {
-        $.ui.status(`Kindex .kin/ · ${context.open_tasks}${context.tasks_truncated ? "+" : ""} open · ${context.retrieved} relevant · supervisor: ${isObject(supervision.supervisor) ? supervision.supervisor.state : "failed"} · policy: ${state.expectedOwner}`);
-      }
-      return {...r, context: [...(r.context ?? []), context.context, ...advisory]};
-    } catch {
-      if (!state.current) return r;
-      degraded($);
-      return {...r, context: [...(r.context ?? []), ...advisory, "Kindex context retrieval failed this turn. Previously confirmed task writes remain durable; do not claim fresh retrieval succeeded."]};
-    }
+    return r;
   });
 
   on("tool.describe", async ($, e, next) => {
