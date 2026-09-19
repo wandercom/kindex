@@ -2917,8 +2917,8 @@ class Store:
             limit=_CAPTURE_CONTENT_LIMIT,
             content=True,
         )
-        if node_type not in ALL_NODE_TYPES:
-            raise ValueError(f"node_type is not allowed: {node_type}")
+        if not isinstance(node_type, str) or node_type not in ALL_NODE_TYPES:
+            raise ValueError("node_type is not allowed")
         if domains is not None and not isinstance(domains, list):
             raise ValueError("domains must be a list")
         clean_domains: list[str] = []
@@ -2944,7 +2944,10 @@ class Store:
         if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
             raise ValueError("ttl_days must be a positive integer")
         created = normalize_rfc3339(now or _utc_now(), field="now")
-        expires_dt = parse_rfc3339(created, field="now") + timedelta(days=days)
+        try:
+            expires_dt = parse_rfc3339(created, field="now") + timedelta(days=days)
+        except OverflowError as exc:
+            raise ValueError("ttl_days is too large") from exc
         expires = normalize_rfc3339(expires_dt, field="expires_at")
         payload = {
             "title": clean_title,

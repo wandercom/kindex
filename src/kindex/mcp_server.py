@@ -75,7 +75,8 @@ mcp = FastMCP(
         "accept append/expires only)\n"
         "- `supersede`: replace an additive node when its content must actually change — "
         "creates a fresh node linked via a supersedes edge, history preserved\n"
-        "- `candidate_list`/`candidate_show`: inspect quarantined automatic captures; "
+        "- `candidate_create`: stage a quarantined automatic capture; "
+        "`candidate_list`/`candidate_show`: inspect quarantined automatic captures; "
         "use `candidate_accept` or `candidate_reject` only after explicit review\n"
         "- `verify`/`invalidate`: assert verification and valid-time state; use "
         "`trusted_only=True` on search/context for admission-controlled recall\n"
@@ -887,6 +888,49 @@ def context(
             fence_stats.get("trusted_omissions")
         )
     return result
+
+
+@_tool()
+def candidate_create(
+    title: str,
+    content: str,
+    source_digest: str,
+    node_type: str = "concept",
+    domains: list[str] | None = None,
+    connections: list[dict] | None = None,
+    ttl_days: int | None = None,
+) -> Any:
+    """Stage one bounded automatic capture for review without promoting knowledge.
+
+    Args:
+        title: Candidate title (at most 500 characters).
+        content: Candidate content (at most 4,000 characters).
+        source_digest: SHA-256 digest of the source material.
+        node_type: Allowed Kindex node type; defaults to concept.
+        domains: Optional domain labels.
+        connections: Optional proposed edges.
+        ttl_days: Optional positive candidate lifetime in days.
+    """
+    store, _ = _get_store()
+    try:
+        candidate_id = store.add_capture_candidate(
+            title=title,
+            content=content,
+            source_digest=source_digest,
+            node_type=node_type,
+            domains=domains,
+            connections=connections,
+            ttl_days=ttl_days,
+            now=operation_now(),
+        )
+        candidate = store.get_capture_candidate(candidate_id)
+        assert candidate is not None
+        return {
+            key: candidate[key]
+            for key in ("id", "status", "created_at", "expires_at", "payload_digest")
+        }
+    except ValueError as exc:
+        return _state_error(exc)
 
 
 @_tool()

@@ -305,6 +305,25 @@ def test_p3_1_p4_1_mcp_lifecycle_returns_same_machine_fields(store, monkeypatch)
     monkeypatch.setattr(mcp_mod, "_store", store)
     monkeypatch.setattr(mcp_mod, "_config", store.config)
     monkeypatch.setattr(mcp_mod, "operation_now", lambda: NOW)
+    staged = _structured(mcp_mod.candidate_create(
+        title="MCP staged subject", content="quarantined MCP payload",
+        source_digest=SOURCE,
+        domains=["surface"],
+    ))
+    assert set(staged) == {"id", "status", "created_at", "expires_at", "payload_digest"}
+    assert staged["status"] == "pending"
+    assert store.get_capture_candidate(staged["id"])["content"] == "quarantined MCP payload"
+    invalid_type = mcp_mod.candidate_create(
+        title="MCP hostile subject", content="quarantined MCP payload",
+        source_digest=SOURCE, node_type="concept\x1b]52;c;forged\x07",
+    )
+    assert _machine_error(str(invalid_type)) == "invalid_input"
+    assert "\x1b" not in str(invalid_type)
+    too_large_ttl = mcp_mod.candidate_create(
+        title="MCP ttl subject", content="quarantined MCP payload",
+        source_digest=SOURCE, ttl_days=999_999_999,
+    )
+    assert _machine_error(str(too_large_ttl)) == "invalid_input"
     accepted_id = _add(store, "MCP accept subject")
     rejected_id = _add(store, "MCP reject subject")
     expired_id = _add(store, "MCP expiry subject", ttl_days=1)

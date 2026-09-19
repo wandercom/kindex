@@ -400,7 +400,7 @@ def _read_capture_candidate_payload() -> dict:
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_nonstandard_constant,
         )
-    except (json.JSONDecodeError, ValueError) as exc:
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise ValueError("candidate JSON must be one valid object") from exc
     if not isinstance(payload, dict):
         raise ValueError("candidate JSON must be an object")

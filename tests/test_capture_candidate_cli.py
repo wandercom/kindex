@@ -73,6 +73,27 @@ def test_candidate_create_rejects_unsupported_or_oversize_stdin_without_writing(
         store.close()
 
 
+def test_candidate_create_rejects_hostile_metadata_and_deep_json_without_traceback(tmp_path):
+    data_dir = tmp_path / "selected-store"
+    hostile_type = "concept\x1b]52;c;forged\x07\n"
+    deeply_nested = (
+        b'{"title":"x","content":"x","source_digest":"' + SOURCE_DIGEST.encode()
+        + b'","domains":' + b"[" * 1_000 + b"]" * 1_000 + b"}"
+    )
+    for payload in (_payload(node_type=hostile_type), deeply_nested,
+                    _payload(ttl_days=999_999_999)):
+        result = _run(_command("--data-dir", str(data_dir)), payload, cwd=tmp_path)
+        assert result.returncode == 2
+        assert b"\x1b" not in result.stderr
+        assert b"Traceback" not in result.stderr
+
+    store = Store(Config(data_dir=str(data_dir)))
+    try:
+        assert store.list_capture_candidates(limit=10) == []
+    finally:
+        store.close()
+
+
 def test_candidate_create_routes_to_explicit_project_and_refuses_ambiguous_implicit_scope(tmp_path):
     home = tmp_path / "home"
     project = tmp_path / "project"
