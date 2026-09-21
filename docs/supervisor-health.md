@@ -104,16 +104,13 @@ The generated advisory is excluded from the user's goal and subsequent work
 history collected for review.
 
 Project operations select the same existing durable store whether it is at
-`.kin/local/kindex.db` or `.kin/local/kindex/kindex.db`. Candidates, reminders, and
-other durable work count as populated data. If both stores contain durable work,
-Kindex reports a conflict and preserves both. Explicit personal/company profiles
-remain separate; this is not a global merge of memory scopes.
-
-An implicit default cannot silently hide a populated home graph when a project
-store appears. Kindex reports the ambiguous scope and preserves both stores.
-Use `--project-path /path/to/repo` for project work or `--data-dir ~/.kindex`
-for the home graph. Explicit configuration and named profiles retain their
-selected scope.
+`.kin/local/kindex.db` or `.kin/local/kindex/kindex.db`. Candidates, reminders,
+and other durable work count as populated data. The unconfigured legacy default
+remains the home graph even when a repository-local graph is populated; Kindex
+does not merge or move either store. Use `KIN_PROJECT` or
+`--project-path /path/to/repo` to explicitly select the repository graph.
+Explicit personal/company profiles and `--data-dir` remain separate and
+authoritative.
 
 ## Independently monitor operation
 
