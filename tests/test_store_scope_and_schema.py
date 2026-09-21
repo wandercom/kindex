@@ -1,7 +1,7 @@
 """The store a call opens is the one it means, and opening it stays cheap.
 
-- Any read creates an empty project store, which then made every unscoped
-  call in the repository ambiguous even though it held nothing.
+- Any read can create an empty project store, which must not redirect an
+  unconfigured client away from its legacy home store.
 - An absolute or trailing-slash spelling of ~/.kindex made --project-path
   and KIN_PROJECT no-ops.
 - `kin config set` wrote into the first ancestor .kin/config it found,
@@ -55,21 +55,20 @@ def seed(directory, *ids):
     store.close()
 
 
-def test_an_empty_project_store_does_not_make_the_repository_ambiguous(home, project):
+def test_unconfigured_resolution_uses_home_regardless_of_project_store_contents(home, project):
     seed(home / ".kindex", "home-note")
     project_store = project / ".kin" / "local" / "kindex"
     seed(project_store)  # schema only, as any read leaves it
     assert load_config().data_path.resolve() == (home / ".kindex").resolve()
 
     seed(project_store, "project-note")
-    with pytest.raises(ValueError, match="Ambiguous Kindex scope.*KIN_PROJECT"):
-        load_config()
+    assert load_config().data_path.resolve() == (home / ".kindex").resolve()
 
 
-def test_an_empty_project_store_is_used_when_home_holds_nothing(home, project):
+def test_unconfigured_resolution_uses_home_when_only_project_store_is_populated(home, project):
     project_store = project / ".kin" / "local" / "kindex"
     seed(project_store)
-    assert load_config().data_path.resolve() == project_store.resolve()
+    assert load_config().data_path.resolve() == (home / ".kindex").resolve()
 
 
 @pytest.mark.parametrize("spelling", ["{home}/.kindex", "{home}/.kindex/", "~/.kindex/"])

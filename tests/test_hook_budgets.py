@@ -218,9 +218,13 @@ def ambiguous_mcp(tmp_path, monkeypatch):
     return {"project": project, "mcp": mcp_server}
 
 
-def test_an_ambiguous_scope_says_how_to_choose(ambiguous_mcp):
+def test_unconfigured_mcp_status_uses_the_legacy_home_graph(ambiguous_mcp):
     result = ambiguous_mcp["mcp"].status()
-    assert result.startswith("Error: memory unavailable (ValueError): Ambiguous Kindex scope"), result
+    assert not result.startswith("Error: memory unavailable"), result
+    assert "Nodes:" in result
+    nodes = ambiguous_mcp["mcp"].list_nodes()
+    assert "Synthetic home-node" in nodes
+    assert "Synthetic project-node" not in nodes
 
 
 def test_task_execute_needs_no_legacy_store(ambiguous_mcp, monkeypatch):
