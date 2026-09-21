@@ -303,19 +303,17 @@ def _default_agent(agent: str = "") -> str:
 def _agent_without_legacy_store(agent: str = "") -> tuple[str, bool]:
     """Return an agent and whether the caller explicitly supplied it.
 
-    An omitted agent resolves through KIN_AGENT_ID, then the configured
-    identity when the legacy store is readable.  ``task_execute`` must keep
-    validating caller-supplied identities, while it may omit an inferred
-    identity that is incompatible with its host-scope grammar.
+    ``task_execute`` must keep validating caller-supplied identities, but an
+    omitted agent must remain absent.  In particular, deriving one from the
+    selected home config would change pre-upgrade project task ownership from
+    ``project_scope``'s stable default (``claude``) to ``current_user@host``.
+    That would duplicate operation retries and strand existing claims.
     """
     if agent and agent.strip():
         return agent.strip(), True
     if os.environ.get("KIN_AGENT_ID", "").strip():
         return os.environ["KIN_AGENT_ID"].strip(), True
-    try:
-        return _default_agent(""), False
-    except MemoryUnavailableError:
-        return "", False
+    return "", False
 
 
 def _mcp_client() -> str | None:
