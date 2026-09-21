@@ -300,18 +300,22 @@ def _default_agent(agent: str = "") -> str:
     return resolve_agent_id(_get_config())
 
 
-def _agent_without_legacy_store(agent: str = "") -> str:
-    """An explicit agent, KIN_AGENT_ID, or the configured identity when the
-    legacy store is readable; otherwise empty, and project_scope applies its
-    own default."""
+def _agent_without_legacy_store(agent: str = "") -> tuple[str, bool]:
+    """Return an agent and whether the caller explicitly supplied it.
+
+    An omitted agent resolves through KIN_AGENT_ID, then the configured
+    identity when the legacy store is readable.  ``task_execute`` must keep
+    validating caller-supplied identities, while it may omit an inferred
+    identity that is incompatible with its host-scope grammar.
+    """
     if agent and agent.strip():
-        return agent.strip()
+        return agent.strip(), True
     if os.environ.get("KIN_AGENT_ID", "").strip():
-        return os.environ["KIN_AGENT_ID"].strip()
+        return os.environ["KIN_AGENT_ID"].strip(), True
     try:
-        return _default_agent("")
+        return _default_agent(""), False
     except MemoryUnavailableError:
-        return ""
+        return "", False
 
 
 def _mcp_client() -> str | None:
@@ -2476,8 +2480,14 @@ def task_execute(operation: str, arguments: dict, project_path: str,
         "include_global": include_global,
     }
     try:
-        resolved_agent = _agent_without_legacy_store(agent)
-        if resolved_agent:
+        resolved_agent, explicit_agent = _agent_without_legacy_store(agent)
+        # ``project_scope`` validates every supplied agent.  Preserve that
+        # refusal for caller input, but do not turn a local display name such
+        # as "Jane Doe" into a new failure for an omitted MCP parameter.
+        # Leaving an invalid inferred identity absent retains project_scope's
+        # established default agent ("claude").
+        valid_inferred_agent = bool(re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,200}", resolved_agent))
+        if resolved_agent and (explicit_agent or valid_inferred_agent):
             requested["agent"] = resolved_agent
         scope = project_scope(requested)
         store = open_project_store(scope)

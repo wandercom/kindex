@@ -235,6 +235,33 @@ def test_task_execute_needs_no_legacy_store(ambiguous_mcp, monkeypatch):
     assert result.get("ok") is True, result
 
 
+@pytest.mark.parametrize("inferred_agent", ["Jane Doe@host", "agent[blue]@host", "μser@host"])
+def test_task_execute_uses_project_default_for_invalid_inferred_agent(
+        ambiguous_mcp, monkeypatch, inferred_agent):
+    import kindex.integrations as integrations
+
+    observed = {}
+    monkeypatch.setattr(ambiguous_mcp["mcp"], "_default_agent", lambda agent: inferred_agent)
+    monkeypatch.setattr(
+        integrations, "execute_task",
+        lambda store, operation, arguments, scope, **kwargs: observed.update(scope) or {"ok": True},
+    )
+
+    result = ambiguous_mcp["mcp"].task_execute(
+        "list", {}, project_path=str(ambiguous_mcp["project"]), session_id="s1", agent="")
+
+    assert result == {"ok": True}
+    assert observed["agent"] == "claude"
+
+
+def test_task_execute_refuses_invalid_explicit_agent(ambiguous_mcp):
+    result = ambiguous_mcp["mcp"].task_execute(
+        "list", {}, project_path=str(ambiguous_mcp["project"]), session_id="s1", agent="Jane Doe")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "invalid_scope"
+
+
 def test_a_finished_transcript_is_read_past_the_live_byte_bound(tmp_path):
     from kindex.ingest import _extract_session_text
     transcript = tmp_path / "t.jsonl"
