@@ -361,6 +361,66 @@ def _candidate_show_payload(store, candidate_id: str) -> dict:
     return candidate
 
 
+_CAPTURE_CANDIDATE_STDIN_MAX_BYTES = 32 * 1024
+_CAPTURE_CANDIDATE_FIELDS = frozenset({
+    "title", "content", "node_type", "domains", "connections",
+    "source_digest", "ttl_days",
+})
+_CAPTURE_CANDIDATE_REQUIRED_FIELDS = frozenset({
+    "title", "content", "source_digest",
+})
+
+
+def _read_capture_candidate_payload() -> dict:
+    """Read one bounded, strict JSON candidate envelope from standard input."""
+    payload_bytes = sys.stdin.buffer.read(_CAPTURE_CANDIDATE_STDIN_MAX_BYTES + 1)
+    if len(payload_bytes) > _CAPTURE_CANDIDATE_STDIN_MAX_BYTES:
+        raise ValueError(
+            "candidate JSON exceeds the 32768-byte stdin limit"
+        )
+    try:
+        payload_text = payload_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("candidate JSON must be UTF-8") from exc
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("candidate JSON must not contain duplicate keys")
+            result[key] = value
+        return result
+
+    def reject_nonstandard_constant(_value):
+        raise ValueError("candidate JSON must not contain non-standard constants")
+
+    try:
+        payload = json.loads(
+            payload_text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonstandard_constant,
+        )
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise ValueError("candidate JSON must be one valid object") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("candidate JSON must be an object")
+    if not _CAPTURE_CANDIDATE_REQUIRED_FIELDS <= payload.keys():
+        raise ValueError("candidate JSON is missing required fields")
+    if not payload.keys() <= _CAPTURE_CANDIDATE_FIELDS:
+        raise ValueError("candidate JSON contains unsupported fields")
+    return payload
+
+
+def _capture_candidate_receipt(store, candidate_id: str) -> dict:
+    """Return a redacted creation result, never the submitted capture text."""
+    candidate = store.get_capture_candidate(candidate_id)
+    assert candidate is not None  # add_capture_candidate just committed it.
+    return {
+        key: candidate[key]
+        for key in ("id", "status", "created_at", "expires_at", "payload_digest")
+    }
+
+
 def _print_candidate_human(candidate: dict) -> None:
     print("=== BEGIN UNTRUSTED CAPTURE CANDIDATE ===")
     print(f"ID: {_neutralize_untrusted(candidate.get('id'))}")
@@ -390,7 +450,7 @@ def _print_candidate_human(candidate: dict) -> None:
 
 
 def cmd_candidate(args):
-    """Review quarantined automatic-capture candidates."""
+    """Stage or review quarantined automatic-capture candidates."""
     store = _store(args)
     action = args.candidate_action
     candidate_id = getattr(args, "candidate_id", None)
@@ -398,7 +458,26 @@ def cmd_candidate(args):
         operation_now() if action in ("accept", "reject", "prune") else None
     )
     try:
-        if action == "list":
+        if action == "create":
+            if candidate_id:
+                raise ValueError("candidate ID is not accepted for create")
+            payload = _read_capture_candidate_payload()
+            candidate_id = store.add_capture_candidate(
+                title=payload["title"],
+                content=payload["content"],
+                node_type=payload.get("node_type", "concept"),
+                domains=payload.get("domains"),
+                connections=payload.get("connections"),
+                source_digest=payload["source_digest"],
+                ttl_days=payload.get("ttl_days"),
+            )
+            result = _capture_candidate_receipt(store, candidate_id)
+            if args.json:
+                print(_dumps(result, indent=2))
+            else:
+                print(f"Staged capture candidate {result['id']}")
+            return
+        elif action == "list":
             result = store.list_capture_candidates(
                 status=getattr(args, "status", "") or "",
                 limit=getattr(args, "limit", 20),
@@ -462,6 +541,8 @@ def cmd_candidate(args):
             print(f"Erased {candidate_id}: {result['erased']}")
     except ValueError as exc:
         _print_state_error(exc)
+        if action == "create":
+            raise SystemExit(2)
     finally:
         store.close()
 
@@ -7035,11 +7116,16 @@ def build_parser() -> argparse.ArgumentParser:
     # quarantined automatic-capture review
     s = sub.add_parser(
         "candidate",
-        help="List, inspect, review, prune, or erase quarantined captures",
+        help="Stage, list, inspect, review, prune, or erase quarantined captures",
+        description=(
+            "Stage, list, inspect, review, prune, or erase quarantined captures. "
+            "`candidate create` reads exactly one bounded JSON object from stdin; "
+            "capture content is never accepted as command-line arguments."
+        ),
     )
     s.add_argument(
         "candidate_action",
-        choices=["list", "show", "accept", "reject", "prune", "erase"],
+        choices=["create", "list", "show", "accept", "reject", "prune", "erase"],
     )
     s.add_argument("candidate_id", nargs="?")
     s.add_argument(

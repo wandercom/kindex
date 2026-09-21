@@ -3,7 +3,7 @@ audience: public
 description: >
   Persistent knowledge graph that remembers across AI sessions.
   Hybrid FTS5+graph search, MCP plugin for Claude Code, CLI (kin),
-  66 MCP tools with quarantined capture review and trusted-state retrieval.
+  67 MCP tools with quarantined capture review and trusted-state retrieval.
   SQLite-backed with vector search. The memory layer
   for all projects.
 
