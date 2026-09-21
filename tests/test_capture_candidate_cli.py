@@ -94,7 +94,7 @@ def test_candidate_create_rejects_hostile_metadata_and_deep_json_without_traceba
         store.close()
 
 
-def test_candidate_create_routes_to_explicit_project_and_refuses_ambiguous_implicit_scope(tmp_path):
+def test_candidate_create_routes_to_explicit_project_and_legacy_home_implicitly(tmp_path):
     home = tmp_path / "home"
     project = tmp_path / "project"
     home_store = home / ".kindex"
@@ -114,19 +114,21 @@ def test_candidate_create_routes_to_explicit_project_and_refuses_ambiguous_impli
         "PYTHONPATH": str(REPO / "src"), "PYTHONNOUSERSITE": "1",
     }
     implicit = _run(_command("--json"), _payload(), cwd=project, env=env)
-    assert implicit.returncode == 2
-    assert b"Ambiguous Kindex scope" in implicit.stderr
+    assert implicit.returncode == 0, implicit.stderr.decode()
+    implicit_receipt = json.loads(implicit.stdout)
 
     routed = _run(
         _command("--project-path", str(project), "--json"), _payload(), cwd=tmp_path, env=env,
     )
     assert routed.returncode == 0, routed.stderr.decode()
-    receipt = json.loads(routed.stdout)
+    routed_receipt = json.loads(routed.stdout)
     project_db = Store(Config(data_dir=str(project_store)))
     home_db = Store(Config(data_dir=str(home_store)))
     try:
-        assert project_db.get_capture_candidate(receipt["id"]) is not None
-        assert home_db.list_capture_candidates(limit=10) == []
+        assert home_db.get_capture_candidate(implicit_receipt["id"]) is not None
+        assert project_db.get_capture_candidate(implicit_receipt["id"]) is None
+        assert project_db.get_capture_candidate(routed_receipt["id"]) is not None
+        assert home_db.get_capture_candidate(routed_receipt["id"]) is None
     finally:
         project_db.close()
         home_db.close()
