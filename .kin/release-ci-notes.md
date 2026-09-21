@@ -24,10 +24,10 @@ On 2026-09-10, main had no branch protection and the repository had no rulesets.
 Running the PR check does not itself make passing tests mandatory for merging;
 that requires making `test` a required check in repository settings.
 
-The next prepared package version is `0.36.2`. Keep pyproject, runtime version,
-both Claude plugin manifests, MCP registry metadata, server card, public badges,
-and changelog aligned. The failed `v0.36.1` tag contains `0.36.0` metadata and
-must not be reused or moved.
+For every prepared package version, keep pyproject, runtime version, both Claude
+plugin manifests, MCP registry metadata, server card, public badges, and
+changelog aligned. The failed `v0.36.1` tag contains `0.36.0` metadata and must
+not be reused or moved.
 
 ## Release tags must name the committed version
 
@@ -41,3 +41,15 @@ refuses a tag that does not name the committed project version. (The tag used
 to be rendered into `pyproject.toml` at build time, which published wheels whose
 own `__version__` and changelog named the previous release.) Do not retry an
 already-published tag: publish a new patch tag instead.
+
+## Canonical GitHub Release sequence
+
+Prepare and validate the metadata-only version commit on `main`, then push that
+commit. Create a substantive GitHub Release from that exact committed version;
+do not publish a bare tag. The GitHub Release creates `vX.Y.Z`, whose tag push
+is the existing trigger for `Publish to PyPI`. Then verify the GitHub Release,
+its tag target, the CI/build/publish workflow, package availability on PyPI,
+and the relevant registry/marketplace metadata.
+
+Release notes must account for every main-branch change since the preceding
+version, including direct commits rather than only merged pull requests.

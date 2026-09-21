@@ -4,6 +4,14 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-09-21
+
+### Added
+- Routed capture-candidate creation is available through both `kin candidate
+  create` and the MCP `candidate_create` tool. The CLI accepts one bounded,
+  strict JSON envelope on standard input and both surfaces return redacted
+  receipts, keeping unreviewed capture text quarantined.
+
 ### Fixed
 - Per-prompt Kindex context reaches the model again on Claude Code 2.1.274.
   The modern adapter's `prompt.submit` hook attached retrieval and supervisor
