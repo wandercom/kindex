@@ -81,12 +81,13 @@ class ScopeContract(unittest.TestCase):
         (self.project / '.kin' / 'config').write_text('name: scope-fixture\n', encoding='utf-8')
         self.seed(self.home_store, ['scope-home-node'])
 
-    def run_process(self, args):
-        return subprocess.run(args, cwd=self.project, env=self.env, text=True,
+    def run_process(self, args, env=None):
+        process_env = self.env | (env or {})
+        return subprocess.run(args, cwd=self.project, env=process_env, text=True,
                               capture_output=True, timeout=30, check=False)
 
-    def api(self, request):
-        response = self.run_process([PYTHON, '-c', WORKER, json.dumps(request)])
+    def api(self, request, env=None):
+        response = self.run_process([PYTHON, '-c', WORKER, json.dumps(request)], env=env)
         self.assertEqual(response.returncode, 0,
                          'Fixture/product child crashed:\n' + response.stdout + response.stderr)
         result_lines = [line[len(MARKER):] for line in response.stdout.splitlines()
@@ -120,7 +121,7 @@ class ScopeContract(unittest.TestCase):
         self.assertNotIn('error', result, result)
         self.assertEqual(result['directory'], str(directory.resolve()))
 
-    def test_01_hook_store_creation_exposes_implicit_ambiguity(self):
+    def test_01_unconfigured_invocation_prefers_legacy_home_store(self):
         self.assertFalse((self.project_store / 'kindex.db').exists())
         original_home = self.snapshot(self.home_store)
         self.assert_selected(self.api({'op': 'load'}), self.home_store)
@@ -128,19 +129,11 @@ class ScopeContract(unittest.TestCase):
         self.assertFalse((self.project_store / 'kindex.db').exists())
         self.create_project_store()
         before = self.snapshots()
-        ambiguous = self.api({'op': 'load'})
-        # Preserve evidence even when selection behavior is wrong on baseline.
+        selected = self.api({'op': 'load'})
         self.assertEqual(self.snapshots(), before)
-        self.assertIn('error', ambiguous,
-                      'Implicit selection silently chose a scope after hook store creation: ' + repr(ambiguous))
-        diagnostic = ambiguous['error']
-        self.assertRegex(diagnostic.lower(), r'ambig|multiple.*(?:store|scope)|both.*(?:store|scope)|choose.*(?:store|scope)')
-        self.assertIn(str(self.home_store), diagnostic)
-        self.assertIn(str(self.project_store), diagnostic)
-        self.assertIn('--project-path', diagnostic)
-        self.assertIn('--data-dir', diagnostic)
+        self.assert_selected(selected, self.home_store)
 
-    def test_02_explicit_project_and_named_profile_are_retained(self):
+    def test_02_explicit_project_selection_and_named_profile_are_retained(self):
         self.create_project_store()
         self.seed(self.profile_store, ['scope-profile-a', 'scope-profile-b', 'scope-profile-c'])
         # JSON scalar syntax is valid YAML and safely quotes the absolute path.
@@ -149,10 +142,12 @@ class ScopeContract(unittest.TestCase):
         before = self.snapshots()
         before_profile = self.snapshot(self.profile_store)
         project = self.api({'op': 'load', 'kwargs': {'project_path': str(self.project)}})
+        environment_project = self.api({'op': 'load'}, env={'KIN_PROJECT': str(self.project)})
         profile = self.api({'op': 'load', 'kwargs': {'profile': 'personal'}})
         self.assertEqual(self.snapshots(), before)
         self.assertEqual(self.snapshot(self.profile_store), before_profile)
         self.assert_selected(project, self.project_store)
+        self.assert_selected(environment_project, self.project_store)
         self.assert_selected(profile, self.profile_store)
 
     def test_03_explicit_cli_scope_bypasses_implicit_guard(self):
