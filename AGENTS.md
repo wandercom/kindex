@@ -5,7 +5,7 @@ Kindex is a persistent knowledge graph that indexes conversations, projects, and
 ## Running Tests
 
 Install Python test dependencies (`pip install -e ".[dev,mcp]"`) and Node.js 24 or newer.
-Node executes the modern Codex adapter contract tests; it is not a Kindex package dependency.
+Node executes the modern Claude adapter contract tests; it is not a Kindex package dependency.
 
 ```bash
 # All tests
@@ -44,7 +44,7 @@ protection to prevent merging a failing suite.
 | `src/kindex/sessions.py` | Session tag lifecycle (start, update, segment, resume) |
 | `src/kindex/coordination.py` | Collab conversations (members, cursors, inject messages, resources) |
 | `src/kindex/locks.py` | Advisory node locks (acquire, release, expiry sweep) |
-| `src/kindex/hooks.py` | Codex hook handlers (prime, compact) |
+| `src/kindex/hooks.py` | Claude Code hook handlers (prime, compact) |
 | `src/kindex/setup.py` | System setup (Codex hooks, launchd, crontab, `.kin` git merge driver) |
 | `src/kindex/kin_merge.py` | Structured 3-way union merge for `.kin/index.json` + `.kin/code-map.json` (`kin merge-kin` git driver) |
 | `src/kindex/daemon.py` | Background daemon and cron cycle |
