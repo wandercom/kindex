@@ -582,3 +582,96 @@ def test_a_malformed_extra_row_does_not_break_sync(store, repo):
     doc = fact()
     write_doc(repo, sign(doc))
     assert kb.sync_kinbase(store, repo, mode="raw")["imported"] == 1
+
+
+def read_stub(tmp_path, name, payload, *, code=0, log=None):
+    """A kinbase whose read commands answer from a fixture and record their argv."""
+    path = tmp_path / ("kinbase-read-" + name)
+    program = "#!"+sys.executable+"\nimport sys,json\n"
+    if log is not None:
+        program += "open("+repr(str(log))+",'a').write(' '.join(sys.argv[1:])+'\\n')\n"
+    program += "print(json.dumps("+repr(payload)+"))\nsys.exit("+str(code)+")\n"
+    path.write_text(program)
+    path.chmod(0o700)
+    return str(path)
+
+
+def test_read_only_tools_never_invoke_project(store, repo, monkeypatch, tmp_path):
+    """project writes a query log and may submit an Unknown, so a tool an agent
+    may call in a loop must never reach it. This is the whole reason the read
+    surface is status and exact-key explain rather than a task brief."""
+    from kindex import kinbase as kb
+
+    log = tmp_path / "argv.log"
+    stub = read_stub(tmp_path, "audit", {"status": "certified"}, log=log)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    kb.read_status(repo)
+    kb.read_explain(repo, "symbol:class:Db", "which definition is current")
+    invocations = log.read_text().splitlines()
+    assert len(invocations) == 2
+    assert not any("project" in line.split() for line in invocations)
+    assert invocations[0].split()[0] == "status"
+    assert invocations[1].split()[0] == "explain"
+    assert all(line.split()[-1] == "--json" for line in invocations)
+
+
+def test_read_only_tools_return_a_refusal_document_rather_than_raising(
+        store, repo, monkeypatch, tmp_path):
+    """Kinbase writes refusals as typed documents on stdout. Raising would drop
+    the code and the remediation it wrote, leaving the caller a bare string."""
+    from kindex import kinbase as kb
+
+    refusal = {"error": {"code": "COMPANY_UNREACHABLE", "message": "snapshot withheld",
+                         "remediation": "Check the service", "retryable": True}}
+    stub = read_stub(tmp_path, "refusal", refusal, code=1)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    assert kb.read_status(repo)["error"]["code"] == "COMPANY_UNREACHABLE"
+
+
+def test_read_only_tools_refuse_without_a_kinbase_on_path(store, repo, monkeypatch):
+    from kindex import kinbase as kb
+
+    monkeypatch.setattr(kb.shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="Kinbase binary unavailable"):
+        kb.read_status(repo)
+
+
+def test_mcp_kinbase_reads_run_only_the_path_binary_and_answer_refusals(
+        store, repo, monkeypatch):
+    import inspect
+
+    mcp = importlib.import_module("kindex.mcp_server")
+    for tool in (mcp.kinbase_status, mcp.kinbase_explain):
+        assert "binary" not in inspect.signature(tool).parameters
+    monkeypatch.setattr(mcp, "_get_store", lambda: (store, store.config))
+    monkeypatch.setattr("kindex.kinbase.shutil.which", lambda name: None)
+    refused = json.loads(mcp.kinbase_status(str(repo)))
+    assert refused["ok"] is False and refused["error"]["code"] == "kinbase_status_refused"
+    refused = json.loads(mcp.kinbase_explain(str(repo), "symbol:class:Db", "which"))
+    assert refused["ok"] is False and refused["error"]["code"] == "kinbase_explain_refused"
+
+
+def test_the_query_tools_leave_the_repository_and_the_graph_untouched(
+        store, repo, monkeypatch, tmp_path):
+    """Kinbase closes overdue apologies inside its own `status`, which is a
+    signed write, so the line these tools have to hold is narrower than
+    "read-only": they add nothing of their own. Nothing is written to the
+    repository's signed events by Kindex, and nothing is written to the graph,
+    however many times they are called."""
+    from kindex import kinbase as kb
+
+    events = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*") if p.is_file())
+    digests = {name: (repo / name).read_bytes() for name in events}
+    before = len(store.all_nodes())
+
+    stub = read_stub(tmp_path, "untouched", {"status": "certified"})
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    for _ in range(3):
+        kb.read_status(repo)
+        kb.read_explain(repo, "symbol:class:Db", "which definition is current")
+
+    after_events = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*") if p.is_file())
+    assert after_events == events, "a query added or removed a repository file"
+    for name, body in digests.items():
+        assert (repo / name).read_bytes() == body, f"{name} was rewritten by a query"
+    assert len(store.all_nodes()) == before, "a query wrote to the graph"

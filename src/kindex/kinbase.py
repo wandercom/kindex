@@ -278,6 +278,67 @@ def _node(repo, identity, doc, mode, receipt):
                    "prov_source": "kinbase:" + repo, "extra": {"kinbase": metadata}})
 
 
+#: The most one read-only Kinbase query may take. Lower than the explain bound
+#: above, which is sized for a whole reduced sync rather than one answer.
+READ_TIMEOUT_S = 30
+
+
+def _query(argv, binary, timeout_s):
+    """Run one Kinbase query command and parse its JSON.
+
+    Neither command records the asking. `explain` reduces one key and writes
+    nothing; `status` runs Kinbase's own due maintenance first, closing
+    apologies whose deadline has passed, which is a signed write the CLI
+    performs on every invocation and which no caller can suppress. It is
+    bounded by what is already overdue rather than by how often it is asked,
+    so a second call in the same minute writes nothing.
+
+    `project` is deliberately absent on the other side of exactly that line:
+    it records the query and may open an Unknown, so each call adds to the
+    queue people read, and an agent looping over it turns that queue into
+    noise.
+    """
+    executable = shutil.which(str(binary))
+    if not executable:
+        raise RuntimeError("Kinbase binary unavailable; install Kinbase")
+    try:
+        result = subprocess.run([executable, *argv, "--json"],
+                                capture_output=True, text=True,
+                                timeout=timeout_s, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Kinbase {argv[0]} timed out") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Kinbase {argv[0]} failed") from exc
+    envelope = _loads(result.stdout)
+    # A refusal is a typed document on stdout, not a crash. Returning it keeps
+    # the code and remediation Kinbase wrote, which a raised exception loses.
+    if isinstance(envelope, dict) and "error" in envelope:
+        return envelope
+    if result.returncode:
+        raise RuntimeError(f"Kinbase {argv[0]} exited {result.returncode}")
+    if not isinstance(envelope, dict):
+        raise ValueError(f"unsupported Kinbase {argv[0]} response")
+    return envelope
+
+
+def read_status(repo: str | Path, *, binary="kinbase") -> dict:
+    """Certification, trusted fact count and open Unknowns for one repository.
+
+    Runs Kinbase's due-maintenance sweep as a side effect; see `_query`.
+    """
+    root = Path(repo).expanduser().resolve(strict=True)
+    return _query(["status", "--repo", str(root)], binary, READ_TIMEOUT_S)
+
+
+def read_explain(repo: str | Path, logical_key: str, decision: str, *,
+                 binary="kinbase") -> dict:
+    """Why one logical key reads as it does, and what evidence would change it."""
+    root = Path(repo).expanduser().resolve(strict=True)
+    return _query(
+        ["explain", logical_key, "--repo", str(root), "--decision", decision],
+        binary, EXPLAIN_TIMEOUT_S)
+
+
 def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase",
                  explain_budget_s: float | None = None) -> dict:
     """Refresh source-scoped evidence atomically; never write signed source files.
