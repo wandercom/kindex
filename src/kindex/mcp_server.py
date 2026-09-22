@@ -303,17 +303,24 @@ def _default_agent(agent: str = "") -> str:
 def _agent_without_legacy_store(agent: str = "") -> tuple[str, bool]:
     """Return an agent and whether the caller explicitly supplied it.
 
-    ``task_execute`` must keep validating caller-supplied identities, but an
-    omitted agent must remain absent.  In particular, deriving one from the
-    selected home config would change pre-upgrade project task ownership from
-    ``project_scope``'s stable default (``claude``) to ``current_user@host``.
-    That would duplicate operation retries and strand existing claims.
+    ``task_execute`` must keep validating caller-supplied identities. Ordinary
+    omitted-agent callers keep their resolved legacy identity. The prior
+    implicit two-store ambiguity instead fell back to ``project_scope``'s
+    stable ``claude`` owner, which must remain stable for its existing retries
+    and claims.
     """
     if agent and agent.strip():
         return agent.strip(), True
     if os.environ.get("KIN_AGENT_ID", "").strip():
         return os.environ["KIN_AGENT_ID"].strip(), True
-    return "", False
+    try:
+        config = _get_config()
+        from .config import legacy_implicit_scope_was_ambiguous
+        if legacy_implicit_scope_was_ambiguous(config):
+            return "", False
+        return _default_agent(""), False
+    except MemoryUnavailableError:
+        return "", False
 
 
 def _mcp_client() -> str | None:

@@ -215,7 +215,7 @@ def ambiguous_mcp(tmp_path, monkeypatch):
     monkeypatch.chdir(project)
     monkeypatch.setattr(mcp_server, "_store", None)
     monkeypatch.setattr(mcp_server, "_config", None)
-    return {"project": project, "mcp": mcp_server}
+    return {"home": home, "project": project, "mcp": mcp_server}
 
 
 def test_unconfigured_mcp_status_uses_the_legacy_home_graph(ambiguous_mcp):
@@ -235,15 +235,15 @@ def test_task_execute_needs_no_legacy_store(ambiguous_mcp, monkeypatch):
     assert result.get("ok") is True, result
 
 
-@pytest.mark.parametrize("configured_agent", [
-    "devon@host", "Jane Doe@host", "agent[blue]@host", "μser@host",
-])
-def test_task_execute_keeps_the_legacy_project_default_when_agent_is_omitted(
-        ambiguous_mcp, monkeypatch, configured_agent):
+def test_task_execute_keeps_the_two_store_fallback_owner_when_agent_is_omitted(
+        ambiguous_mcp, monkeypatch):
     import kindex.integrations as integrations
 
     observed = {}
-    monkeypatch.setattr(ambiguous_mcp["mcp"], "_default_agent", lambda agent: configured_agent)
+    monkeypatch.setattr(
+        ambiguous_mcp["mcp"], "_default_agent",
+        lambda agent: pytest.fail("two-store fallback must not resolve a new configured identity"),
+    )
     monkeypatch.setattr(
         integrations, "execute_task",
         lambda store, operation, arguments, scope, **kwargs: observed.update(scope) or {"ok": True},
@@ -254,6 +254,34 @@ def test_task_execute_keeps_the_legacy_project_default_when_agent_is_omitted(
 
     assert result == {"ok": True}
     assert observed["agent"] == "claude"
+
+
+@pytest.mark.parametrize("legacy_scope", ["home_only", "explicit_project", "configured_data_dir"])
+def test_task_execute_preserves_normal_omitted_agent_identity(
+        ambiguous_mcp, monkeypatch, legacy_scope):
+    import shutil
+    import kindex.integrations as integrations
+
+    if legacy_scope == "home_only":
+        shutil.rmtree(ambiguous_mcp["project"] / ".kin" / "local")
+    elif legacy_scope == "explicit_project":
+        monkeypatch.setenv("KIN_PROJECT", str(ambiguous_mcp["project"]))
+    else:
+        (ambiguous_mcp["home"] / ".config" / "kindex" / "kin.yaml").write_text(
+            f"data_dir: {ambiguous_mcp['home'] / '.kindex'}\\n",
+        )
+    observed = {}
+    monkeypatch.setattr(ambiguous_mcp["mcp"], "_default_agent", lambda agent: "devon@host")
+    monkeypatch.setattr(
+        integrations, "execute_task",
+        lambda store, operation, arguments, scope, **kwargs: observed.update(scope) or {"ok": True},
+    )
+
+    result = ambiguous_mcp["mcp"].task_execute(
+        "list", {}, project_path=str(ambiguous_mcp["project"]), session_id="s1", agent="")
+
+    assert result == {"ok": True}
+    assert observed["agent"] == "devon@host"
 
 
 def test_task_execute_refuses_invalid_explicit_agent(ambiguous_mcp):
