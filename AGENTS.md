@@ -101,9 +101,17 @@ When asked to release, follow these steps exactly. Do NOT install twine or attem
 4. Push to main: `git push origin main`
 5. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
 6. Create GitHub release: `gh release create vX.Y.Z --title "..." --notes "..."`
-7. Watch the workflow: `gh run watch <id> -R wandercom/kindex` -- all three jobs (test, build, publish) must pass
+7. Watch the workflow: `gh run watch <id> -R wandercom/kindex` -- every job (test, build, publish, mcp-registry) must pass
 8. Verify on PyPI: `pip index versions kindex 2>/dev/null | head -1` or check https://pypi.org/project/kindex/
-9. Verify the MCP listing metadata is current: `server.json` version/package fields match the release, and https://mcpmarket.com/server/kindex reflects the published package after indexing.
+9. The release publishes the server entry to the MCP Registry after PyPI succeeds (`.github/workflows/publish-mcp.yml`, OIDC, no token; it refuses to publish a version PyPI does not have, and `gh workflow run publish-mcp.yml -f tag=vX.Y.Z -R wandercom/kindex` backfills a release tagged before this existed). The workflow confirms the registry itself, but to check by hand -- note that `search` matches substrings across every server and every historical version, so `io.github.jmcentire/kindex` and old releases come back too; match the exact name and the registry's `isLatest` flag rather than a position in the list:
+
+   ```bash
+   curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.wandercom/kindex&version=latest" \
+     | python3 -c "import json,sys; n='io.github.wandercom/kindex'; e=[x['server'] for x in json.load(sys.stdin)['servers'] if x['server']['name']==n and x['_meta']['io.modelcontextprotocol.registry/official']['isLatest']]; print(e[0]['version'] if e else 'MISSING')"
+   ```
+
+   The registry is how MCP clients discover the server, and it stalled at 0.38.0 through six PyPI releases because nothing automated it.
+10. Verify the MCP listing metadata is current: `server.json` version/package fields match the release, and https://mcpmarket.com/server/kindex reflects the published package after indexing.
 
 **Definition of done:** The release is complete when (a) all workflow jobs are green, (b) the new version appears on PyPI, (c) `pip install kindex==X.Y.Z` succeeds, and (d) MCP/server metadata has been updated or a marketplace refresh has been requested. If any job fails, fix the issue, bump to a new patch version, and repeat from step 1 -- do not re-tag or force-push an existing tag.
 
