@@ -272,7 +272,13 @@ class TestImportMerge:
 
 
 class TestRoundtrip:
-    def test_cli_roundtrip_active_only_preserves_superseding_successor(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("export_format", "extension"),
+        [("json", "json"), ("jsonl", "jsonl")],
+    )
+    def test_cli_roundtrip_active_only_preserves_superseding_successor(
+        self, tmp_path, export_format, extension,
+    ):
         """A one-way supersedes arc must not retire its successor on replay."""
         source_dir, dest_dir = str(tmp_path / "source"), str(tmp_path / "dest")
         run("init", data_dir=source_dir)
@@ -282,10 +288,10 @@ class TestRoundtrip:
         source.add_edge("current", "prior", edge_type="supersedes", bidirectional=False)
         source.close()
 
-        exported = run("export", "--audience", "private", "--format", "json",
+        exported = run("export", "--audience", "private", "--format", export_format,
                        data_dir=source_dir)
         assert exported.returncode == 0, exported.stderr
-        transfer = tmp_path / "graph.json"
+        transfer = tmp_path / f"graph.{extension}"
         transfer.write_text(exported.stdout)
 
         imported = run("import", str(transfer), data_dir=dest_dir)
