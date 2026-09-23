@@ -176,7 +176,7 @@ def _validate_fields(args: dict) -> None:
         raise TaskServiceError("invalid_argument", "expected_version must be a nonnegative integer")
 
 
-def _apply(store, operation: str, args: dict, scope: dict) -> dict:
+def _apply(store, operation: str, args: dict, scope: dict, *, source_tool: str = "") -> dict:
     unknown = set(args) - _ARGUMENTS[operation] - {"operation_id"}
     if unknown:
         raise TaskServiceError("unsupported_argument", "Unsupported task arguments: " + ", ".join(sorted(unknown)))
@@ -197,7 +197,7 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
     if operation == "get":
         return {"task": task_record(_get(store, args.get("id"), scope))}
     if operation == "reconcile":
-        return _reconcile(store, args, scope)
+        return _reconcile(store, args, scope, source_tool=source_tool)
     _validate_fields(args)
     if "dependencies" in args:
         for dependency in _strings(args["dependencies"], "dependencies"):
@@ -223,7 +223,8 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
             domains=_strings(args.get("domains", []), "domains"),
             project_path=scope["project_path"], session_id=scope["session_id"],
             owner=args.get("owner", ""), dependencies=args.get("dependencies", []),
-            external_id=args.get("external_id", ""), namespace=args.get("namespace", ""))
+            external_id=args.get("external_id", ""), namespace=args.get("namespace", ""),
+            source_tool=source_tool)
         if args.get("active_form") or args.get("status", "open") != "open":
             tasks.update_task(store, task_id, actor=claim_holder(scope),
                               task_status=args.get("status", "open"),
@@ -238,10 +239,10 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
         if "status" in args:
             fields["task_status"] = args["status"]
         result = tasks.update_task(store, task_id, actor=claim_holder(scope),
-                                   force=args.get("force") is True, **fields)
+                                   force=args.get("force") is True or _repaired_owner_matches(node, scope), **fields)
     elif operation in ("complete", "cancel"):
         result = tasks.update_task(store, task_id, actor=claim_holder(scope),
-                                   force=args.get("force") is True,
+                                   force=args.get("force") is True or _repaired_owner_matches(node, scope),
                                    task_status="done" if operation == "complete" else "cancelled")
     elif operation in ("claim", "release"):
         agent = claim_holder(scope)
@@ -252,13 +253,14 @@ def _apply(store, operation: str, args: dict, scope: dict) -> dict:
             result = tasks.claim_task(store, task_id, agent, ttl_minutes=ttl,
                                       note=args.get("note", ""), force=args.get("force") is True)
         else:
-            result = tasks.release_task_claim(store, task_id, agent=agent, force=args.get("force") is True)
+            result = tasks.release_task_claim(store, task_id, agent=agent,
+                                              force=args.get("force") is True or _repaired_owner_matches(node, scope))
     else:
         raise TaskServiceError("invalid_operation", "Unknown task operation")
     return {"task": task_record(result)}
 
 
-def _reconcile(store, args: dict, scope: dict) -> dict:
+def _reconcile(store, args: dict, scope: dict, *, source_tool: str = "") -> dict:
     """Reconcile only this session's named TodoWrite collection, atomically."""
     namespace = _identifier(args.get("namespace", "todos"), "namespace")
     items = args.get("items")
@@ -284,10 +286,10 @@ def _reconcile(store, args: dict, scope: dict) -> dict:
         if existing:
             fields.pop("external_id")
             fields["id"] = existing["id"]
-            results.append(_apply(store, "update", fields, scope)["task"])
+            results.append(_apply(store, "update", fields, scope, source_tool=source_tool)["task"])
         else:
             fields["namespace"] = namespace
-            results.append(_apply(store, "create", fields, scope)["task"])
+            results.append(_apply(store, "create", fields, scope, source_tool=source_tool)["task"])
     cancelled = []
     if args.get("cancel_missing") is True:
         for external_id, node in owned.items():
@@ -297,7 +299,7 @@ def _reconcile(store, args: dict, scope: dict) -> dict:
     return {"tasks": results, "cancelled": cancelled, "namespace": namespace}
 
 
-def execute(store, operation: str, args: dict, scope: dict) -> dict:
+def execute(store, operation: str, args: dict, scope: dict, *, source_tool: str = "") -> dict:
     """Execute once; retries return the committed result without reapplying it.
 
     Mutations require args.operation_id. That ID is bound to operation, sanitized
@@ -314,7 +316,7 @@ def execute(store, operation: str, args: dict, scope: dict) -> dict:
         scoped = _scope(store, scope)
         clean = redact(args)
         if operation not in MUTATIONS:
-            return {"ok": True, **_apply(store, operation, clean, scoped)}
+            return {"ok": True, **_apply(store, operation, clean, scoped, source_tool=source_tool)}
         if store.conn.in_transaction:
             raise TaskServiceError("transaction_conflict", "Task service must own its commit transaction")
         operation_id = _identifier(clean.get("operation_id"), "operation_id")
@@ -332,7 +334,7 @@ def execute(store, operation: str, args: dict, scope: dict) -> dict:
                     raise TaskServiceError("authorization_mismatch", "Operation already committed under different authorization")
                 return {**receipt["result"], "replayed": True}
             result = redact({"ok": True, "operation_id": operation_id, "replayed": False,
-                             **_apply(store, operation, clean, scoped)})
+                             **_apply(store, operation, clean, scoped, source_tool=source_tool)})
             store.conn.execute("INSERT INTO meta(key,value) VALUES (?,?)",
                                (key, _json({"request_digest": digest, "result": result,
                                             "authorization_binding": auth_binding})))
@@ -381,3 +383,102 @@ def acknowledge_outcome(store, scope: dict, operation_id: str) -> bool:
         outcome["acknowledged"] = True
         store.conn.execute("UPDATE meta SET value=? WHERE key=?", (_json(outcome), key))
     return True
+
+
+def task_owner_findings_for_nodes(nodes: list[dict], agent: str) -> list[dict]:
+    """Describe legacy bare-``claude`` ownership without changing it.
+
+    Native Claude hooks intentionally use ``claude`` and now stamp their
+    source tool on creation. Only Kindex's old task_execute lane (and old
+    unmarked records) can be repaired by the doctor command.
+    """
+    target = _identifier(agent, "agent")
+    if target == "claude":
+        return []
+    findings = []
+    for node in nodes:
+        extra = node.get("extra") or {}
+        claim = extra.get("claim") if isinstance(extra.get("claim"), dict) else {}
+        owner_is_legacy = extra.get("owner") == "claude"
+        claim_is_legacy = claim.get("agent") == "claude"
+        if not (owner_is_legacy or claim_is_legacy):
+            continue
+        source_tool = extra.get("source_tool", "")
+        if source_tool == "kindex.task_execute":
+            classification, repairable = "legacy_task_execute", True
+        elif source_tool:
+            classification, repairable = "hook_owned", False
+        else:
+            classification, repairable = "possibly_stale", True
+        findings.append({
+            "id": node["id"],
+            "title": node.get("title", ""),
+            "owner": "claude" if owner_is_legacy else "",
+            "claim_agent": "claude" if claim_is_legacy else "",
+            "claim_expired": claim_is_legacy and tasks._claim_expired(claim),
+            "source_tool": source_tool,
+            "classification": classification,
+            "repairable": repairable,
+        })
+    return findings
+
+
+def task_owner_findings(store, agent: str) -> list[dict]:
+    return task_owner_findings_for_nodes(
+        tasks.list_tasks(store, status="all", limit=None), agent)
+
+
+def _repaired_owner_matches(node: dict, scope: dict) -> bool:
+    """Accept a bare stable identity only after doctor has replaced claude.
+
+    Historical claims predate session-qualified holders. Keeping this narrow
+    lets their repaired owner finish or release work, without reviving the
+    unsafe special treatment for a bare ``claude`` claim.
+    """
+    claim = (node.get("extra") or {}).get("claim") or {}
+    agent = scope.get("agent") or ""
+    return agent != "claude" and claim.get("agent") == agent
+
+
+def repair_task_owners(store, agent: str) -> list[dict]:
+    """Repair opt-in legacy task ownership in one audited transaction.
+
+    Expired claims are released instead of being transferred to a new agent.
+    Source-stamped native hook claims are deliberately left alone.
+    """
+    target = _identifier(agent, "agent")
+    repaired = []
+    with tasks.transaction(store):
+        for finding in task_owner_findings(store, target):
+            if not finding["repairable"]:
+                continue
+            node = tasks.get_task(store, finding["id"])
+            if node is None:
+                continue
+            extra = node.get("extra") or {}
+            claim = extra.get("claim") if isinstance(extra.get("claim"), dict) else None
+            changes = []
+            if extra.get("owner") == "claude":
+                extra["owner"] = target
+                changes.append("owner: claude -> " + target)
+            if claim and claim.get("agent") == "claude":
+                if tasks._claim_expired(claim):
+                    extra.pop("claim", None)
+                    if extra.get("task_status") == "in_progress":
+                        extra["task_status"] = "open"
+                    changes.append("claim: released expired claude claim")
+                else:
+                    claim["agent"] = target
+                    extra["claim"] = claim
+                    changes.append("claim.agent: claude -> " + target)
+            if not changes:
+                continue
+            node["extra"] = extra
+            tasks._write_task(store, node)
+            store._log_in_transaction(
+                store.conn, "repair_task_owner", node["id"], node["title"], target,
+                {"changes": changes, "source_tool": finding["source_tool"],
+                 "classification": finding["classification"]},
+            )
+            repaired.append({**finding, "changes": changes})
+    return repaired

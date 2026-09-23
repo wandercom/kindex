@@ -198,6 +198,7 @@ def create_task(
     audience: str = "private",
     external_id: str = "",
     namespace: str = "",
+    source_tool: str = "",
 ) -> str:
     """Create a task node and optionally link it to existing nodes."""
     pri = _parse_priority(priority)
@@ -224,6 +225,8 @@ def create_task(
         extra["external_id"] = external_id
     if namespace:
         extra["task_namespace"] = namespace
+    if source_tool:
+        extra["source_tool"] = source_tool
     with transaction(store):
         # Validate every target before minting a node; failed linking is atomic.
         targets = []

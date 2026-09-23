@@ -922,8 +922,8 @@ def load_config(
 
     Like git config: global (~/.config/kindex/kin.yaml) is loaded first,
     then local (.kin/config / kin.yaml / conv.yaml in the current project)
-    merges over it. Project resolution is explicit path, KIN_PROJECT, git
-    worktree root, then cwd.
+    merges over it. Project resolution is explicit path, KIN_PROJECT_PATH,
+    KIN_PROJECT, git worktree root, then cwd.
     An explicit config_path bypasses layering and loads only that file.
 
     Profile resolution (only when profiles are configured OR an explicit
@@ -995,47 +995,31 @@ def load_config(
     cfg._ignored_project_keys = ignored_project_keys
     cfg = _resolve_profile(cfg, profile, kin_profile, profiles_base=profiles_base)
     cfg = _contain_data_dir(cfg)
-    # Explicit project callers and existing repo-local configurations share the
-    # integration store. Unscoped legacy/global and named profiles stay separate.
+    # Project selection is presence-based: an explicit project selector wins,
+    # otherwise a present repo-local store wins over user configuration. Store
+    # inspection is deliberately limited to presence; project_data_path keeps
+    # symlink and tracked-store refusals explicit instead of silently falling
+    # back to another scope.
     if not cfg.active_profile and not data_dir:
-        from .project_store import project_data_path, durable_store_paths
+        from .project_store import project_data_path
         local = project_root / ".kin" / "local"
-        selected = cfg.data_path
-        repo_selected = selected in (local, local / "kindex")
-        explicit_project = bool(project_path or os.environ.get("KIN_PROJECT")) and _bound_root is None and _git_root(project_root) is not None
-        # A symlinked chain is never selected implicitly (the store refuses
-        # it); an unscoped call in such a repository uses the home store
-        # instead of failing every time. An explicit project still refuses.
-        linked = any(path.is_symlink() for path in (project_root / ".kin", local, local / "kindex"))
-        existing_repo = not linked and any((d / n).exists() for d in (local, local / "kindex")
-                                           for n in ("kindex.db", "conv.db"))
-        # The home default, however it is spelled: an absolute or
-        # trailing-slash spelling of ~/.kindex made --project-path and
-        # KIN_PROJECT no-ops.
-        home_default = _same_path(cfg.data_dir, "~/.kindex")
-        implicit_choice = ("data_dir" not in merged and home_default
-                           and not explicit_project and not repo_selected)
-        if (existing_repo and implicit_choice
-                and not any(durable_store_paths(d) for d in (local, local / "kindex"))):
-            # A project store with nothing in it (any read creates one)
-            # decides nothing while the home store holds work; it used to
-            # make every unscoped call in the repository ambiguous. Only an
-            # implicit choice looks inside the stores: an explicit one never
-            # depends on (or fails over) a store it did not choose.
-            existing_repo = not durable_store_paths(selected)
-        implicit_repo = existing_repo and "data_dir" not in merged
-        if repo_selected or ((explicit_project or implicit_repo) and home_default):
+        store_present = any(
+            (directory / name).exists()
+            for directory in (local, local / "kindex")
+            for name in ("kindex.db", "conv.db")
+        )
+        explicit_selector = bool(
+            project_path
+            or os.environ.get("KIN_PROJECT_PATH")
+            or os.environ.get("KIN_PROJECT")
+        )
+        project_worktree = _bound_root is not None or (
+            (store_present or explicit_selector) and _git_root(project_root) is not None
+        )
+        project_store_present = project_worktree and store_present
+        explicit_project = explicit_selector and _bound_root is None and project_worktree
+        if explicit_project or project_store_present:
             project_store = project_data_path(project_root)
-            if implicit_repo and not explicit_project and not repo_selected:
-                home_stores = durable_store_paths(selected)
-                if home_stores:
-                    raise ValueError(
-                        f"Ambiguous Kindex scope: default home store {', '.join(str(p) for p in home_stores)} "
-                        f"contains durable work and a project store exists at {project_store}. "
-                        f"Both are preserved. Select --project-path {project_root} for project work "
-                        f"or --data-dir {selected} for the home store (kin-mcp: set KIN_PROJECT in "
-                        f"its environment, or data_dir in ~/.config/kindex/kin.yaml); no data was "
-                        f"merged or moved.")
             cfg.data_dir = str(project_store)
     cfg = _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
     if project_data_dir and _same_path(cfg.data_dir, project_data_dir):
@@ -1412,21 +1396,26 @@ def resolve_project_root(project_path: str | Path | None = None) -> Path:
 
     Resolution order:
     1. explicit project_path
-    2. KIN_PROJECT
-    3. git worktree root for cwd
-    4. cwd
+    2. KIN_PROJECT_PATH
+    3. KIN_PROJECT
+    4. git worktree root for cwd
+    5. cwd
 
     When a config binding is active, the bound root wins over cwd, and
-    explicit paths / KIN_PROJECT are contained under the root via
+    explicit paths / KIN_PROJECT_PATH / KIN_PROJECT are contained under the root via
     _resolve_path so no path outside the binding is read (R1.5).
     """
-    raw = project_path or os.environ.get("KIN_PROJECT")
+    raw = project_path or os.environ.get("KIN_PROJECT_PATH") or os.environ.get("KIN_PROJECT")
     if raw:
         start = _resolve_path(raw)
         if _bound_root is None and not start.exists():
             # A named project that is not there used to fall through to the
             # home store without a word.
-            source = "--project-path" if project_path else "KIN_PROJECT"
+            source = (
+                "--project-path" if project_path
+                else "KIN_PROJECT_PATH" if os.environ.get("KIN_PROJECT_PATH")
+                else "KIN_PROJECT"
+            )
             raise ValueError(f"Kindex project path from {source} does not exist: {raw}")
     elif _bound_root is not None:
         start = _bound_root

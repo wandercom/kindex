@@ -796,10 +796,15 @@ The `.kin/` directory is the standard location for all kindex project artifacts:
 
 These files are meant to ship with the code. Do not ignore the whole `.kin/`
 directory in project `.gitignore`; ignore only local/private subdirectories.
-Kindex resolves project config from `--project-path`, then `KIN_PROJECT`, then
-the git worktree root, then the current directory. User config still lives in
-`~/.config/kindex/kin.yaml` and deep-merges below project config, so user
-preferences remain local while the repo's work contract travels with the repo.
+Kindex resolves project config from `--project-path`, then `KIN_PROJECT_PATH`,
+then `KIN_PROJECT`, the git worktree root, then the current directory. User
+config still lives in `~/.config/kindex/kin.yaml` and deep-merges below project
+config, so user preferences remain local while the repo's work contract travels
+with the repo.
+Store selection is ordered: an explicit `--project-path`, `KIN_PROJECT_PATH`,
+or `KIN_PROJECT`; then a present `.kin/local` store; then configured
+`data_dir`; then `~/.kindex`. A tracked or symlinked selected local store is
+refused explicitly rather than silently falling back to another store.
 Generated `.kin/` snapshots use canonical, id-keyed ordering and omit volatile
 timestamps so repeated exports of unchanged source do not churn Git diffs.
 Concurrent branches merge them without manual conflicts via a structured merge
@@ -1021,7 +1026,7 @@ coverage without silently discarding the operator diagnostic.
 | `kin setup-antigravity-md` | Output/install Antigravity/GEMINI.md kindex directives |
 | `kin setup-cursor-rules` | Output/install recommended Cursor rule (.mdc) for kindex |
 | `kin stop-guard` | Stop hook guard for actionable reminders |
-| `kin doctor` | Health check with graph enforcement (--fix) |
+| `kin doctor` | Health check with graph enforcement (`--fix`; `--fix-task-owners` audits and repairs eligible stale Claude task owners in the current project store) |
 | `kin migrate` | Import markdown topics into SQLite |
 | `kin budget` | LLM spend tracking |
 | `kin attention` | Toggle/check/estimate conversation-attention reminder injection |
@@ -1042,7 +1047,7 @@ Config is layered like git — global defaults, then global config, then local c
 | Global | `~/.config/kindex/kin.yaml` | User-wide defaults |
 | Local | `.kin/config` or `kin.yaml` at project root | Project-specific overrides shipped with code |
 
-Use `kin config set --global llm.enabled true` for global settings, or `kin config set llm.model claude-sonnet-4-6` for project-local. Use `--project-path /path/to/repo` or `KIN_PROJECT=/path/to/repo` when running from outside the repo.
+Use `kin config set --global llm.enabled true` for global settings, or `kin config set llm.model claude-sonnet-4-6` for project-local. Use `--project-path /path/to/repo`, `KIN_PROJECT_PATH=/path/to/repo`, or `KIN_PROJECT=/path/to/repo` when running from outside the repo.
 
 Agent-facing behavior can be tuned at three levels:
 

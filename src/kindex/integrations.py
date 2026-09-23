@@ -21,6 +21,7 @@ from .privacy import POLICY_VERSION, redact, redact_text, safe_error
 
 PROTOCOL_VERSION = 1
 NATIVE_TASK_TOOLS = frozenset({"TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite"})
+HOST_IDENTIFIER_PATTERN = r"[A-Za-z0-9_.:@/-]{1,200}"
 
 
 class IntegrationError(ValueError):
@@ -47,7 +48,7 @@ def project_scope(scope: dict) -> dict:
     if len(scope["project_path"]) > 4096 or "\x00" in scope["project_path"]:
         raise IntegrationError("invalid_scope", "project_path exceeds the supported path boundary")
     for name, value in (("session_id", scope.get("session_id")), ("agent", scope.get("agent", "claude"))):
-        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,200}", value):
+        if not isinstance(value, str) or not re.fullmatch(HOST_IDENTIFIER_PATTERN, value):
             raise IntegrationError("invalid_scope", f"Explicit {name} must be a bounded host identifier")
     if scope.get("profile") not in (None, "", "legacy") or scope.get("include_global") is True:
         raise IntegrationError("invalid_scope", "Modern codebase storage does not accept a Personal, Company, or global profile")
@@ -305,7 +306,7 @@ def execute_task(store, operation, args, scope, *, source_tool="kindex.task", ex
             raise IntegrationError("authorization_mismatch", "Signet-eval authorization does not match this operation, input, scope, or validity window")
         if operation in MUTATIONS:
             actual_scope["authorization_receipt"] = receipt
-    result = execute(store, operation, args, actual_scope)
+    result = execute(store, operation, args, actual_scope, source_tool=source_tool)
     if owner == "signet-eval":
         return _with_audit_status(store, scope, result)
     return result

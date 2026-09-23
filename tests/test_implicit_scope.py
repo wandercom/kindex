@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 SCRATCH = Path(__file__).resolve().parent
@@ -81,12 +83,13 @@ class ScopeContract(unittest.TestCase):
         (self.project / '.kin' / 'config').write_text('name: scope-fixture\n', encoding='utf-8')
         self.seed(self.home_store, ['scope-home-node'])
 
-    def run_process(self, args):
-        return subprocess.run(args, cwd=self.project, env=self.env, text=True,
+    def run_process(self, args, env=None):
+        process_env = self.env | (env or {})
+        return subprocess.run(args, cwd=self.project, env=process_env, text=True,
                               capture_output=True, timeout=30, check=False)
 
-    def api(self, request):
-        response = self.run_process([PYTHON, '-c', WORKER, json.dumps(request)])
+    def api(self, request, env=None):
+        response = self.run_process([PYTHON, '-c', WORKER, json.dumps(request)], env=env)
         self.assertEqual(response.returncode, 0,
                          'Fixture/product child crashed:\n' + response.stdout + response.stderr)
         result_lines = [line[len(MARKER):] for line in response.stdout.splitlines()
@@ -120,7 +123,7 @@ class ScopeContract(unittest.TestCase):
         self.assertNotIn('error', result, result)
         self.assertEqual(result['directory'], str(directory.resolve()))
 
-    def test_01_hook_store_creation_exposes_implicit_ambiguity(self):
+    def test_01_unconfigured_invocation_uses_home_until_a_project_store_is_present(self):
         self.assertFalse((self.project_store / 'kindex.db').exists())
         original_home = self.snapshot(self.home_store)
         self.assert_selected(self.api({'op': 'load'}), self.home_store)
@@ -128,19 +131,11 @@ class ScopeContract(unittest.TestCase):
         self.assertFalse((self.project_store / 'kindex.db').exists())
         self.create_project_store()
         before = self.snapshots()
-        ambiguous = self.api({'op': 'load'})
-        # Preserve evidence even when selection behavior is wrong on baseline.
+        selected = self.api({'op': 'load'})
         self.assertEqual(self.snapshots(), before)
-        self.assertIn('error', ambiguous,
-                      'Implicit selection silently chose a scope after hook store creation: ' + repr(ambiguous))
-        diagnostic = ambiguous['error']
-        self.assertRegex(diagnostic.lower(), r'ambig|multiple.*(?:store|scope)|both.*(?:store|scope)|choose.*(?:store|scope)')
-        self.assertIn(str(self.home_store), diagnostic)
-        self.assertIn(str(self.project_store), diagnostic)
-        self.assertIn('--project-path', diagnostic)
-        self.assertIn('--data-dir', diagnostic)
+        self.assert_selected(selected, self.project_store)
 
-    def test_02_explicit_project_and_named_profile_are_retained(self):
+    def test_02_explicit_project_selection_and_named_profile_are_retained(self):
         self.create_project_store()
         self.seed(self.profile_store, ['scope-profile-a', 'scope-profile-b', 'scope-profile-c'])
         # JSON scalar syntax is valid YAML and safely quotes the absolute path.
@@ -149,10 +144,19 @@ class ScopeContract(unittest.TestCase):
         before = self.snapshots()
         before_profile = self.snapshot(self.profile_store)
         project = self.api({'op': 'load', 'kwargs': {'project_path': str(self.project)}})
+        environment_project = self.api({'op': 'load'}, env={'KIN_PROJECT': str(self.project)})
+        declared_project = self.api({'op': 'load'}, env={'KIN_PROJECT_PATH': str(self.project)})
+        declared_over_legacy = self.api(
+            {'op': 'load'},
+            env={'KIN_PROJECT_PATH': str(self.project), 'KIN_PROJECT': str(self.root / 'missing')},
+        )
         profile = self.api({'op': 'load', 'kwargs': {'profile': 'personal'}})
         self.assertEqual(self.snapshots(), before)
         self.assertEqual(self.snapshot(self.profile_store), before_profile)
         self.assert_selected(project, self.project_store)
+        self.assert_selected(environment_project, self.project_store)
+        self.assert_selected(declared_project, self.project_store)
+        self.assert_selected(declared_over_legacy, self.project_store)
         self.assert_selected(profile, self.profile_store)
 
     def test_03_explicit_cli_scope_bypasses_implicit_guard(self):
@@ -182,12 +186,12 @@ if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0], *unittest_arguments])
 
 
-def test_a_symlinked_kin_is_not_selected_implicitly(tmp_path, monkeypatch):
+def test_a_present_symlinked_kin_is_refused_instead_of_falling_back(tmp_path, monkeypatch):
     import subprocess
 
     from kindex.config import load_config
 
-    for name in ("KIN_PROJECT", "KIN_PROFILE", "KIN_CONFIG"):
+    for name in ("KIN_PROJECT", "KIN_PROJECT_PATH", "KIN_PROFILE", "KIN_CONFIG"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("kindex.config._GLOBAL_PATHS", [tmp_path / "home" / "kin.yaml"])
     repo = tmp_path / "repo"
@@ -198,6 +202,5 @@ def test_a_symlinked_kin_is_not_selected_implicitly(tmp_path, monkeypatch):
     (elsewhere / "kindex.db").write_bytes(b"")
     (repo / ".kin").symlink_to(tmp_path / "shared-kin")
     monkeypatch.chdir(repo)
-    cfg = load_config()
-    assert not str(cfg.data_path).startswith(str(repo))
-    assert "shared-kin" not in str(cfg.data_path)
+    with pytest.raises(ValueError, match="Refusing symlinked repo-local Kindex storage"):
+        load_config()

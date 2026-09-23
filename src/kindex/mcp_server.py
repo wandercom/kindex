@@ -301,17 +301,17 @@ def _default_agent(agent: str = "") -> str:
 
 
 def _agent_without_legacy_store(agent: str = "") -> str:
-    """An explicit agent, KIN_AGENT_ID, or the configured identity when the
-    legacy store is readable; otherwise empty, and project_scope applies its
-    own default."""
+    """Return a validated inferred agent or leave project_scope to default."""
     if agent and agent.strip():
         return agent.strip()
     if os.environ.get("KIN_AGENT_ID", "").strip():
         return os.environ["KIN_AGENT_ID"].strip()
     try:
-        return _default_agent("")
+        resolved = _default_agent("")
     except MemoryUnavailableError:
         return ""
+    from .integrations import HOST_IDENTIFIER_PATTERN
+    return resolved if re.fullmatch(HOST_IDENTIFIER_PATTERN, resolved) else ""
 
 
 def _mcp_client() -> str | None:

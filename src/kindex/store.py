@@ -353,6 +353,7 @@ class Store:
         sqlite_timeout: float = 5.0,
         migration_step_hook: Callable[[int, str], None] | None = None,
         migrate: bool = True,
+        manage_project_storage: bool = True,
     ):
         self.config = config
         # Support both kindex.db (new) and conv.db (legacy)
@@ -363,6 +364,7 @@ class Store:
         self._sqlite_timeout = max(0.0, float(sqlite_timeout))
         self._migration_step_hook = migration_step_hook
         self._migrate = migrate
+        self._manage_project_storage = manage_project_storage
         # Profile stamp guard: configs that carry an active_profile (added by
         # the profiles feature) bind this database to that profile name.
         self._expected_profile: str | None = getattr(config, "active_profile", None)
@@ -374,8 +376,9 @@ class Store:
             # legacy lane created one without saying so.
             # The path as named, not resolved: resolving would walk through a
             # symlinked .kin and hide it from the guard.
-            from .project_store import ensure_local_ignored
-            ensure_local_ignored(Path(os.path.abspath(os.path.expanduser(self.config.data_dir))))
+            if self._manage_project_storage:
+                from .project_store import ensure_local_ignored
+                ensure_local_ignored(Path(os.path.abspath(os.path.expanduser(self.config.data_dir))))
             self.config.data_path.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(
                 str(self.db_path),

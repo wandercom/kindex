@@ -1,13 +1,12 @@
 """A configuration refusal must degrade a hook, never block the host.
 
-The strict implicit-scope rule (3efd1b9) raises ValueError when an unscoped
-invocation inside a repository finds durable work in both the home store and
-the repository store. `_config` turned that into SystemExit(2) before main()'s
-fail-open handler could see it, so Claude Code reported "Blocked by hook" on
-every tool call. batch0 R2.1 already requires every hook surface to catch all
-exceptions and exit 0, and R2.2 requires every degraded event in the ledger;
-these probes hold the configuration-refusal path to both. Commands still
-refuse with exit 2.
+An explicitly selected unknown profile raises ValueError while resolving
+configuration. `_config` turns that into SystemExit(2) before main()'s
+fail-open handler can see it, so Claude Code would report "Blocked by hook"
+on every tool call. batch0 R2.1 already requires every hook surface to catch
+all exceptions and exit 0, and R2.2 requires every degraded event in the
+ledger; these probes hold the configuration-refusal path to both. Commands
+still refuse with exit 2.
 """
 
 from __future__ import annotations
@@ -23,6 +22,8 @@ import pytest
 
 from kindex.config import Config
 from kindex.store import Store
+
+UNKNOWN_PROFILE = "missing-scope-profile"
 
 
 @pytest.fixture
@@ -63,6 +64,11 @@ def run_kin(world, *args, stdin=""):
     )
 
 
+def with_unknown_profile(*args):
+    """An explicit invalid profile is a stable configuration-refusal seam."""
+    return [*args, "--profile", UNKNOWN_PROFILE]
+
+
 def degraded_ledger(world):
     """The ledger path the product derives when no config could be loaded,
     asked of the product in the environment the hook ran in. In-process it
@@ -92,10 +98,10 @@ def isolate_global_config(monkeypatch, home):
 
 
 @pytest.mark.parametrize("command", [["status", "--json"], ["integration-doctor"]])
-def test_non_hook_command_still_refuses_the_ambiguous_scope(ambiguous_world, command):
-    result = run_kin(ambiguous_world, *command)
+def test_non_hook_command_still_refuses_an_explicit_invalid_profile(ambiguous_world, command):
+    result = run_kin(ambiguous_world, *with_unknown_profile(*command))
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "Ambiguous Kindex scope" in result.stderr
+    assert UNKNOWN_PROFILE in result.stderr
 
 
 def test_pre_tool_use_hook_degrades_instead_of_blocking(ambiguous_world):
@@ -105,12 +111,12 @@ def test_pre_tool_use_hook_degrades_instead_of_blocking(ambiguous_world):
         "cwd": str(ambiguous_world["project"]), "session_id": "s1",
     })
     result = run_kin(ambiguous_world, "attention-hook", "--adapter", "claude",
-                     "--event", "PreToolUse", stdin=payload)
+                     "--event", "PreToolUse", "--profile", UNKNOWN_PROFILE, stdin=payload)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == "" and "Error:" not in result.stderr
     event = next(e for e in ledger_events(ambiguous_world) if e["cmd"] == "attention-hook")
     assert event["error_class"] == "ConfigResolutionError"
-    assert event["msg"].startswith("Ambiguous Kindex scope")
+    assert UNKNOWN_PROFILE in event["msg"]
 
 
 @pytest.mark.parametrize("command, payload", [
@@ -121,7 +127,7 @@ def test_guard_type_hooks_fail_open_empty_and_record(ambiguous_world, command, p
     """R2.1: guard-type hooks give empty fail-open output and exit 0; a
     stop-guard that blocked here would loop the session on a config error."""
     payload = {**payload, "cwd": str(ambiguous_world["project"]), "session_id": "s1"}
-    result = run_kin(ambiguous_world, *command, stdin=json.dumps(payload))
+    result = run_kin(ambiguous_world, *with_unknown_profile(*command), stdin=json.dumps(payload))
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == ""
     assert any(e["cmd"] == command[0] and e["error_class"] == "ConfigResolutionError"
@@ -129,7 +135,8 @@ def test_guard_type_hooks_fail_open_empty_and_record(ambiguous_world, command, p
 
 
 def test_prime_degrades_to_its_single_line(ambiguous_world):
-    result = run_kin(ambiguous_world, "prime", "--for", "hook", stdin="{}")
+    result = run_kin(ambiguous_world, "prime", "--for", "hook", "--profile", UNKNOWN_PROFILE,
+                     stdin="{}")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == ("# kindex degraded: ConfigResolutionError — "
                                      "session starting without memory context")
@@ -137,7 +144,7 @@ def test_prime_degrades_to_its_single_line(ambiguous_world):
 
 def test_cron_degrades_to_exit_zero_and_records(ambiguous_world):
     """R2.1 names the cron family among the surfaces that exit 0."""
-    result = run_kin(ambiguous_world, "cron")
+    result = run_kin(ambiguous_world, "cron", "--profile", UNKNOWN_PROFILE)
     assert result.returncode == 0, result.stdout + result.stderr
     assert any(e["cmd"] == "cron" for e in ledger_events(ambiguous_world))
 
@@ -149,7 +156,7 @@ def test_every_refusal_is_recorded(ambiguous_world):
                           "cwd": str(ambiguous_world["project"]), "session_id": "s1"})
     for _ in range(3):
         result = run_kin(ambiguous_world, "attention-hook", "--adapter", "claude",
-                         "--event", "PreToolUse", stdin=payload)
+                         "--event", "PreToolUse", "--profile", UNKNOWN_PROFILE, stdin=payload)
         assert result.returncode == 0
     assert sum(e["cmd"] == "attention-hook" for e in ledger_events(ambiguous_world)) == 3
 
