@@ -1026,7 +1026,7 @@ coverage without silently discarding the operator diagnostic.
 | `kin setup-antigravity-md` | Output/install Antigravity/GEMINI.md kindex directives |
 | `kin setup-cursor-rules` | Output/install recommended Cursor rule (.mdc) for kindex |
 | `kin stop-guard` | Stop hook guard for actionable reminders |
-| `kin doctor` | Health check with graph enforcement (--fix) |
+| `kin doctor` | Health check with graph enforcement (`--fix`; `--fix-task-owners` audits and repairs eligible stale Claude task owners in the current project store) |
 | `kin migrate` | Import markdown topics into SQLite |
 | `kin budget` | LLM spend tracking |
 | `kin attention` | Toggle/check/estimate conversation-attention reminder injection |

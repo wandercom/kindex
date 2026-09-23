@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1427,6 +1428,54 @@ def cmd_doctor(args):
     warnings = []
     fixes_applied = 0
     do_fix = getattr(args, "fix", False)
+    task_owner_findings = []
+    task_owner_repairs = []
+    task_owner_scan = "skipped: explicit store selection"
+
+    # The default doctor surface may check an already-existing project graph,
+    # but it must never create or register one just by reporting health.
+    if not any(getattr(args, name, None) for name in ("config", "data_dir", "profile")):
+        try:
+            from .config import resolve_agent_id, trusted_supervisor_config
+            from .integrations import project_scope
+            from .project_store import existing_local_store
+            from .store import Store
+            from .task_service import (repair_task_owners, task_owner_findings_for_nodes)
+
+            scope = project_scope({
+                "project_path": str(Path(getattr(args, "project_path", None) or os.getcwd()).resolve()),
+                "session_id": "kin-doctor",
+                "agent": "claude",
+            })
+            root = Path(scope["project_path"])
+            data_dir = existing_local_store(root)
+            if data_dir is None:
+                task_owner_scan = "skipped: no project store"
+            else:
+                db_path = data_dir / ("kindex.db" if (data_dir / "kindex.db").exists() else "conv.db")
+                with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+                    rows = conn.execute("SELECT id, title, extra FROM nodes WHERE type = 'task'").fetchall()
+                nodes = [{"id": row[0], "title": row[1], "extra": json.loads(row[2] or "{}")} for row in rows]
+                agent = resolve_agent_id(_config(args))
+                task_owner_findings = task_owner_findings_for_nodes(nodes, agent)
+                task_owner_scan = "completed"
+            repairable = [item for item in task_owner_findings if item["repairable"]]
+            if task_owner_findings:
+                warnings.append(
+                    f"{len(task_owner_findings)} task(s) retain legacy claude ownership; "
+                    "run `kin doctor --fix-task-owners` to repair eligible records")
+            if data_dir is not None and getattr(args, "fix_task_owners", False):
+                repair_store = Store(trusted_supervisor_config(root, str(data_dir)),
+                                     manage_project_storage=False)
+                try:
+                    task_owner_repairs = repair_task_owners(repair_store, agent)
+                finally:
+                    repair_store.close()
+                fixes_applied += len(task_owner_repairs)
+                if repairable and not task_owner_repairs:
+                    warnings.append("No eligible task-owner records changed; rerun doctor to inspect current ownership")
+        except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError):
+            task_owner_scan = "skipped: no project store"
 
     # ── Basic health ──
     if stats["nodes"] == 0:
@@ -1692,6 +1741,9 @@ def cmd_doctor(args):
             "warnings": warnings,
             "stats": stats,
             "fixes_applied": fixes_applied,
+            "task_owner_scan": task_owner_scan,
+            "task_owner_findings": task_owner_findings,
+            "task_owner_repairs": task_owner_repairs,
             "embedding_queue": {
                 key: value for key, value in embedding_queue.items()
                 if key != "oversized"
@@ -1706,6 +1758,15 @@ def cmd_doctor(args):
             print(f"\n{len(warnings)} warning(s):")
             for w in warnings:
                 print(f"  ⚠ {w}")
+        if task_owner_findings:
+            print("\nTask owner findings:")
+            for item in task_owner_findings:
+                detail = item["classification"].replace("_", " ")
+                print(f"  {item['id']}  {item['title']} ({detail})")
+        if task_owner_repairs:
+            print("\nTask owner repairs:")
+            for item in task_owner_repairs:
+                print(f"  {item['id']}  {item['title']}: {'; '.join(item['changes'])}")
         if not issues and not warnings:
             print(f"Healthy: {stats['nodes']} nodes, {stats['edges']} edges, 0 issues")
         elif not issues:
@@ -7284,6 +7345,8 @@ def build_parser() -> argparse.ArgumentParser:
     # doctor
     s = sub.add_parser("doctor", help="Health check")
     s.add_argument("--fix", action="store_true")
+    s.add_argument("--fix-task-owners", action="store_true",
+                   help="Repair eligible stale claude task owners in the current project store")
     _common(s)
     s.set_defaults(func=cmd_doctor)
 

@@ -5,6 +5,9 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 ## [Unreleased]
 
 ### Fixed
+- `kin doctor` now reports legacy bare-`claude` task ownership in the current
+  project store; `--fix-task-owners` opt-in repairs only old task-execute or
+  unmarked records, releases expired claims, and preserves modern hook claims.
 - Store selection is intentionally ordered: `--project-path`,
   `KIN_PROJECT_PATH`, or `KIN_PROJECT`; then a present repository-local
   store; then configured `data_dir`; then `~/.kindex`. Git tracking never

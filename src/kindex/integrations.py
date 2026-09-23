@@ -306,7 +306,7 @@ def execute_task(store, operation, args, scope, *, source_tool="kindex.task", ex
             raise IntegrationError("authorization_mismatch", "Signet-eval authorization does not match this operation, input, scope, or validity window")
         if operation in MUTATIONS:
             actual_scope["authorization_receipt"] = receipt
-    result = execute(store, operation, args, actual_scope)
+    result = execute(store, operation, args, actual_scope, source_tool=source_tool)
     if owner == "signet-eval":
         return _with_audit_status(store, scope, result)
     return result
