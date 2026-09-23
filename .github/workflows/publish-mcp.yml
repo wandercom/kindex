@@ -1,0 +1,72 @@
+name: Publish to the MCP Registry
+
+# The MCP Registry is how MCP clients discover this server, and it is a
+# separate publication from PyPI. Only PyPI was automated, so the registry
+# entry io.github.wandercom/kindex sat at 0.38.0 while 0.39 through 0.44
+# shipped: every client saw a version six releases behind what users could
+# install.
+#
+# A tag publishes automatically. `workflow_dispatch` exists for a release that
+# is already tagged and on PyPI but never reached the registry — the backfill
+# path — so catching up never requires inventing a version number.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example v0.44.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # GitHub OIDC proves the io.github.wandercom/* namespace
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Check server.json names this version, and PyPI already has it
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python - "$RELEASE_TAG" <<'CHECK'
+          import json, sys, urllib.request
+
+          tag = sys.argv[1].lstrip("v")
+          document = json.load(open("server.json"))
+          advertised = {document.get("version")}
+          advertised |= {package.get("version") for package in document.get("packages", [])}
+          if advertised != {tag}:
+              raise SystemExit(
+                  f"server.json advertises {sorted(v for v in advertised if v)} for tag {tag}"
+              )
+          # The registry must never name a version a client cannot install, so
+          # the package is confirmed on PyPI before the entry is published.
+          with urllib.request.urlopen(
+              "https://pypi.org/pypi/kindex/json", timeout=30
+          ) as response:
+              released = json.load(response)["releases"]
+          if tag not in released:
+              raise SystemExit(f"kindex {tag} is not on PyPI yet; publish the package first")
+          print(f"kindex {tag} is on PyPI and server.json agrees")
+          CHECK
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish the server entry
+        run: ./mcp-publisher publish

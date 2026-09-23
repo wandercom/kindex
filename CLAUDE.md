@@ -103,7 +103,8 @@ When asked to release, follow these steps exactly. Do NOT install twine or attem
 6. Create GitHub release: `gh release create vX.Y.Z --title "..." --notes "..."`
 7. Watch the workflow: `gh run watch <id> -R wandercom/kindex` -- all three jobs (test, build, publish) must pass
 8. Verify on PyPI: `pip index versions kindex 2>/dev/null | head -1` or check https://pypi.org/project/kindex/
-9. Verify the MCP listing metadata is current: `server.json` version/package fields match the release, and https://mcpmarket.com/server/kindex reflects the published package after indexing.
+9. The tag also publishes the server entry to the MCP Registry (`.github/workflows/publish-mcp.yml`, OIDC, no token; it refuses to publish a version PyPI does not have, and can be run by hand with `gh workflow run publish-mcp.yml -f tag=vX.Y.Z` to backfill a release that was tagged before this existed). Confirm it: `curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=kindex" | grep -o '"version":"[^"]*"' | tail -1` must show the released version. The registry is how MCP clients discover the server, and it stalled at 0.38.0 through six PyPI releases because nothing automated it.
+10. Verify the MCP listing metadata is current: `server.json` version/package fields match the release, and https://mcpmarket.com/server/kindex reflects the published package after indexing.
 
 **Definition of done:** The release is complete when (a) all workflow jobs are green, (b) the new version appears on PyPI, (c) `pip install kindex==X.Y.Z` succeeds, and (d) MCP/server metadata has been updated or a marketplace refresh has been requested. If any job fails, fix the issue, bump to a new patch version, and repeat from step 1 -- do not re-tag or force-push an existing tag.
 
