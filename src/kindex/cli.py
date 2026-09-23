@@ -2025,35 +2025,15 @@ def cmd_export(args):
     # Apply PII stripping for public/org exports
     strip_pii = target_audience in ("public", "org")
 
-    # Canonicalize outgoing rows and infer only missing reciprocals at the same
-    # 0.8 ratio Store.add_edge has always used. This makes old one-sided graph
-    # rows and new bidirectional rows export identically.
+    # Export the stored arcs verbatim. Store.add_edge persists a reciprocal
+    # itself when an edge is bidirectional; inferring one here would invert
+    # directed relationships during an export/import round trip.
     output = []
     node_ids = {n["id"] for n in nodes}
-    edges_by_node = {node_id: [] for node_id in node_ids}
-    edge_keys = set()
-    for node_id in sorted(node_ids):
-        for edge in store.edges_from(node_id):
-            if edge["to_id"] not in node_ids:
-                continue
-            edge_keys.add((node_id, edge["to_id"], edge["type"]))
-            edges_by_node[node_id].append(edge)
-    for from_id, to_id, edge_type in sorted(edge_keys):
-        if (to_id, from_id, edge_type) not in edge_keys:
-            primary = next(edge for edge in edges_by_node[from_id]
-                           if edge["to_id"] == to_id and edge["type"] == edge_type)
-            edges_by_node[to_id].append({
-                "to_id": from_id,
-                "type": edge_type,
-                "weight": primary["weight"] * 0.8,
-                "provenance": primary.get("provenance", ""),
-            })
-    for edges in edges_by_node.values():
-        edges.sort(key=lambda edge: (edge["to_id"], edge["type"], edge["weight"]))
     for n in sorted(nodes, key=lambda node: node["id"]):
         if strip_pii:
             n = _strip_pii(n)
-        output.append(export_record(n, edges_by_node[n["id"]], node_ids, public=strip_pii))
+        output.append(export_record(n, store.edges_from(n["id"]), node_ids, public=strip_pii))
 
     if args.format == "jsonl":
         for item in output:

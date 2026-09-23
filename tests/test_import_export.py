@@ -160,7 +160,7 @@ class TestExportJSONL:
             assert row["asserted_at"] is None
             assert row["true_of"] is None
 
-    def test_export_inferrs_missing_reciprocal_edge_weight(self, tmp_path):
+    def test_export_preserves_stored_directed_edges(self, tmp_path):
         d = str(tmp_path)
         run("init", data_dir=d)
         s = Store(Config(data_dir=d))
@@ -177,10 +177,7 @@ class TestExportJSONL:
             {"to": "b", "type": "implements", "weight": 0.75,
              "bidirectional": False, "provenance": ""},
         ]
-        assert rows["b"]["edges"] == [
-            {"to": "a", "type": "implements", "weight": 0.75 * 0.8,
-             "bidirectional": False, "provenance": ""},
-        ]
+        assert rows["b"]["edges"] == []
 
 
 class TestImportJSON:
@@ -275,6 +272,29 @@ class TestImportMerge:
 
 
 class TestRoundtrip:
+    def test_cli_roundtrip_active_only_preserves_superseding_successor(self, tmp_path):
+        """A one-way supersedes arc must not retire its successor on replay."""
+        source_dir, dest_dir = str(tmp_path / "source"), str(tmp_path / "dest")
+        run("init", data_dir=source_dir)
+        source = Store(Config(data_dir=source_dir))
+        source.add_node("Prior decision", node_id="prior", node_type="decision")
+        source.add_node("Current decision", node_id="current", node_type="decision")
+        source.add_edge("current", "prior", edge_type="supersedes", bidirectional=False)
+        source.close()
+
+        exported = run("export", "--audience", "private", "--format", "json",
+                       data_dir=source_dir)
+        assert exported.returncode == 0, exported.stderr
+        transfer = tmp_path / "graph.json"
+        transfer.write_text(exported.stdout)
+
+        imported = run("import", str(transfer), data_dir=dest_dir)
+        assert imported.returncode == 0, imported.stderr
+        active_only = run("export", "--audience", "private", "--format", "json",
+                          "--active-only", data_dir=dest_dir)
+        assert active_only.returncode == 0, active_only.stderr
+        assert [node["id"] for node in json.loads(active_only.stdout)] == ["current"]
+
     def test_roundtrip(self, tmp_path):
         """Export then import, verify lossless."""
         d = str(tmp_path)
