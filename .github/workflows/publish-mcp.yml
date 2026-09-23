@@ -6,14 +6,20 @@ name: Publish to the MCP Registry
 # shipped: every client saw a version six releases behind what users could
 # install.
 #
-# A tag publishes automatically. `workflow_dispatch` exists for a release that
-# is already tagged and on PyPI but never reached the registry — the backfill
-# path — so catching up never requires inventing a version number.
+# This never triggers on the tag itself. A tag starts PyPI publishing, and
+# the registry must not name a version PyPI does not have yet, so the release
+# workflow calls this one *after* the PyPI job succeeds. `workflow_dispatch`
+# is the backfill path for a release that is already tagged and on PyPI but
+# never reached the registry, so catching up never requires inventing a
+# version number.
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to publish (for example v0.44.0)"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -33,14 +39,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.tag }}
 
       - name: Check server.json names this version, and PyPI already has it
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           python - "$RELEASE_TAG" <<'CHECK'
-          import json, sys, urllib.request
+          import json, sys, time, urllib.request
 
           tag = sys.argv[1].lstrip("v")
           document = json.load(open("server.json"))
@@ -50,15 +56,28 @@ jobs:
               raise SystemExit(
                   f"server.json advertises {sorted(v for v in advertised if v)} for tag {tag}"
               )
+
           # The registry must never name a version a client cannot install, so
           # the package is confirmed on PyPI before the entry is published.
-          with urllib.request.urlopen(
-              "https://pypi.org/pypi/kindex/json", timeout=30
-          ) as response:
-              released = json.load(response)["releases"]
-          if tag not in released:
-              raise SystemExit(f"kindex {tag} is not on PyPI yet; publish the package first")
-          print(f"kindex {tag} is on PyPI and server.json agrees")
+          # Ordering already guarantees the upload finished; these retries are
+          # for PyPI's own index propagation, which lags the upload by seconds
+          # to a couple of minutes. Bounded: a version that never appears is a
+          # failed release, and this must fail with it rather than wait.
+          for attempt in range(1, 21):
+              with urllib.request.urlopen(
+                  "https://pypi.org/pypi/kindex/json", timeout=30
+              ) as response:
+                  released = json.load(response)["releases"]
+              if tag in released:
+                  print(f"kindex {tag} is on PyPI and server.json agrees")
+                  break
+              print(f"kindex {tag} not visible on PyPI yet (attempt {attempt}/20)")
+              time.sleep(15)
+          else:
+              raise SystemExit(
+                  f"kindex {tag} never appeared on PyPI after 5 minutes; "
+                  "publish the package first"
+              )
           CHECK
 
       - name: Install mcp-publisher
@@ -70,3 +89,34 @@ jobs:
 
       - name: Publish the server entry
         run: ./mcp-publisher publish
+
+      - name: Confirm the registry now serves this version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python - "$RELEASE_TAG" <<'CONFIRM'
+          import json, sys, urllib.parse, urllib.request
+
+          tag = sys.argv[1].lstrip("v")
+          name = "io.github.wandercom/kindex"
+          # search is a substring match over every server and every historical
+          # version, so the exact name and the registry's own isLatest flag
+          # decide which entry this is - never position in the result list.
+          query = urllib.parse.urlencode({"search": name, "version": "latest"})
+          with urllib.request.urlopen(
+              f"https://registry.modelcontextprotocol.io/v0/servers?{query}", timeout=30
+          ) as response:
+              servers = json.load(response)["servers"]
+          latest = [
+              entry["server"]
+              for entry in servers
+              if entry["server"]["name"] == name
+              and entry["_meta"]["io.modelcontextprotocol.registry/official"]["isLatest"]
+          ]
+          if not latest:
+              raise SystemExit(f"{name} has no latest entry in the registry")
+          published = latest[0]["version"]
+          if published != tag:
+              raise SystemExit(f"{name} still serves {published}, not {tag}")
+          print(f"{name} now serves {tag}")
+          CONFIRM
