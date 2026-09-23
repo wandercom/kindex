@@ -303,24 +303,20 @@ def _default_agent(agent: str = "") -> str:
 def _agent_without_legacy_store(agent: str = "") -> tuple[str, bool]:
     """Return an agent and whether the caller explicitly supplied it.
 
-    ``task_execute`` must keep validating caller-supplied identities. Ordinary
-    omitted-agent callers keep their resolved legacy identity. The prior
-    implicit two-store ambiguity instead fell back to ``project_scope``'s
-    stable ``claude`` owner, which must remain stable for its existing retries
-    and claims.
+    ``task_execute`` validates caller-supplied identities. An omitted agent
+    keeps its resolved configured identity when it is a valid host identifier;
+    otherwise project_scope applies its stable ``claude`` default.
     """
     if agent and agent.strip():
         return agent.strip(), True
     if os.environ.get("KIN_AGENT_ID", "").strip():
         return os.environ["KIN_AGENT_ID"].strip(), True
     try:
-        config = _get_config()
-        from .config import legacy_implicit_scope_was_ambiguous
-        if legacy_implicit_scope_was_ambiguous(config):
-            return "", False
-        return _default_agent(""), False
+        resolved = _default_agent("")
     except MemoryUnavailableError:
         return "", False
+    from .integrations import HOST_IDENTIFIER_PATTERN
+    return (resolved, False) if re.fullmatch(HOST_IDENTIFIER_PATTERN, resolved) else ("", False)
 
 
 def _mcp_client() -> str | None:
@@ -2485,14 +2481,8 @@ def task_execute(operation: str, arguments: dict, project_path: str,
         "include_global": include_global,
     }
     try:
-        resolved_agent, explicit_agent = _agent_without_legacy_store(agent)
-        # ``project_scope`` validates every supplied agent.  Preserve that
-        # refusal for caller input, but do not turn a local display name such
-        # as "Jane Doe" into a new failure for an omitted MCP parameter.
-        # Leaving an invalid inferred identity absent retains project_scope's
-        # established default agent ("claude").
-        valid_inferred_agent = bool(re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,200}", resolved_agent))
-        if resolved_agent and (explicit_agent or valid_inferred_agent):
+        resolved_agent, _ = _agent_without_legacy_store(agent)
+        if resolved_agent:
             requested["agent"] = resolved_agent
         scope = project_scope(requested)
         store = open_project_store(scope)

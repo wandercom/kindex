@@ -6220,12 +6220,12 @@ def cmd_integration_doctor(args):
     from .integrations import describe, project_scope
     from .privacy import safe_error
     try:
+        cfg = _config(args)
         scope = project_scope({"project_path": str(Path(getattr(args, "project_path", None) or os.getcwd()).resolve()),
                                "session_id": "doctor", "agent": "claude"})
         result = describe(scope)
         from .claude_install import QUALIFIED_CLAUDE_VERSION
         result["qualified_claude_version"] = QUALIFIED_CLAUDE_VERSION
-        cfg = _config(args)
         record = cfg.claude_path / "kindex-adapter.json"
         result["adapter"] = json.loads(record.read_text()) if record.exists() else {"mode": "unmanaged"}
     except ConfigResolutionError:
@@ -6965,7 +6965,7 @@ def _config_write(key: str, value: str, config_path: str | None = None,
     - --config <path>:  explicit file
     - --global:         user-level (~/.config/kindex/kin.yaml)
     - default:          project .kin/config, discovered from --project-path,
-                        KIN_PROJECT, git root, then cwd
+                        KIN_PROJECT_PATH, KIN_PROJECT, git root, then cwd
     """
     import yaml
 

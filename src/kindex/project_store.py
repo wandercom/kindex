@@ -177,8 +177,8 @@ def project_graph_registry_path() -> Path:
 
 def existing_local_store(root: Path) -> Path | None:
     """The repo-local graph directory under ``root``, chosen as the store
-    itself chooses it (the populated layout wins over an empty database), or
-    None when there is no database or the layouts conflict."""
+    itself chooses it by database presence, or None when there is no database
+    or the layouts conflict."""
     local = root / ".kin" / "local"
     if not any((directory / name).is_file()
                for directory in (local, local / "kindex")
@@ -242,30 +242,29 @@ def registered_project_graphs() -> dict[str, str]:
 
 
 def project_data_path(root: Path) -> Path:
+    """Select a repo-local store by database presence without inspecting it."""
     root = root.resolve()
     local = root / ".kin" / "local"
     candidates = (local, local / "kindex")
-    populated = []
+    present = []
     for directory in candidates:
         for parent in (root / ".kin", local, directory):
             if parent.is_symlink():
                 raise ValueError("Refusing symlinked repo-local Kindex storage")
-        has_data = False
         for name in ("kindex.db", "conv.db"):
             path = directory / name
             for suffix in ("", "-wal", "-shm"):
                 leaf = Path(str(path) + suffix)
                 if leaf.is_symlink() or (leaf.exists() and leaf.stat().st_nlink > 1):
                     raise ValueError("Refusing linked repo-local Kindex database")
-            has_data |= database_has_durable_work(path)
-        if has_data:
-            populated.append(directory)
-    if len(populated) > 1:
-        raise ProjectStoreConflict(
-            f"Conflicting populated Kindex stores: {local / 'kindex.db'} and {local / 'kindex' / 'kindex.db'}. "
-            "Both are preserved; reconcile explicitly before continuing.")
+        if any((directory / name).exists() for name in ("kindex.db", "conv.db")):
+            present.append(directory)
     refuse_tracked_store(local)
-    return populated[0] if populated else local / "kindex"
+    if len(present) > 1:
+        raise ProjectStoreConflict(
+            f"Conflicting present Kindex stores: {local / 'kindex.db'} and {local / 'kindex' / 'kindex.db'}. "
+            "Both are preserved; reconcile explicitly before continuing.")
+    return present[0] if present else local / "kindex"
 
 
 def is_project_store(store, project: str) -> bool:

@@ -5,10 +5,11 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 ## [Unreleased]
 
 ### Fixed
-- Unconfigured clients now keep the legacy `~/.kindex` home graph even when a
-  repository-local graph contains durable work. Store presence no longer turns
-  the default into an `Ambiguous Kindex scope` refusal; use `KIN_PROJECT` or
-  `--project-path` to explicitly select the repository graph.
+- Store selection is intentionally ordered: `--project-path`,
+  `KIN_PROJECT_PATH`, or `KIN_PROJECT`; then a present repository-local
+  store; then configured `data_dir`; then `~/.kindex`. Git tracking never
+  filters lookup: a selected tracked `.kin/local` is explicitly refused with
+  the cleanup remedy instead of silently falling back to another store.
 
 ## [0.44.0] - 2026-09-21
 

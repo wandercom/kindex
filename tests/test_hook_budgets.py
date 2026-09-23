@@ -211,6 +211,7 @@ def ambiguous_mcp(tmp_path, monkeypatch):
         store.close()
     isolate_global_config(monkeypatch, home)
     monkeypatch.delenv("KIN_PROJECT", raising=False)
+    monkeypatch.delenv("KIN_PROJECT_PATH", raising=False)
     monkeypatch.delenv("KIN_AGENT_ID", raising=False)
     monkeypatch.chdir(project)
     monkeypatch.setattr(mcp_server, "_store", None)
@@ -218,13 +219,13 @@ def ambiguous_mcp(tmp_path, monkeypatch):
     return {"home": home, "project": project, "mcp": mcp_server}
 
 
-def test_unconfigured_mcp_status_uses_the_legacy_home_graph(ambiguous_mcp):
+def test_unconfigured_mcp_status_uses_the_present_project_graph(ambiguous_mcp):
     result = ambiguous_mcp["mcp"].status()
     assert not result.startswith("Error: memory unavailable"), result
     assert "Nodes:" in result
     nodes = ambiguous_mcp["mcp"].list_nodes()
-    assert "Synthetic home-node" in nodes
-    assert "Synthetic project-node" not in nodes
+    assert "Synthetic project-node" in nodes
+    assert "Synthetic home-node" not in nodes
 
 
 def test_task_execute_needs_no_legacy_store(ambiguous_mcp, monkeypatch):
@@ -235,41 +236,9 @@ def test_task_execute_needs_no_legacy_store(ambiguous_mcp, monkeypatch):
     assert result.get("ok") is True, result
 
 
-def test_task_execute_keeps_the_two_store_fallback_owner_when_agent_is_omitted(
-        ambiguous_mcp, monkeypatch):
+def test_task_execute_preserves_normal_omitted_agent_identity(ambiguous_mcp, monkeypatch):
     import kindex.integrations as integrations
 
-    observed = {}
-    monkeypatch.setattr(
-        ambiguous_mcp["mcp"], "_default_agent",
-        lambda agent: pytest.fail("two-store fallback must not resolve a new configured identity"),
-    )
-    monkeypatch.setattr(
-        integrations, "execute_task",
-        lambda store, operation, arguments, scope, **kwargs: observed.update(scope) or {"ok": True},
-    )
-
-    result = ambiguous_mcp["mcp"].task_execute(
-        "list", {}, project_path=str(ambiguous_mcp["project"]), session_id="s1", agent="")
-
-    assert result == {"ok": True}
-    assert observed["agent"] == "claude"
-
-
-@pytest.mark.parametrize("legacy_scope", ["home_only", "explicit_project", "configured_data_dir"])
-def test_task_execute_preserves_normal_omitted_agent_identity(
-        ambiguous_mcp, monkeypatch, legacy_scope):
-    import shutil
-    import kindex.integrations as integrations
-
-    if legacy_scope == "home_only":
-        shutil.rmtree(ambiguous_mcp["project"] / ".kin" / "local")
-    elif legacy_scope == "explicit_project":
-        monkeypatch.setenv("KIN_PROJECT", str(ambiguous_mcp["project"]))
-    else:
-        (ambiguous_mcp["home"] / ".config" / "kindex" / "kin.yaml").write_text(
-            f"data_dir: {ambiguous_mcp['home'] / '.kindex'}\\n",
-        )
     observed = {}
     monkeypatch.setattr(ambiguous_mcp["mcp"], "_default_agent", lambda agent: "devon@host")
     monkeypatch.setattr(

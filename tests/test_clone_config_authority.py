@@ -1,12 +1,11 @@
 """Content a git clone delivers is evidence, never authority.
 
 A repository's tracked .kin/config, and any store whose files the repository
-tracks, arrive with every clone. An unconfigured CLI must retain the user's
-home graph and never open a clone-provided local store. Explicit routing and
-the cron reminder sweep likewise must not let a cloned repository make kindex
-run its own shell commands (a shipped reminder with a shell action, fired by
-cron with no user action; a `sim.command` run by `kin sim check`) or become
-the user's store.
+tracks, arrive with every clone. The modern hook lane already refused both;
+the legacy CLI, kin-mcp and the cron reminder sweep did not, so a cloned
+repository could make kindex run its own shell commands (a shipped reminder
+with a shell action, fired by cron with no user action; a `sim.command` run
+by `kin sim check`) and could become the user's store.
 """
 
 from __future__ import annotations
@@ -79,20 +78,12 @@ def seed_store(path: Path) -> None:
     store.close()
 
 
-def test_tracked_repo_local_store_is_not_used_by_unconfigured_status(world):
-    home_store = world["home"] / ".kindex"
-    clone_store = world["repo"] / ".kin" / "local" / "kindex"
-    seed_store(home_store)
-    seed_store(clone_store)
+def test_tracked_repo_local_store_is_refused(world):
+    seed_store(world["repo"] / ".kin" / "local" / "kindex")
     commit_all(world["repo"])
-    before = {path.relative_to(clone_store): path.read_bytes()
-              for path in clone_store.rglob("*") if path.is_file()}
     result = run_kin(world, "status", "--json")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout)["stored_nodes"] == 1
-    after = {path.relative_to(clone_store): path.read_bytes()
-             for path in clone_store.rglob("*") if path.is_file()}
-    assert after == before
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "Refusing tracked Kindex storage" in result.stderr
 
 
 def test_tracked_store_named_by_repo_config_is_refused(world):
@@ -163,14 +154,11 @@ def test_a_store_outside_any_worktree_is_accepted(world):
     assert refusal_for(world, world["tmp"] / "plain-store") == "None"
 
 
-def test_unconfigured_status_does_not_recommend_deleting_a_clone_store(world):
-    seed_store(world["home"] / ".kindex")
+def test_the_refusal_names_the_remedy_for_the_users_own_store(world):
     seed_store(world["repo"] / ".kin" / "local" / "kindex")
     commit_all(world["repo"])
     result = run_kin(world, "status", "--json")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout)["stored_nodes"] == 1
-    assert "rm -r --cached -- .kin/local" not in result.stderr
+    assert "rm -r --cached -- .kin/local" in result.stderr, result.stderr
 
 
 def test_untracked_repo_relative_store_still_works(world):

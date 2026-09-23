@@ -801,6 +801,10 @@ then `KIN_PROJECT`, the git worktree root, then the current directory. User
 config still lives in `~/.config/kindex/kin.yaml` and deep-merges below project
 config, so user preferences remain local while the repo's work contract travels
 with the repo.
+Store selection is ordered: an explicit `--project-path`, `KIN_PROJECT_PATH`,
+or `KIN_PROJECT`; then a present `.kin/local` store; then configured
+`data_dir`; then `~/.kindex`. A tracked or symlinked selected local store is
+refused explicitly rather than silently falling back to another store.
 Generated `.kin/` snapshots use canonical, id-keyed ordering and omit volatile
 timestamps so repeated exports of unchanged source do not churn Git diffs.
 Concurrent branches merge them without manual conflicts via a structured merge

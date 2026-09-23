@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from kindex.config import load_config, resolve_project_root
 
 
@@ -99,6 +101,24 @@ def test_resolve_project_root_prefers_kin_project_env(tmp_path, monkeypatch):
     monkeypatch.setenv("KIN_PROJECT", str(project))
 
     assert resolve_project_root() == project.resolve()
+
+
+def test_resolve_project_root_prefers_kin_project_path_over_kin_project(tmp_path, monkeypatch):
+    declared = tmp_path / "declared"
+    legacy = tmp_path / "legacy"
+    declared.mkdir()
+    legacy.mkdir()
+    monkeypatch.setenv("KIN_PROJECT_PATH", str(declared))
+    monkeypatch.setenv("KIN_PROJECT", str(legacy))
+
+    assert resolve_project_root() == declared.resolve()
+
+
+def test_resolve_project_root_names_missing_kin_project_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIN_PROJECT_PATH", str(tmp_path / "missing"))
+
+    with pytest.raises(ValueError, match="KIN_PROJECT_PATH"):
+        resolve_project_root()
 
 
 def test_current_user_prefers_repo_local_git_config(tmp_path):

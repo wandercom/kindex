@@ -1,7 +1,6 @@
 """The store a call opens is the one it means, and opening it stays cheap.
 
-- Any read can create an empty project store, which must not redirect an
-  unconfigured client away from its legacy home store.
+- A present project store wins over configured and default personal stores.
 - An absolute or trailing-slash spelling of ~/.kindex made --project-path
   and KIN_PROJECT no-ops.
 - `kin config set` wrote into the first ancestor .kin/config it found,
@@ -31,7 +30,7 @@ def home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(kconfig, "_GLOBAL_PATHS", [home / ".config" / "kindex" / "kin.yaml"])
-    for name in ("KIN_PROJECT", "KIN_PROFILE", "KIN_AGENT_ID"):
+    for name in ("KIN_PROJECT", "KIN_PROJECT_PATH", "KIN_PROFILE", "KIN_AGENT_ID"):
         monkeypatch.delenv(name, raising=False)
     return home
 
@@ -55,19 +54,54 @@ def seed(directory, *ids):
     store.close()
 
 
-def test_unconfigured_resolution_uses_home_regardless_of_project_store_contents(home, project):
+def test_unconfigured_resolution_uses_a_present_project_store(home, project):
     seed(home / ".kindex", "home-note")
     project_store = project / ".kin" / "local" / "kindex"
     seed(project_store)  # schema only, as any read leaves it
-    assert load_config().data_path.resolve() == (home / ".kindex").resolve()
+    assert load_config().data_path.resolve() == project_store.resolve()
 
     seed(project_store, "project-note")
-    assert load_config().data_path.resolve() == (home / ".kindex").resolve()
+    assert load_config().data_path.resolve() == project_store.resolve()
 
 
-def test_unconfigured_resolution_uses_home_when_only_project_store_is_populated(home, project):
+def test_unconfigured_resolution_uses_a_present_project_store_without_home_data(home, project):
     project_store = project / ".kin" / "local" / "kindex"
     seed(project_store)
+    assert load_config().data_path.resolve() == project_store.resolve()
+
+
+def test_explicit_project_path_wins_over_a_configured_data_dir(home, project):
+    configured = home / "configured"
+    config_dir = home / ".config" / "kindex"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kin.yaml").write_text(f"data_dir: {configured}\n")
+
+    assert load_config(project_path=project).data_path.resolve() == (
+        project / ".kin" / "local" / "kindex"
+    ).resolve()
+
+
+def test_present_project_store_wins_over_a_configured_data_dir(home, project):
+    configured = home / "configured"
+    config_dir = home / ".config" / "kindex"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kin.yaml").write_text(f"data_dir: {configured}\n")
+    project_store = project / ".kin" / "local" / "kindex"
+    seed(project_store)
+
+    assert load_config().data_path.resolve() == project_store.resolve()
+
+
+def test_configured_data_dir_is_used_without_a_project_store(home, project):
+    configured = home / "configured"
+    config_dir = home / ".config" / "kindex"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kin.yaml").write_text(f"data_dir: {configured}\n")
+
+    assert load_config().data_path.resolve() == configured.resolve()
+
+
+def test_home_default_is_used_without_a_project_store_or_configuration(home, project):
     assert load_config().data_path.resolve() == (home / ".kindex").resolve()
 
 
@@ -191,12 +225,12 @@ def corrupt(directory):
     (directory / "kindex.db").write_bytes(b"not a database" * 100)
 
 
-def test_explicit_choices_do_not_open_stores_they_did_not_choose(home, project, tmp_path):
+def test_present_project_store_wins_without_inspecting_its_contents(home, project, tmp_path):
     corrupt(project / ".kin" / "local" / "kindex")
     config_dir = home / ".config" / "kindex"
     config_dir.mkdir(parents=True)
     (config_dir / "kin.yaml").write_text(f"data_dir: {tmp_path / 'custom'}\n")
-    assert load_config().data_path.resolve() == (tmp_path / "custom").resolve()
+    assert load_config().data_path.resolve() == (project / ".kin" / "local" / "kindex").resolve()
 
     (config_dir / "kin.yaml").unlink()
     (project / ".kin" / "local" / "kindex" / "kindex.db").unlink()

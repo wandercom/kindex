@@ -103,14 +103,14 @@ primary user message. Its auxiliary title requests cannot consume the sole copy.
 The generated advisory is excluded from the user's goal and subsequent work
 history collected for review.
 
-Project operations select the same existing durable store whether it is at
-`.kin/local/kindex.db` or `.kin/local/kindex/kindex.db`. Candidates, reminders,
-and other durable work count as populated data. The unconfigured legacy default
-remains the home graph even when a repository-local graph is populated; Kindex
-does not merge or move either store. Use `KIN_PROJECT` or
-`--project-path /path/to/repo` to explicitly select the repository graph.
-Explicit personal/company profiles and `--data-dir` remain separate and
-authoritative.
+Store selection is ordered: `--project-path`, `KIN_PROJECT_PATH`, or
+`KIN_PROJECT`; then a present repository-local store at
+`.kin/local/kindex.db`, `.kin/local/conv.db`, `.kin/local/kindex/kindex.db`, or
+`.kin/local/kindex/conv.db`; then configured `data_dir`; then `~/.kindex`.
+Presence alone selects a local store; Kindex does not merge or move stores.
+Git tracking and symlinks never silently filter lookup: a selected tracked or
+symlinked `.kin/local` is explicitly refused with its remedy. Explicit
+personal/company profiles and `--data-dir` remain separate and authoritative.
 
 ## Independently monitor operation
 

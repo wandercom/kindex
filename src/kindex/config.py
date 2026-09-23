@@ -669,10 +669,6 @@ class CodeIngestConfig(BaseModel):
 
 class Config(BaseModel):
     _project_path: Path | None = PrivateAttr(default=None)
-    # Whether configuration explicitly selected a data directory. This is kept
-    # separate from the default spelling so migration compatibility checks can
-    # reproduce legacy implicit-scope behavior without probing every load.
-    _data_dir_from_config: bool = PrivateAttr(default=False)
     # Per-pass session routing predicate (set by daemon.cron_run_all and
     # cli.cmd_cron); callable(jsonl_path) -> bool. Never loaded from yaml.
     # When None, ingest builds one from profiles/active_profile (see
@@ -996,29 +992,29 @@ def load_config(
             break  # use first local found
 
     cfg = Config(**merged) if merged else Config()
-    cfg._data_dir_from_config = "data_dir" in merged
     cfg._ignored_project_keys = ignored_project_keys
     cfg = _resolve_profile(cfg, profile, kin_profile, profiles_base=profiles_base)
     cfg = _contain_data_dir(cfg)
-    # Explicit project callers and existing repo-local configurations share the
-    # integration store. An unconfigured invocation keeps the legacy home-store
-    # default even when a populated repo-local store also exists; discovering a
-    # second store must not turn a backwards-compatible read into a refusal.
+    # Project selection is presence-based: an explicit project selector wins,
+    # otherwise a present repo-local store wins over user configuration. Store
+    # inspection is deliberately limited to presence; project_data_path keeps
+    # symlink and tracked-store refusals explicit instead of silently falling
+    # back to another scope.
     if not cfg.active_profile and not data_dir:
         from .project_store import project_data_path
         local = project_root / ".kin" / "local"
-        selected = cfg.data_path
-        repo_selected = selected in (local, local / "kindex")
-        # The home default, however it is spelled: an absolute or
-        # trailing-slash spelling of ~/.kindex must not make an explicit
-        # project selection a no-op.
-        home_default = _same_path(cfg.data_dir, "~/.kindex")
+        project_worktree = _bound_root is not None or _git_root(project_root) is not None
+        project_store_present = project_worktree and any(
+            (directory / name).exists()
+            for directory in (local, local / "kindex")
+            for name in ("kindex.db", "conv.db")
+        )
         explicit_project = bool(
             project_path
             or os.environ.get("KIN_PROJECT_PATH")
             or os.environ.get("KIN_PROJECT")
-        ) and _bound_root is None and _git_root(project_root) is not None
-        if repo_selected or (explicit_project and home_default):
+        ) and project_worktree
+        if explicit_project or project_store_present:
             project_store = project_data_path(project_root)
             cfg.data_dir = str(project_store)
     cfg = _attach_project_path(_override_data_dir(cfg, data_dir), project_root)
@@ -1044,44 +1040,6 @@ def _override_data_dir(config: Config, data_dir: str | Path | None) -> Config:
             config._stamp_on_open = False
     config.data_dir = str(data_dir)
     return config
-
-
-def legacy_implicit_scope_was_ambiguous(config: Config) -> bool:
-    """Whether this configuration would have hit the removed two-store guard.
-
-    Only task ownership compatibility needs this historical distinction. Keep
-    the durable-store probes out of normal configuration loading.
-    """
-    project_root = config._project_path
-    if (
-        project_root is None
-        or config.active_profile
-        or config._data_dir_from_config
-        or _bound_root is not None
-        or os.environ.get("KIN_PROJECT_PATH")
-        or os.environ.get("KIN_PROJECT")
-        or not _same_path(config.data_dir, "~/.kindex")
-    ):
-        return False
-    local = project_root / ".kin" / "local"
-    if any(path.is_symlink() for path in (project_root / ".kin", local, local / "kindex")):
-        return False
-    if not any(
-        (directory / name).exists()
-        for directory in (local, local / "kindex")
-        for name in ("kindex.db", "conv.db")
-    ):
-        return False
-    from .project_store import durable_store_paths
-    try:
-        return bool(
-            any(durable_store_paths(directory) for directory in (local, local / "kindex"))
-            and durable_store_paths(config.data_path)
-        )
-    except ValueError:
-        # The current home-store selection deliberately remains available even
-        # when an unrelated project database cannot be inspected.
-        return False
 
 
 def trusted_supervisor_config(project_path: str | Path, data_dir: str) -> Config:
