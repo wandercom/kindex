@@ -313,12 +313,12 @@ def test_legacy_populated_store_shared_by_rpc_and_mcp(sandbox):
 
 
 @pytest.mark.parametrize("populated", ["legacy", "modern"])
-def test_present_other_store_refuses_even_when_schema_only(sandbox, populated):
-    """Presence, not durable contents, determines local-store conflicts."""
+def test_empty_other_store_does_not_hide_populated_tasks(sandbox, populated):
+    """AC2/section 9 red-now: schema-only DB is not a conflicting authority."""
     sandbox.configure(enabled=False)
     modern = sandbox.data / "kindex"
     chosen, empty = (sandbox.data, modern) if populated == "legacy" else (modern, sandbox.data)
-    sandbox.seed(data=chosen)
+    _, task = sandbox.seed(data=chosen)
     store = Store(Config(data_dir=str(empty)))
     try:
         store.conn  # create only the schema; no operational or knowledge rows
@@ -328,9 +328,8 @@ def test_present_other_store_refuses_even_when_schema_only(sandbox, populated):
         "scope":{"project_path":str(sandbox.project),"session_id":"truth-table","agent":"claude"}})
     assert result.returncode == 0, result.stderr
     parsed = json.loads(result.stdout)
-    assert parsed["ok"] is False, parsed
-    assert parsed["error"]["code"] == "invalid_argument"
-    assert "Conflicting present Kindex stores" in parsed["error"]["message"]
+    assert parsed["ok"] is True, parsed
+    assert task in {t["id"] for t in parsed["tasks"]}
 
 
 def test_conflicting_populated_stores_refuse_and_preserve_both(sandbox):

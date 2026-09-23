@@ -300,23 +300,18 @@ def _default_agent(agent: str = "") -> str:
     return resolve_agent_id(_get_config())
 
 
-def _agent_without_legacy_store(agent: str = "") -> tuple[str, bool]:
-    """Return an agent and whether the caller explicitly supplied it.
-
-    ``task_execute`` validates caller-supplied identities. An omitted agent
-    keeps its resolved configured identity when it is a valid host identifier;
-    otherwise project_scope applies its stable ``claude`` default.
-    """
+def _agent_without_legacy_store(agent: str = "") -> str:
+    """Return a validated inferred agent or leave project_scope to default."""
     if agent and agent.strip():
-        return agent.strip(), True
+        return agent.strip()
     if os.environ.get("KIN_AGENT_ID", "").strip():
-        return os.environ["KIN_AGENT_ID"].strip(), True
+        return os.environ["KIN_AGENT_ID"].strip()
     try:
         resolved = _default_agent("")
     except MemoryUnavailableError:
-        return "", False
+        return ""
     from .integrations import HOST_IDENTIFIER_PATTERN
-    return (resolved, False) if re.fullmatch(HOST_IDENTIFIER_PATTERN, resolved) else ("", False)
+    return resolved if re.fullmatch(HOST_IDENTIFIER_PATTERN, resolved) else ""
 
 
 def _mcp_client() -> str | None:
@@ -2481,7 +2476,7 @@ def task_execute(operation: str, arguments: dict, project_path: str,
         "include_global": include_global,
     }
     try:
-        resolved_agent, _ = _agent_without_legacy_store(agent)
+        resolved_agent = _agent_without_legacy_store(agent)
         if resolved_agent:
             requested["agent"] = resolved_agent
         scope = project_scope(requested)

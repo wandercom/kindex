@@ -1003,17 +1003,21 @@ def load_config(
     if not cfg.active_profile and not data_dir:
         from .project_store import project_data_path
         local = project_root / ".kin" / "local"
-        project_worktree = _bound_root is not None or _git_root(project_root) is not None
-        project_store_present = project_worktree and any(
+        store_present = any(
             (directory / name).exists()
             for directory in (local, local / "kindex")
             for name in ("kindex.db", "conv.db")
         )
-        explicit_project = bool(
+        explicit_selector = bool(
             project_path
             or os.environ.get("KIN_PROJECT_PATH")
             or os.environ.get("KIN_PROJECT")
-        ) and project_worktree
+        )
+        project_worktree = _bound_root is not None or (
+            (store_present or explicit_selector) and _git_root(project_root) is not None
+        )
+        project_store_present = project_worktree and store_present
+        explicit_project = explicit_selector and _bound_root is None and project_worktree
         if explicit_project or project_store_present:
             project_store = project_data_path(project_root)
             cfg.data_dir = str(project_store)

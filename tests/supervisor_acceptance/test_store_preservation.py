@@ -92,9 +92,13 @@ def digest(path):
 
 
 @pytest.mark.parametrize("legacy_kind", ["candidate", "reminder"])
-def test_present_legacy_store_is_selected(stores, legacy_kind):
-    """AC2: candidates-only/reminders-only retain the legacy layout."""
+def test_durable_only_legacy_store_is_selected_over_fresh_nested(stores, legacy_kind):
+    """AC2: candidates-only/reminders-only are durable, despite no nodes.
+
+    Mutation: determine populatedness from nodes alone or prefer fresh nested.
+    """
     seed(stores, "legacy", legacy_kind)
+    seed(stores, "nested", "empty")
     legacy_db = stores["legacy"] / "kindex.db"
     before = digest(legacy_db)
     result = json.loads(invoke(stores, RESOLVE, {"root": str(stores["project"])}))

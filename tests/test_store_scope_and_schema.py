@@ -225,12 +225,13 @@ def corrupt(directory):
     (directory / "kindex.db").write_bytes(b"not a database" * 100)
 
 
-def test_present_project_store_wins_without_inspecting_its_contents(home, project, tmp_path):
+def test_present_project_store_does_not_fall_back_when_its_layout_is_corrupt(home, project, tmp_path):
     corrupt(project / ".kin" / "local" / "kindex")
     config_dir = home / ".config" / "kindex"
     config_dir.mkdir(parents=True)
     (config_dir / "kin.yaml").write_text(f"data_dir: {tmp_path / 'custom'}\n")
-    assert load_config().data_path.resolve() == (project / ".kin" / "local" / "kindex").resolve()
+    with pytest.raises(ValueError, match="Cannot inspect Kindex database"):
+        load_config()
 
     (config_dir / "kin.yaml").unlink()
     (project / ".kin" / "local" / "kindex" / "kindex.db").unlink()

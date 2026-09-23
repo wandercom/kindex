@@ -290,7 +290,7 @@ def test_an_oversized_job_cannot_starve_the_queue(tmp_path, monkeypatch):
         graph.close()
 
 
-def test_maintenance_skips_conflicting_present_repo_local_layouts(tmp_path, store):
+def test_maintenance_picks_the_populated_repo_local_layout(tmp_path, store):
     from kindex.project_store import existing_local_store
 
     repo = _git_repo(tmp_path / "service")
@@ -302,7 +302,7 @@ def test_maintenance_skips_conflicting_present_repo_local_layouts(tmp_path, stor
     empty = legacy / "kindex"
     empty.mkdir()
     Store(Config(data_dir=str(empty))).conn
-    assert existing_local_store(repo) is None
+    assert existing_local_store(repo) == legacy.resolve()
 
 
 @pytest.mark.parametrize("value", ["1", "true", "yes", " yes "])
