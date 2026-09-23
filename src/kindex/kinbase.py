@@ -280,11 +280,6 @@ def _node(repo, identity, doc, mode, receipt):
 
 #: The most one read-only Kinbase query may take. Lower than the explain bound
 #: above, which is sized for a whole reduced sync rather than one answer.
-#: The most one Kinbase read may take. It bounds `explain`, which reduces one
-#: key and writes nothing, so cutting it short loses an answer and no state.
-READ_TIMEOUT_S = 30
-
-
 def _query(argv, binary, timeout_s):
     """Run one Kinbase query command and parse its JSON.
 
