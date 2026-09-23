@@ -41,3 +41,16 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # The registry entry is part of the release, not a follow-up chore: a client
+  # that discovers kindex through MCP should see the version users can install.
+  # It runs after `publish` because the registry must never name a version PyPI
+  # does not have, and a tag that started both at once would race it.
+  mcp-registry:
+    needs: publish
+    permissions:
+      id-token: write # inherited by the reusable workflow for OIDC login
+      contents: read
+    uses: ./.github/workflows/publish-mcp.yml
+    with:
+      tag: ${{ github.ref_name }}
