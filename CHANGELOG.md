@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.44.1] - 2026-09-23
+
 ### Fixed
 - `kin doctor` now reports legacy bare-`claude` task ownership in the current
   project store; `--fix-task-owners` opt-in repairs only old task-execute or
