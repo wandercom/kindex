@@ -278,8 +278,6 @@ def _node(repo, identity, doc, mode, receipt):
                    "prov_source": "kinbase:" + repo, "extra": {"kinbase": metadata}})
 
 
-#: The most one read-only Kinbase query may take. Lower than the explain bound
-#: above, which is sized for a whole reduced sync rather than one answer.
 def _query(argv, binary, timeout_s):
     """Run one Kinbase query command and parse its JSON.
 
