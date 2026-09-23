@@ -280,6 +280,8 @@ def _node(repo, identity, doc, mode, receipt):
 
 #: The most one read-only Kinbase query may take. Lower than the explain bound
 #: above, which is sized for a whole reduced sync rather than one answer.
+#: The most one Kinbase read may take. It bounds `explain`, which reduces one
+#: key and writes nothing, so cutting it short loses an answer and no state.
 READ_TIMEOUT_S = 30
 
 
@@ -324,10 +326,16 @@ def _query(argv, binary, timeout_s):
 def read_status(repo: str | Path, *, binary="kinbase") -> dict:
     """Certification, trusted fact count and open Unknowns for one repository.
 
-    Runs Kinbase's due-maintenance sweep as a side effect; see `_query`.
+    Deliberately unbounded. `status` runs Kinbase's due-maintenance sweep first
+    and that sweep signs events, so a timeout firing partway through would tear
+    a write rather than abandon a read: killed between the signed event and the
+    ledger that records it, the next call re-emits an event id that already
+    exists. The CLI imposes no such bound, so adding one here would invent a
+    failure mode rather than contain one. Bounding this safely means crash-safe
+    maintenance inside Kinbase, which is not ours to add from here.
     """
     root = Path(repo).expanduser().resolve(strict=True)
-    return _query(["status", "--repo", str(root)], binary, READ_TIMEOUT_S)
+    return _query(["status", "--repo", str(root)], binary, None)
 
 
 def read_explain(repo: str | Path, logical_key: str, decision: str, *,

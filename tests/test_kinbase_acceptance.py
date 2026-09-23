@@ -675,3 +675,29 @@ def test_the_query_tools_leave_the_repository_and_the_graph_untouched(
     for name, body in digests.items():
         assert (repo / name).read_bytes() == body, f"{name} was rewritten by a query"
     assert len(store.all_nodes()) == before, "a query wrote to the graph"
+
+
+def test_status_runs_unbounded_because_a_timeout_would_tear_a_signed_write(
+        store, repo, monkeypatch, tmp_path):
+    """`status` signs events before it reports. A deadline firing between the
+    signed event and the ledger recording it leaves the next call free to
+    re-emit an id that already exists, so bounding it converts a slow read into
+    a duplicated write. `explain` writes nothing and keeps its bound."""
+    from kindex import kinbase as kb
+
+    seen = {}
+    real = kb.subprocess.run
+
+    def record(argv, **kwargs):
+        seen[argv[1]] = kwargs.get("timeout", "absent")
+        return real(argv, **kwargs)
+
+    stub = read_stub(tmp_path, "bounds", {"status": "certified"})
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    monkeypatch.setattr(kb.subprocess, "run", record)
+
+    kb.read_status(repo)
+    kb.read_explain(repo, "symbol:class:Db", "which definition is current")
+
+    assert seen["status"] is None, f"status was bounded at {seen['status']}"
+    assert seen["explain"] == kb.EXPLAIN_TIMEOUT_S, seen["explain"]
