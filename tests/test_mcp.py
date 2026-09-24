@@ -588,6 +588,48 @@ class TestMCPToolRegistry:
                             summary="all done")
         assert result.startswith("Completed: registry-regression")
 
+    @pytest.mark.parametrize("action", ["update", "segment", "pause", "end"])
+    @pytest.mark.parametrize("other_active", [False, True])
+    def test_tag_update_without_name_never_mutates_an_active_tag(
+        self, patch_store, monkeypatch, tmp_path, action, other_active
+    ):
+        from kindex import mcp_server, sessions
+
+        store, _ = patch_store
+        monkeypatch.setattr(mcp_server, "_mcp_project_path", lambda: str(tmp_path))
+        mine_id = sessions.start_tag(store, "mine", focus="my work",
+                                     project_path=str(tmp_path))
+        their_id = None
+        if other_active:
+            their_id = sessions.start_tag(store, "theirs", focus="their work",
+                                          project_path=str(tmp_path))
+            sessions.update_tag(store, "theirs", focus="recently updated",
+                                project_path=str(tmp_path))
+
+        before = {node_id: store.get_node(node_id)["extra"]
+                  for node_id in (mine_id, their_id) if node_id}
+        result = mcp_server.tag_update(action=action, focus="wrong focus",
+                                       summary="wrong summary")
+
+        assert result.startswith("Error: tag_update requires a tag name")
+        for node_id, extra in before.items():
+            assert store.get_node(node_id)["extra"] == extra
+
+    def test_explicit_tag_end_ignores_more_recent_peer(self, patch_store,
+                                                        monkeypatch, tmp_path):
+        from kindex import mcp_server, sessions
+
+        store, _ = patch_store
+        monkeypatch.setattr(mcp_server, "_mcp_project_path", lambda: str(tmp_path))
+        mine_id = sessions.start_tag(store, "mine", project_path=str(tmp_path))
+        their_id = sessions.start_tag(store, "theirs", project_path=str(tmp_path))
+        sessions.update_tag(store, "theirs", focus="recently updated",
+                            project_path=str(tmp_path))
+
+        assert mcp_server.tag_update(name="mine", action="end") == "Completed: mine"
+        assert store.get_node(mine_id)["extra"]["session_status"] == "completed"
+        assert store.get_node(their_id)["extra"]["session_status"] == "active"
+
 
 class TestMCPChangelogDiffs:
     def test_changelog_renders_diffs(self, patch_store, agent_env):
