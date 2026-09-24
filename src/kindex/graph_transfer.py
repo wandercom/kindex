@@ -143,10 +143,14 @@ def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, publi
     for key in ("supersedes", "superseded_by"):
         if record["extra"].get(key) not in visible_ids:
             record["extra"].pop(key, None)
+    visible_edges = [e for e in edges if e["to_id"] in visible_ids]
+    # Store.edges_from sorts by weight only. Add a total tie-break order here
+    # so equivalent graphs serialize identically across insertion histories.
+    visible_edges.sort(key=lambda edge: (-edge["weight"], edge["to_id"], edge["type"]))
     record["edges"] = [
         {"to": e["to_id"], "type": e["type"], "weight": e["weight"],
          "bidirectional": False, "provenance": "" if public else e.get("provenance", "")}
-        for e in edges if e["to_id"] in visible_ids
+        for e in visible_edges
     ]
     if public:
         for key in ("title", "content"):

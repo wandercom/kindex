@@ -2010,15 +2010,16 @@ def cmd_export(args):
     nodes = [n for audience in audiences for n in store.all_nodes(audience=audience, limit=-1)]
 
     from .graph_transfer import canonical_status, export_record
-    superseded_ids = {
-        edge["to_id"]
-        for node in nodes
-        for edge in store.edges_from(node["id"])
-        if edge["type"] == "supersedes"
-    }
     if getattr(args, "active_only", False):
-        # Status is canonicalized for old rows, while both the persisted marker
-        # and supersedes edge retire a predecessor.
+        # Decide retirement against the full graph before audience projection:
+        # a visible predecessor can be superseded by a hidden successor. Only
+        # target IDs are used for filtering; edge serialization remains scoped.
+        superseded_ids = {
+            row["to_id"]
+            for row in store.conn.execute(
+                "SELECT DISTINCT to_id FROM edges WHERE type = 'supersedes'"
+            ).fetchall()
+        }
         nodes = [node for node in nodes if canonical_status(node) == "active"
                  and node["id"] not in superseded_ids]
 
