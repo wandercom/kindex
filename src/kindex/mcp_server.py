@@ -69,6 +69,8 @@ mcp = FastMCP(
         "## When to use each tool\n"
         "- `search`: ALWAYS before adding — if a matching node already exists, "
         "prefer `edit`/`supersede` over `add` (edit, don't re-add)\n"
+        "- When search returns `global:<id>`, retain that qualified ID for "
+        "follow-on reads and edits; pass it in `source_refs` for derived writes\n"
         "- `add`: capture NEW discoveries as they happen — don't batch, don't wait\n"
         "- `edit`: correct or extend an EXISTING node instead of re-adding a near "
         "duplicate (additive types — decision/constraint/directive/checkpoint/watch — "
@@ -118,6 +120,7 @@ mcp = FastMCP(
 
 _store = None
 _config = None
+_global_write_stores = {}
 
 
 def _reset_singletons():
@@ -134,6 +137,9 @@ def _reset_singletons():
             pass
     _store = None
     _config = None
+    for secondary in _global_write_stores.values():
+        secondary.close()
+    _global_write_stores.clear()
 
 
 # Register the MCP singleton reset with config's cache-invalidation callback
@@ -275,6 +281,112 @@ def _get_store():
             raise MemoryUnavailableError(e) from e
         atexit.register(_store.close)
     return _store, _config
+
+
+def _global_store(store, config, *, write=False):
+    """Open the configured outer graph after implicit project selection.
+
+    Reads are SQLite read-only; writes require an explicit global target.
+    Explicit profile selection retains its single-graph boundary.
+    """
+    from .project_store import is_project_store
+    from .store import Store
+    from pathlib import Path
+
+    project = str(config._project_path) if config._project_path else ""
+    home_dir = getattr(config, "_global_data_dir", None)
+    if (not project or not home_dir or config.active_profile
+            or not is_project_store(store, project)):
+        return None
+    home_config = config.model_copy(deep=True)
+    home_config.data_dir = home_dir
+    matching_profiles = [name for name, entry in config.profiles.items()
+                         if entry.data_dir and
+                         home_config.data_path.resolve() ==
+                         Path(entry.data_dir).expanduser().resolve()]
+    if len(matching_profiles) > 1:
+        raise ValueError("Configured global data directory matches multiple profiles")
+    home_config.active_profile = matching_profiles[0] if matching_profiles else None
+    if not write:
+        home_config._stamp_on_open = False
+    if home_config.data_path.resolve() == config.data_path.resolve():
+        return None
+    key = str(home_config.data_path.resolve())
+    if write and key in _global_write_stores:
+        return _global_write_stores[key]
+    home = Store(home_config, read_only=not write, manage_project_storage=False)
+    if not home.db_path.is_file():
+        return None
+    # Fail visibly if an existing secondary graph is unreadable; silently
+    # returning only project results would recreate the original false negative.
+    home.conn
+    if not home_config.active_profile:
+        row = home.conn.execute(
+            "SELECT value FROM meta WHERE key='kin_profile'").fetchone()
+        if row is not None:
+            home.close()
+            raise ValueError("Configured global graph is stamped for a different profile")
+    if write:
+        _global_write_stores[key] = home
+        atexit.register(home.close)
+    return home
+
+
+def _global_read_store(store, config):
+    return _global_store(store, config)
+
+
+def _routed_ref(ref: str, *, write: bool = False):
+    """Resolve an MCP graph-qualified ID; caller closes read-only global Stores.
+
+    Bare IDs and titles retain the selected graph. A global-qualified result
+    always resolves in global, even when the same ID exists locally.
+    """
+    store, config = _get_store()
+    if ref.startswith("global:"):
+        home = _global_store(store, config, write=write)
+        if home is None:
+            raise ValueError("Global graph is unavailable for this MCP session")
+        return home, home.config, ref[7:], "global"
+    if ref.startswith("project:"):
+        return store, config, ref[8:], "project"
+    primary_match = store.peek_node(ref) or store.conn.execute(
+        "SELECT 1 FROM nodes WHERE title=? LIMIT 1", (ref,)).fetchone()
+    if primary_match:
+        home = _global_read_store(store, config)
+        if home is not None:
+            try:
+                home_match = home.peek_node(ref) or home.conn.execute(
+                    "SELECT 1 FROM nodes WHERE title=? LIMIT 1", (ref,)).fetchone()
+                if home_match:
+                    raise ValueError(
+                        f"Node {ref} exists in both graphs; use project: or global:")
+            finally:
+                home.close()
+    return store, config, ref, "project"
+
+
+def _write_store_for_graph(graph: str):
+    store, config = _get_store()
+    if graph in ("", "project"):
+        return store, config
+    if graph == "global":
+        global_store = _global_store(store, config, write=True)
+        if global_store is None:
+            raise ValueError("Global graph is unavailable for this MCP session")
+        return global_store, global_store.config
+    raise ValueError("graph must be 'project' or 'global'")
+
+
+def _derived_write_store(graph: str, source_refs: str):
+    refs = [item.strip() for item in source_refs.split(",") if item.strip()]
+    if any(item.startswith("global:") for item in refs):
+        if graph == "project":
+            raise ValueError("Global source requires graph='global' or automatic routing")
+        graph = "global"
+    graph = graph or "project"
+    store, config = _write_store_for_graph(graph)
+    return store, config, graph
 
 
 def _get_config():
@@ -484,7 +596,9 @@ def search(query: str, top_k: int = 10, tags: str = "",
     duplicates), and whenever you need context about a concept.
 
     Uses Reciprocal Rank Fusion to merge full-text and graph results.
-    Returns ranked nodes with scores.
+    Returns ranked nodes with scores. With an implicitly selected project
+    graph, also searches the configured global graph and returns qualified
+    graph IDs for safe follow-on writes.
 
     Args:
         query: Search query text.
@@ -494,7 +608,7 @@ def search(query: str, top_k: int = 10, tags: str = "",
         trusted_only: Admit only current, explicitly verified, non-contradicted
             knowledge. False preserves ordinary legacy-compatible recall.
     """
-    store, _ = _get_store()
+    store, config = _get_store()
     from .retrieve import hybrid_search
 
     fence_stats: dict = {}
@@ -509,6 +623,26 @@ def search(query: str, top_k: int = 10, tags: str = "",
                             evaluation_time=evaluation_time,
                             grounding=grounding)
 
+    home = _global_read_store(store, config)
+    home_results = []
+    if home is not None:
+        try:
+            home_fence: dict = {}
+            home_results = hybrid_search(
+                home, query, top_k=fetch_k,
+                include_archived=include_archived, fence_stats=home_fence,
+                trusted_only=trusted_only, evaluation_time=evaluation_time)
+            fence_stats["fenced_nodes"] = (fence_stats.get("fenced_nodes", [])
+                                             + home_fence.get("fenced_nodes", []))
+            fence_stats["candidate_count"] = (fence_stats.get("candidate_count", 0)
+                                               + home_fence.get("candidate_count", 0))
+            if trusted_only:
+                omissions = fence_stats.setdefault("trusted_omissions", {})
+                for reason, count in home_fence.get("trusted_omissions", {}).items():
+                    omissions[reason] = omissions.get(reason, 0) + count
+        finally:
+            home.close()
+
     # The tag filter applies identically to results and fenced candidates
     # so the fence note reflects the same filter set the results use.
     fenced_nodes = fence_stats.get("fenced_nodes", [])
@@ -520,11 +654,37 @@ def search(query: str, top_k: int = 10, tags: str = "",
                         & {d.lower() for d in (r.get("domains") or r.get("tags") or [])})
 
         results = [r for r in results if _tag_match(r)]
-        results = results[:top_k]
+        home_results = [r for r in home_results if _tag_match(r)]
         fenced_nodes = [r for r in fenced_nodes if _tag_match(r)]
     # Scoped like context, ask and prime: a node scoped to another client is
     # not this client's hit.
     results = _scope_results(results, _mcp_client())
+    home_results = _scope_results(home_results, _mcp_client())
+    # Each graph's confidence is locally normalized, so it cannot by itself
+    # compare two graphs. Combine it with result position and query coverage;
+    # a project hit matching one generic term must not mask an exact home hit.
+    terms = set(re.findall(r"\w+", query.casefold()))
+    ranked = []
+    for graph, hits in (("project", results), ("global", home_results)):
+        for rank, node in enumerate(hits):
+            score = node.get("confidence", node.get("rrf_score", 0)) or 0
+            title_terms = set(re.findall(r"\w+", (node.get("title") or "").casefold()))
+            body_terms = set(re.findall(r"\w+", (node.get("content") or "").casefold()))
+            coverage = (sum(1 for term in terms if term in title_terms or term in body_terms)
+                        / len(terms)) if terms else 0
+            merge_score = 0.35 * score + 0.30 / (rank + 1) + 0.35 * coverage
+            ranked.append((merge_score, graph == "global", graph, node))
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[3]["id"]))
+    results = []
+    seen = set()
+    for merge_score, _, graph, node in ranked:
+        key = (graph, node["id"])
+        if key not in seen:
+            results.append({**node, "_graph_source": graph,
+                            "_merged_score": merge_score})
+            seen.add(key)
+        if len(results) == top_k:
+            break
 
     # The fence note is derived in a single place both surfaces call (R3.1).
     from .retrieve import build_fence_note
@@ -555,12 +715,16 @@ def search(query: str, top_k: int = 10, tags: str = "",
         lines.append(ground_note)
     lines.append(f"Found {len(results)} results for '{query}':\n")
     for i, r in enumerate(results, 1):
-        score = r.get("rrf_score", 0) or r.get("confidence", 0)
+        score = (r.get("_merged_score", 0) if home is not None else
+                 r.get("rrf_score", 0) or r.get("confidence", 0))
         age = _node_age_str(r)
         caveat = _staleness_caveat(r)
         age_tag = f", {age}" if age else ""
+        source = f", graph={r['_graph_source']}" if home is not None else ""
+        display_id = (f"{r['_graph_source']}:{r['id']}" if home is not None
+                      else r["id"])
         lines.append(f"{i}. [{r.get('type', 'concept')}] {r.get('title', r['id'])} "
-                      f"(score={score:.3f}, id={r['id']}{age_tag}){caveat}")
+                      f"(score={score:.3f}, id={display_id}{age_tag}{source}){caveat}")
         content = (r.get("content") or "")[:150]
         if content:
             lines.append(f"   {content}")
@@ -571,6 +735,8 @@ def search(query: str, top_k: int = 10, tags: str = "",
         lines.append(fence_note)
     if trust_note:
         lines.append(trust_note)
+    if home is not None and home_results:
+        lines.append("Use global-qualified IDs or graph='global' for writes derived from global results.")
     return "\n".join(lines)
 
 
@@ -586,6 +752,8 @@ def add(
     referent_scope: str = "",
     asserted_at: str = "",
     true_of: str = "",
+    graph: str = "",
+    source_refs: str = "",
 ) -> str:
     """Add a knowledge node to the graph. ALWAYS `search` first to avoid duplicates.
 
@@ -617,8 +785,14 @@ def add(
         asserted_at: RFC3339 claim time (default: now when binding).
         true_of: RFC3339 instant the referent was observed in the digested
             state (default: asserted_at).
+        graph: project (selected graph) or global (configured outer graph).
+        source_refs: Comma-separated graph-qualified result IDs used as evidence.
+            A global source routes this new node to the global graph.
     """
-    store, config = _get_store()
+    try:
+        store, config, graph = _derived_write_store(graph, source_refs)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .extract import keyword_extract
     from .schema import ADDABLE_NODE_TYPES
 
@@ -668,6 +842,7 @@ def add(
             tags=tag_list,
             audience=audience,
             prov_activity="mcp-add",
+            prov_why=f"Derived from {source_refs}" if source_refs else "",
             **binding,
         )
     except ValueError as e:
@@ -684,7 +859,8 @@ def add(
                            provenance="auto-linked via MCP")
             link_count += 1
 
-    return f"Created node: {nid} ({node_type})" + (
+    display_id = f"global:{nid}" if graph == "global" else nid
+    return f"Created node: {display_id} ({node_type})" + (
         f" with {link_count} auto-link(s)" if link_count else ""
     )
 
@@ -715,10 +891,13 @@ def edit(node_id: str, title: str = "", content: str = "", append: str = "",
             and are archived by the daemon.
         force: Override a foreign advisory lock.
     """
-    store, config = _get_store()
+    try:
+        store, config, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .store import EditPolicyError, LockHeldError
 
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     if not node:
@@ -749,7 +928,8 @@ def edit(node_id: str, title: str = "", content: str = "", append: str = "",
     except (EditPolicyError, LockHeldError, ValueError) as e:
         return f"Error: {e}"
 
-    return (f"Edited {updated.get('title', '')} ({updated['id']}) — "
+    updated_ref = f"global:{updated['id']}" if graph == "global" else updated["id"]
+    return (f"Edited {updated.get('title', '')} ({updated_ref}) — "
             f"fields: {', '.join(sorted(provided))}")
 
 
@@ -769,10 +949,13 @@ def supersede(node_id: str, new_text: str, expires: str = "", reason: str = "") 
         expires: Optional expiry date for the new node (YYYY-MM-DD).
         reason: Why the node is being replaced (kept as provenance).
     """
-    store, config = _get_store()
+    try:
+        store, config, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .store import LockHeldError
 
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     if not node:
@@ -789,7 +972,8 @@ def supersede(node_id: str, new_text: str, expires: str = "", reason: str = "") 
     except (LockHeldError, ValueError) as e:
         return f"Error: {e}"
 
-    return f"Superseded {node['title']} ({node['id']}) -> new node {new['id']}"
+    new_ref = f"global:{new['id']}" if graph == "global" else new["id"]
+    return f"Superseded {node['title']} ({node_id}) -> new node {new_ref}"
 
 
 @_tool()
@@ -1048,15 +1232,18 @@ def verify(
     Reviewer identity is asserted audit text within the local trust boundary;
     this tool does not authenticate it.
     """
-    store, _ = _get_store()
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     operation_instant = operation_now()
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     if node is None:
         return "Error: invalid_input: Node not found: " + node_id
     try:
-        return store.verify_node(
+        result = store.verify_node(
             node["id"],
             verified_by=verified_by,
             prov_method=prov_method,
@@ -1064,6 +1251,7 @@ def verify(
             valid_at=valid_at or None,
             invalid_at=invalid_at or None,
         )
+        return {**result, "id": node_id, "graph": "global"} if graph == "global" else result
     except ValueError as exc:
         return _state_error(exc)
 
@@ -1091,9 +1279,12 @@ def invalidate(
     """
     from .store import LockHeldError
 
-    store, _ = _get_store()
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     operation_instant = operation_now()
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     if node is None:
@@ -1104,13 +1295,14 @@ def invalidate(
     except LockHeldError as exc:
         return f"Error: {exc}"
     try:
-        return store.invalidate_node(
+        result = store.invalidate_node(
             node["id"],
             invalidated_by=actor,
             asserted_by=invalidated_by,
             disposition_code=disposition_code,
             invalid_at=invalid_at or operation_instant,
         )
+        return {**result, "id": node_id, "graph": "global"} if graph == "global" else result
     except ValueError as exc:
         return _state_error(exc)
 
@@ -1122,11 +1314,19 @@ def show(node_id: str) -> str:
     Args:
         node_id: Node ID or title to look up.
     """
-    store, _ = _get_store()
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    try:
+        node = store.get_node(raw_id) or store.get_node_by_title(raw_id)
+        detail = _node_detail(store, node) if node else None
+    finally:
+        if graph == "global":
+            store.close()
     if not node:
         return f"Node not found: {node_id}"
-    return _node_detail(store, node)
+    return f"[graph: global, id: {node_id}]\n{detail}" if graph == "global" else detail
 
 
 @_tool()
@@ -1158,9 +1358,15 @@ def link(
         weight: Edge strength 0.0-1.0. Use 0.7+ for strong connections, 0.3-0.5 for weak ones.
         reason: Why this connection exists (stored as provenance — always provide this).
     """
-    store, _ = _get_store()
-    a, error_a = _node_for_write(store, node_a)
-    b, error_b = _node_for_write(store, node_b)
+    try:
+        store, _, raw_a, graph_a = _routed_ref(node_a, write=True)
+        other, _, raw_b, graph_b = _routed_ref(node_b, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if graph_a != graph_b:
+        return "Error: cross-graph links are not supported; both nodes must belong to one graph"
+    a, error_a = _node_for_write(store, raw_a)
+    b, error_b = _node_for_write(other, raw_b)
     if error_a or error_b:
         return error_a or error_b
     if not a:
@@ -1383,7 +1589,7 @@ def _is_substantive_concept(concept: dict) -> bool:
 
 
 @_tool()
-def learn(text: str) -> str:
+def learn(text: str, graph: str = "", source_refs: str = "") -> str:
     """Extract knowledge from text and add it to the graph.
 
     USE THIS: after reading long files, articles, command outputs, or completing
@@ -1396,8 +1602,14 @@ def learn(text: str) -> str:
 
     Args:
         text: Text to extract knowledge from (session notes, documentation, etc.).
+        graph: project (selected graph) or global (configured outer graph).
+        source_refs: Comma-separated graph-qualified evidence IDs. A global
+            source routes extracted knowledge to the global graph.
     """
-    store, config = _get_store()
+    try:
+        store, config, graph = _derived_write_store(graph, source_refs)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .budget import BudgetLedger
     from .extract import extract
     from .schema import ADDABLE_NODE_TYPES
@@ -1635,18 +1847,25 @@ def stale_check(base_dir: str = "", rebind: str = "") -> str:
             re-hash its referent and rebind to the current state (moves
             true_of to now, keeps asserted_at, clears the stale marker).
     """
-    store, _ = _get_store()
+    if rebind:
+        try:
+            store, _, raw_rebind, graph = _routed_ref(rebind, write=True)
+        except ValueError as exc:
+            return f"Error: {exc}"
+    else:
+        store, _ = _get_store()
     from .referent import rebind as rebind_fn
     from .referent import stale_sweep
 
     base = base_dir or None
     if rebind:
         try:
-            node = rebind_fn(store, rebind, base)
+            node = rebind_fn(store, raw_rebind, base)
         except Exception as e:
             return f"Error: {e}"
         ref = node.get("referent") or {}
-        return (f"Rebound {node['id']} to "
+        display_id = f"global:{node['id']}" if graph == "global" else node["id"]
+        return (f"Rebound {display_id} to "
                 f"{(ref.get('content_digest') or '')[:12]} "
                 f"(true_of {node.get('true_of')}); stale marker cleared.")
 
@@ -1690,15 +1909,22 @@ def graph_merge(source_id: str, target_id: str, keep: str = "target",
         keep: Which node to keep: 'target' (default) or 'source'.
         force: Merge additive types / override a foreign lock.
     """
-    store, config = _get_store()
+    try:
+        store, config, source_ref, source_graph = _routed_ref(source_id, write=True)
+        other, _, target_ref, target_graph = _routed_ref(target_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if source_graph != target_graph:
+        return "Error: cross-graph merges are not supported"
     from .schema import edit_class_for
     from .store import LockHeldError
 
     if keep == "source":
-        source_id, target_id = target_id, source_id
+        source_ref, target_ref = target_ref, source_ref
+    source_id, target_id = source_ref, target_ref
 
-    source = store.get_node(source_id)
-    target = store.get_node(target_id)
+    source = store.get_node(source_ref)
+    target = other.get_node(target_ref)
     if not source:
         return f"Source node not found: {source_id}"
     if not target:
@@ -1953,11 +2179,19 @@ def resource_status() -> str:
 @_safe_output
 def resource_node(node_id: str) -> str:
     """Full details of a specific knowledge node."""
-    store, _ = _get_store()
-    node = store.get_node(node_id) or store.get_node_by_title(node_id)
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    try:
+        node = store.get_node(raw_id) or store.get_node_by_title(raw_id)
+        detail = _node_detail(store, node) if node else None
+    finally:
+        if graph == "global":
+            store.close()
     if not node:
         return f"Node not found: {node_id}"
-    return _node_detail(store, node)
+    return f"[graph: global, id: {node_id}]\n{detail}" if graph == "global" else detail
 
 
 @mcp.resource("kindex://recent")
@@ -2245,7 +2479,8 @@ def tag_resume(name: str = "", tokens: int = 1500) -> str:
 @_tool()
 def task_add(text: str, priority: int = 3, due: str = "",
              scope: str = "contextual", link_to: str = "",
-             effort: str = "", project_path: str = "", session_id: str = "") -> str:
+             effort: str = "", project_path: str = "", session_id: str = "",
+             graph: str = "", source_refs: str = "") -> str:
     """Add a task to the knowledge graph.
 
     Tasks are graph-connected -- link them to concepts, projects, or other
@@ -2261,10 +2496,22 @@ def task_add(text: str, priority: int = 3, due: str = "",
         effort: Optional effort estimate (small, medium, large).
         project_path: Explicit repository path; do not infer from the MCP process cwd.
         session_id: Optional host conversation ID for contextual reminders.
+        graph: project (selected graph) or global (configured outer graph).
+        source_refs: Comma-separated graph-qualified evidence IDs. A global
+            source routes this task to the global graph.
     """
-    store, _ = _get_store()
+    try:
+        store, _, graph = _derived_write_store(
+            graph, ",".join(part for part in (source_refs, link_to) if part))
+    except ValueError as exc:
+        return f"Could not create task: {exc}"
     from .tasks import create_task
     links = [s.strip() for s in link_to.split(",") if s.strip()] if link_to else None
+    if links and any(link.startswith(("global:", "project:"))
+                     and not link.startswith(graph + ":") for link in links):
+        return "Could not create task: cross-graph links are not supported"
+    if links:
+        links = [link.removeprefix(graph + ":") for link in links]
     try:
         task_id = create_task(
             store, text, priority=priority, due=due or None, scope=scope,
@@ -2278,13 +2525,17 @@ def task_add(text: str, priority: int = 3, due: str = "",
     p_label = {1: "urgent", 2: "high", 3: "normal", 4: "low", 5: "someday"}.get(
         extra.get("priority", 3), "normal")
     due_info = f", due: {extra.get('due', '')}" if extra.get("due") else ""
-    return f"Created task: {task_id} [{p_label}]{due_info} — {text}"
+    display_id = f"global:{task_id}" if graph == "global" else task_id
+    return f"Created task: {display_id} [{p_label}]{due_info} — {text}"
 
 
 @_tool()
 def task_list(status: str = "open", scope: str = "",
               priority: str = "", project_path: str = "", limit: int = 20) -> str:
     """List tasks, optionally filtered.
+
+    With an implicitly selected project graph, also includes relevant tasks
+    from the configured global graph and returns qualified IDs.
 
     Args:
         status: Filter: open, in_progress, done, all. Default: open.
@@ -2312,7 +2563,28 @@ def task_list(status: str = "open", scope: str = "",
         from pathlib import Path
         tasks = [task for task in tasks if not (task.get("extra") or {}).get("project_path")
                  or Path(task["extra"]["project_path"]).resolve() == Path(local_project).resolve()]
-        tasks = tasks[:max(1, min(limit, 500))]
+    home = _global_read_store(store, config)
+    if home is not None:
+        from pathlib import Path
+        tasks = [{**task, "_graph_source": "project",
+                  "_graph_ref": f"project:{task['id']}"} for task in tasks]
+        try:
+            home_tasks = list_tasks(home, status=status, scope=scope or None,
+                                    max_priority=max_pri, limit=None)
+        finally:
+            home.close()
+        target = Path(project_path or local_project).resolve()
+        for task in home_tasks:
+            extra = task.get("extra") or {}
+            task_project = extra.get("project_path")
+            task_root = Path(task_project).resolve() if task_project else None
+            if (extra.get("scope") == "global" or task_root
+                    and (task_root == target or task_root in target.parents)):
+                tasks.append({**task, "_graph_source": "global",
+                              "_graph_ref": f"global:{task['id']}"})
+        tasks.sort(key=lambda task: (-task.get("weight", 0),
+                                     (task.get("extra") or {}).get("due") or "9999"))
+    tasks = tasks[:max(1, min(limit, 500))]
     if not tasks:
         return "No tasks found."
     return format_task_list(tasks)
@@ -2328,10 +2600,13 @@ def task_done(id: str, agent: str = "", force: bool = False) -> str:
             agent's live claim refuses the change unless force is true.
         force: Complete even though another agent holds a live claim.
     """
-    store, _ = _get_store()
+    try:
+        store, _, task_id, graph = _routed_ref(id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .tasks import TaskClaimedError, complete_task
     try:
-        result = complete_task(store, id, actor=_default_agent(agent), force=force)
+        result = complete_task(store, task_id, actor=_default_agent(agent), force=force)
     except TaskClaimedError as exc:
         return f"Error: {exc.code}: {exc}"
     if result:
@@ -2351,11 +2626,14 @@ def task_claim(id: str, agent: str = "", ttl_minutes: int = 120,
         note: Optional claim note.
         force: Override an existing unexpired claim.
     """
-    store, _ = _get_store()
+    try:
+        store, _, task_id, graph = _routed_ref(id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .tasks import claim_task
     try:
         result = claim_task(
-            store, id, _default_agent(agent),
+            store, task_id, _default_agent(agent),
             ttl_minutes=ttl_minutes,
             note=note,
             force=force,
@@ -2380,10 +2658,13 @@ def task_release(id: str, agent: str = "", force: bool = False) -> str:
         agent: Agent name. Required to match the claim unless force is true.
         force: Release even if the agent does not match.
     """
-    store, _ = _get_store()
+    try:
+        store, _, task_id, graph = _routed_ref(id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .tasks import release_task_claim
     try:
-        result = release_task_claim(store, id, agent=_default_agent(agent), force=force)
+        result = release_task_claim(store, task_id, agent=_default_agent(agent), force=force)
     except ValueError as e:
         return f"Could not release task claim: {e}"
     if not result:
@@ -2396,9 +2677,19 @@ def task_get(id: str) -> dict:
     """Get a complete structured durable task by its exact graph ID."""
     from .tasks import get_task
     from .task_service import task_record
-    store, _ = _get_store()
-    node = get_task(store, id)
-    return {"ok": True, "task": task_record(node)} if node else {
+    try:
+        store, _, task_id, graph = _routed_ref(id)
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "graph_unavailable", "message": str(exc)}}
+    try:
+        node = get_task(store, task_id)
+    finally:
+        if graph == "global":
+            store.close()
+    record = task_record(node) if node else None
+    if record and graph == "global":
+        record["id"] = f"global:{record['id']}"
+    return {"ok": True, "task": record} if node else {
         "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
 
 
@@ -2419,18 +2710,30 @@ def task_update(id: str, title: str | None = None, content: str | None = None,
     from .tasks import update_task
     from .task_service import task_record
     from .privacy import safe_error
-    store, _ = _get_store()
+    try:
+        store, _, task_id, graph = _routed_ref(id, write=True)
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "graph_unavailable", "message": str(exc)}}
+    if dependencies and any(dep.startswith(("global:", "project:"))
+                            and not dep.startswith(graph + ":") for dep in dependencies):
+        return {"ok": False, "error": {"code": "cross_graph_dependency",
+                                      "message": "Task dependencies must be in one graph"}}
+    if dependencies:
+        dependencies = [dep.removeprefix(graph + ":") for dep in dependencies]
     fields = {key: value for key, value in {
         "title": title, "content": content, "task_status": status,
         "priority": priority, "due": due, "owner": owner,
         "dependencies": dependencies, "expected_version": expected_version,
     }.items() if value is not None}
     try:
-        node = update_task(store, id, actor=_default_agent(agent), force=force, **fields)
+        node = update_task(store, task_id, actor=_default_agent(agent), force=force, **fields)
     except ValueError as exc:
         return {"ok": False, "error": {"code": getattr(exc, "code", "invalid_argument"),
                                        "message": safe_error(exc)}}
-    return {"ok": True, "task": task_record(node)} if node else {
+    record = task_record(node) if node else None
+    if record and graph == "global":
+        record["id"] = f"global:{record['id']}"
+    return {"ok": True, "task": record} if node else {
         "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
 
 
@@ -2602,14 +2905,19 @@ def coord_attach(name: str, node_id: str) -> str:
         name: Conversation ID or name.
         node_id: Node ID or title to attach.
     """
-    store, _ = _get_store()
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if graph == "global":
+        return "Error: cross-graph coordination attachments are not supported"
     from .coordination import attach_resource
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     try:
         resources = attach_resource(store, name,
-                                    node["id"] if node else node_id)
+                                    node["id"] if node else raw_id)
     except ValueError as e:
         return f"Could not attach resource: {e}"
     return f"Attached. Resources on {name}: {', '.join(resources)}"
@@ -2723,10 +3031,13 @@ def lock_acquire(node_id: str, ttl_minutes: int = 60, note: str = "",
         note: Why the node is locked.
         force: Take over a foreign unexpired lock.
     """
-    store, _ = _get_store()
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .locks import lock_node
     from .store import LockHeldError
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     if not node:
@@ -2748,10 +3059,13 @@ def lock_release(node_id: str, force: bool = False) -> str:
         node_id: Node ID or title to unlock.
         force: Clear a lock held by another agent.
     """
-    store, _ = _get_store()
+    try:
+        store, _, raw_id, graph = _routed_ref(node_id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
     from .locks import unlock_node
     from .store import LockHeldError
-    node, error = _node_for_write(store, node_id)
+    node, error = _node_for_write(store, raw_id)
     if error:
         return error
     if not node:
@@ -2860,8 +3174,11 @@ def watch_resolve(id: str, reason: str = "") -> str:
         id: Watch node ID.
         reason: Why this watch is being resolved.
     """
-    store, _ = _get_store()
-    node = store.get_node(id)
+    try:
+        store, _, raw_id, graph = _routed_ref(id, write=True)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    node = store.get_node(raw_id)
     if not node or node.get("type") != "watch":
         return f"Watch not found: {id}"
 
@@ -2871,8 +3188,8 @@ def watch_resolve(id: str, reason: str = "") -> str:
 
     # Atomic extra mutation first, then the status/weight flip without
     # passing extra — a concurrent extra writer is never clobbered.
-    store.atomic_extra_update(id, _mutate)
-    store.update_node(id, status="archived", weight=0.01)
+    store.atomic_extra_update(raw_id, _mutate)
+    store.update_node(raw_id, status="archived", weight=0.01)
     return f"Resolved watch: {node['title']} ({id})"
 
 

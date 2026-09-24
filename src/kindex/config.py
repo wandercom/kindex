@@ -682,6 +682,8 @@ class Config(BaseModel):
     # cron legacy-remainder pass can find the legacy graph even when this
     # invocation resolved to a profile.
     _legacy_data_dir: str | None = PrivateAttr(default=None)
+    # User-level graph before a repository-local store takes precedence.
+    _global_data_dir: str | None = PrivateAttr(default=None)
     # Keys a repository's .kin/config set that only the user's own config may
     # set; they were ignored (see _PROJECT_LAYER_UNTRUSTED_KEYS).
     _ignored_project_keys: list[str] = PrivateAttr(default_factory=list)
@@ -964,6 +966,7 @@ def load_config(
             profiles_base = p.parent
             break  # use first global found
 
+    global_data_dir = str(merged.get("data_dir") or Config().data_dir)
     project_layers = _project_config_paths(project_root)
 
     # Layer 2: local config (project-level) merges over global
@@ -992,6 +995,7 @@ def load_config(
             break  # use first local found
 
     cfg = Config(**merged) if merged else Config()
+    cfg._global_data_dir = global_data_dir
     cfg._ignored_project_keys = ignored_project_keys
     cfg = _resolve_profile(cfg, profile, kin_profile, profiles_base=profiles_base)
     cfg = _contain_data_dir(cfg)
