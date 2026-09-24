@@ -86,8 +86,9 @@ def test_task_list_discovers_relevant_home_tasks_without_routing_mutations(graph
     assert "S2S backlog item" in output
     assert "graph:global" in output
     assert "Different project task" not in output
-    assert f"global:{task_id}" in output
-    assert "Completed:" in server.task_done(f"global:{task_id}")
+    ref = server._graph_ref("global", task_id)
+    assert ref in output
+    assert "Completed:" in server.task_done(ref)
     assert home.get_node(task_id)["extra"]["task_status"] == "done"
 
 
@@ -96,11 +97,12 @@ def test_qualified_id_routes_edit_and_rejects_cross_graph_link(graphs):
     local_id = local.add_node(title="Local evidence", content="project observation")
     home_id = home.add_node(title="Global evidence", content="outer observation")
 
-    assert "Edited Global evidence" in server.edit(f"global:{home_id}", append="verified")
-    assert f"global:{home_id}" in server.show(f"global:{home_id}")
+    ref = server._graph_ref("global", home_id)
+    assert "Edited Global evidence" in server.edit(ref, append="verified")
+    assert ref in server.show(ref)
     assert "verified" in home.get_node(home_id)["content"]
     assert "verified" not in local.get_node(local_id)["content"]
-    assert "cross-graph links" in server.link(local_id, f"global:{home_id}")
+    assert "cross-graph links" in server.link(local_id, ref)
     assert not local.edges_from(local_id)
 
 
@@ -111,8 +113,40 @@ def test_duplicate_id_needs_qualified_reference(graphs):
     home.add_node(title="Global version", node_id=shared)
 
     assert "exists in both graphs" in server.edit(shared, append="unsafe")
-    assert "Edited Global version" in server.edit(f"global:{shared}", append="safe")
+    assert "Edited Global version" in server.edit(server._graph_ref("global", shared), append="safe")
     assert "safe" not in local.get_node(shared)["content"]
+
+
+def test_stale_qualified_reference_cannot_mutate_new_graph_selection(graphs, tmp_path, monkeypatch):
+    server, _, home, _ = graphs
+    shared = "abcdef123456"
+    home.add_node("Original global", node_id=shared)
+    old_ref = server._graph_ref("global", shared)
+    old_project_ref = server._graph_ref("project", shared)
+
+    next_project = tmp_path / "next-project"
+    next_project.mkdir()
+    next_local_dir = next_project / ".kin" / "local" / "kindex"
+    next_global_dir = tmp_path / "next-global"
+    next_config = Config(data_dir=str(next_local_dir))
+    next_config._project_path = next_project
+    next_config._global_data_dir = str(next_global_dir)
+    next_local = Store(next_config)
+    next_global = Store(Config(data_dir=str(next_global_dir)))
+    next_local.add_node("Next project", node_id=shared)
+    next_global.add_node("Next global", node_id=shared)
+    monkeypatch.setattr(server, "_store", next_local)
+    monkeypatch.setattr(server, "_config", next_config)
+    try:
+        assert "Stale graph reference" in server.edit(old_ref, append="wrong")
+        assert "Stale graph reference" in server.edit(old_project_ref, append="wrong")
+        assert "Stale graph reference" in server.add("Wrong derivation", source_refs=old_ref)
+        assert next_global.get_node(shared)["content"] == ""
+        assert next_local.get_node(shared)["content"] == ""
+        assert next_global.get_node_by_title("Wrong derivation") is None
+    finally:
+        next_local.close()
+        next_global.close()
 
 
 def test_derived_add_can_explicitly_target_global_graph(graphs):
@@ -120,34 +154,38 @@ def test_derived_add_can_explicitly_target_global_graph(graphs):
     global_id = home.add_node("Global source")
     local_id = local.add_node("Project source")
     output = server.add("Outer graph derived observation",
-                        source_refs=f"project:{local_id},global:{global_id}")
+                        source_refs=f"{server._graph_ref('project', local_id)},{server._graph_ref('global', global_id)}")
     ref = output.split("Created node: ", 1)[1].split(" ", 1)[0]
 
     assert ref.startswith("global:")
-    assert home.get_node(ref.removeprefix("global:"))
-    assert local.get_node(ref.removeprefix("global:")) is None
+    assert home.get_node(ref.rsplit(":", 1)[1])
+    assert local.get_node(ref.rsplit(":", 1)[1]) is None
     denied = server.add("Wrong graph observation", graph="project",
-                        source_refs=f"global:{global_id}")
+                        source_refs=server._graph_ref("global", global_id))
     assert "Global source requires" in denied
     assert local.get_node_by_title("Wrong graph observation") is None
+    missing_ref = server._graph_ref("global", "000000000000")
+    assert "unavailable" in server.add("Missing source", source_refs=missing_ref)
+    assert home.get_node_by_title("Missing source") is None
 
 
 def test_derived_task_and_qualified_update_stay_global(graphs):
     server, local, home, project = graphs
     source = home.add_node("Global backlog source")
     output = server.task_add("Follow global backlog", project_path=str(project),
-                             source_refs=f"global:{source}")
+                             source_refs=server._graph_ref("global", source))
     task_ref = output.split("Created task: ", 1)[1].split(" ", 1)[0]
 
     assert task_ref.startswith("global:")
     updated = server.task_update(task_ref, priority=1)
     assert updated["ok"]
     assert updated["task"]["id"] == task_ref
-    assert home.get_node(task_ref.removeprefix("global:"))["extra"]["priority"] == 1
-    assert local.get_node(task_ref.removeprefix("global:")) is None
+    assert home.get_node(task_ref.rsplit(":", 1)[1])["extra"]["priority"] == 1
+    assert local.get_node(task_ref.rsplit(":", 1)[1]) is None
     local_source = local.add_node("Local source")
-    denied = server.task_add("Impossible cross-store task", link_to=f"project:{local_source}",
-                             source_refs=f"global:{source}")
+    denied = server.task_add("Impossible cross-store task",
+                             link_to=server._graph_ref("project", local_source),
+                             source_refs=server._graph_ref("global", source))
     assert "cross-graph links" in denied
     assert home.get_node_by_title("Impossible cross-store task") is None
 
@@ -156,7 +194,7 @@ def test_global_watch_resolves_in_its_source_graph(graphs):
     server, local, home, _ = graphs
     watch_id = home.add_node("Global watch", node_type="watch")
 
-    assert "Resolved watch" in server.watch_resolve(f"global:{watch_id}")
+    assert "Resolved watch" in server.watch_resolve(server._graph_ref("global", watch_id))
     assert home.get_node(watch_id)["status"] == "archived"
     assert local.get_node(watch_id) is None
 
