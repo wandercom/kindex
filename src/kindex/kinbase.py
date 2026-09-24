@@ -278,6 +278,12 @@ def _node(repo, identity, doc, mode, receipt):
                    "prov_source": "kinbase:" + repo, "extra": {"kinbase": metadata}})
 
 
+#: The most one Kinbase status may take. `status` reaches Company over the
+#: network, and it runs on the MCP event loop, so an unbounded call stalls every
+#: other tool for that client.
+STATUS_TIMEOUT_S = 30
+
+
 def _query(argv, binary, timeout_s):
     """Run one Kinbase query command and parse its JSON.
 
@@ -319,16 +325,18 @@ def _query(argv, binary, timeout_s):
 def read_status(repo: str | Path, *, binary="kinbase") -> dict:
     """Certification, trusted fact count and open Unknowns for one repository.
 
-    Deliberately unbounded. `status` runs Kinbase's due-maintenance sweep first
-    and that sweep signs events, so a timeout firing partway through would tear
-    a write rather than abandon a read: killed between the signed event and the
-    ledger that records it, the next call re-emits an event id that already
-    exists. The CLI imposes no such bound, so adding one here would invent a
-    failure mode rather than contain one. Bounding this safely means crash-safe
-    maintenance inside Kinbase, which is not ours to add from here.
+    Bounded, though `status` signs events during its due-maintenance sweep. An
+    earlier revision left this unbounded to avoid tearing that write, which was
+    the wrong trade: the timeout SIGKILLs the child exactly as a client quit, an
+    MCP restart or a lost machine does, so the tear is already reachable and the
+    bound only changes how often. What the bound does remove is the
+    unrecoverable case. FastMCP runs a sync tool inline on the event loop, so an
+    unbounded call here does not hang one tool, it hangs every kindex tool for
+    that client with no cancellation path. A recoverable failure that is already
+    possible beats an unrecoverable one that is not.
     """
     root = Path(repo).expanduser().resolve(strict=True)
-    return _query(["status", "--repo", str(root)], binary, None)
+    return _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
 
 
 def read_explain(repo: str | Path, logical_key: str, decision: str, *,

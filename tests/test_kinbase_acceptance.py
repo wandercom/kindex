@@ -677,12 +677,16 @@ def test_the_query_tools_leave_the_repository_and_the_graph_untouched(
     assert len(store.all_nodes()) == before, "a query wrote to the graph"
 
 
-def test_status_runs_unbounded_because_a_timeout_would_tear_a_signed_write(
+def test_each_kinbase_read_carries_its_own_bound(
         store, repo, monkeypatch, tmp_path):
-    """`status` signs events before it reports. A deadline firing between the
-    signed event and the ledger recording it leaves the next call free to
-    re-emit an id that already exists, so bounding it converts a slow read into
-    a duplicated write. `explain` writes nothing and keeps its bound."""
+    """Both reads are bounded, and each carries its own bound.
+
+    `status` signs events during maintenance, which argued once for leaving it
+    unbounded. That was the wrong trade: the deadline SIGKILLs the child exactly
+    as a client quit or a lost machine does, so the tear is reachable either way
+    and the bound only changes how often. It runs on the MCP event loop, where
+    an unbounded call hangs every other tool for that client with no
+    cancellation path, so the bound removes the unrecoverable case."""
     from kindex import kinbase as kb
 
     seen = {}
@@ -699,5 +703,6 @@ def test_status_runs_unbounded_because_a_timeout_would_tear_a_signed_write(
     kb.read_status(repo)
     kb.read_explain(repo, "symbol:class:Db", "which definition is current")
 
-    assert seen["status"] is None, f"status was bounded at {seen['status']}"
+    assert seen["status"] == kb.STATUS_TIMEOUT_S, f"status bound was {seen['status']}"
     assert seen["explain"] == kb.EXPLAIN_TIMEOUT_S, seen["explain"]
+    assert kb.STATUS_TIMEOUT_S < kb.EXPLAIN_TIMEOUT_S, "status must not outlast explain"
