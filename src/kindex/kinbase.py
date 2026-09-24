@@ -281,6 +281,15 @@ def _node(repo, identity, doc, mode, receipt):
 #: The most one Kinbase status may take. `status` reaches Company over the
 #: network, and it runs on the MCP event loop, so an unbounded call stalls every
 #: other tool for that client.
+#:
+#: Thirty seconds is measured, not inherited. Against a 0.36 MB store `status`
+#: takes 655-884 ms over ten runs. The cost is linear in store size, so the
+#: 5 MB that Kinbase's own deploy notes name as the point where the query shape
+#: has to be fixed lands near nine seconds, leaving roughly three times the
+#: headroom. Past that the bound is reached before the answer is: a 20 MB store
+#: extrapolates to about thirty-eight seconds and would time out. That is the
+#: query shape failing loudly rather than this bound being wrong, and the
+#: extrapolation is one measured point, not a second measurement.
 STATUS_TIMEOUT_S = 30
 
 
@@ -326,10 +335,12 @@ def read_status(repo: str | Path, *, binary="kinbase") -> dict:
     """Certification, trusted fact count and open Unknowns for one repository.
 
     Bounded, though `status` signs events during its due-maintenance sweep. An
-    earlier revision left this unbounded to avoid tearing that write, which was
-    the wrong trade: the timeout SIGKILLs the child exactly as a client quit, an
-    MCP restart or a lost machine does, so the tear is already reachable and the
-    bound only changes how often. What the bound does remove is the
+    earlier revision left this unbounded to avoid tearing that write. The trade
+    was wrong twice over. A deadline SIGKILLs the child exactly as a client quit
+    or a lost machine does, so the tear is reachable either way; and the tear is
+    a no-op rather than corruption, because Kinbase appends with
+    `INSERT OR IGNORE` against an `event_id` primary key, so the re-emitted id
+    the old rationale feared is precisely the case that insert absorbs. What the bound does remove is the
     unrecoverable case. FastMCP runs a sync tool inline on the event loop, so an
     unbounded call here does not hang one tool, it hangs every kindex tool for
     that client with no cancellation path. A recoverable failure that is already

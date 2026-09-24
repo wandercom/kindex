@@ -198,7 +198,7 @@ def _health_outcome(result) -> str:
             except ValueError:
                 parsed = None
             failed = isinstance(parsed, dict) and (
-                parsed.get("ok") is False or "error" in parsed)
+                parsed.get("ok") is False or parsed.get("error") is not None)
     else:
         failed = False
     return "failed" if failed else "success"
@@ -504,7 +504,7 @@ def kinbase_status(repo: str) -> str:
     # through verbatim gave one tool two shapes: a caller reading `ok` saw a
     # refusal as success, and the health ledger recorded an unreachable Company
     # as a healthy call. Keep Kinbase's code and remedy, add the disposition.
-    if isinstance(result, dict) and "error" in result:
+    if isinstance(result, dict) and "ok" not in result and result.get("error") is not None:
         return json.dumps({"ok": False, **result}, indent=2)
     return json.dumps(result, indent=2)
 
@@ -534,7 +534,7 @@ def kinbase_explain(repo: str, logical_key: str, decision: str) -> str:
     # through verbatim gave one tool two shapes: a caller reading `ok` saw a
     # refusal as success, and the health ledger recorded an unreachable Company
     # as a healthy call. Keep Kinbase's code and remedy, add the disposition.
-    if isinstance(result, dict) and "error" in result:
+    if isinstance(result, dict) and "ok" not in result and result.get("error") is not None:
         return json.dumps({"ok": False, **result}, indent=2)
     return json.dumps(result, indent=2)
 
