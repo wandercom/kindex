@@ -197,7 +197,8 @@ def _health_outcome(result) -> str:
                 parsed = json.loads(result)
             except ValueError:
                 parsed = None
-            failed = isinstance(parsed, dict) and parsed.get("ok") is False
+            failed = isinstance(parsed, dict) and (
+                parsed.get("ok") is False or "error" in parsed)
     else:
         failed = False
     return "failed" if failed else "success"
@@ -499,6 +500,12 @@ def kinbase_status(repo: str) -> str:
     except (ValueError, RuntimeError, OSError) as exc:
         return json.dumps({"ok": False, "error": {
             "code": "kinbase_status_refused", "message": safe_error(exc)}}, indent=2)
+    # Kinbase refuses with a typed envelope on stdout and no `ok`. Passing that
+    # through verbatim gave one tool two shapes: a caller reading `ok` saw a
+    # refusal as success, and the health ledger recorded an unreachable Company
+    # as a healthy call. Keep Kinbase's code and remedy, add the disposition.
+    if isinstance(result, dict) and "error" in result:
+        return json.dumps({"ok": False, **result}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -523,6 +530,12 @@ def kinbase_explain(repo: str, logical_key: str, decision: str) -> str:
     except (ValueError, RuntimeError, OSError) as exc:
         return json.dumps({"ok": False, "error": {
             "code": "kinbase_explain_refused", "message": safe_error(exc)}}, indent=2)
+    # Kinbase refuses with a typed envelope on stdout and no `ok`. Passing that
+    # through verbatim gave one tool two shapes: a caller reading `ok` saw a
+    # refusal as success, and the health ledger recorded an unreachable Company
+    # as a healthy call. Keep Kinbase's code and remedy, add the disposition.
+    if isinstance(result, dict) and "error" in result:
+        return json.dumps({"ok": False, **result}, indent=2)
     return json.dumps(result, indent=2)
 
 

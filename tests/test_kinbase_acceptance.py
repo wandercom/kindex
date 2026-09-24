@@ -651,6 +651,35 @@ def test_mcp_kinbase_reads_run_only_the_path_binary_and_answer_refusals(
     assert refused["ok"] is False and refused["error"]["code"] == "kinbase_explain_refused"
 
 
+def test_a_kinbase_refusal_reaches_the_mcp_boundary_as_a_failure(
+        store, repo, monkeypatch):
+    """A refusal Kinbase writes must not read as a healthy call.
+
+    Kinbase refuses with a typed envelope on stdout carrying `error` and no
+    `ok`. The health ledger's string branch tested only `ok is False`, so an
+    unreachable Company scored as success however long it lasted, and a caller
+    reading `ok` saw a clean status. The refusal is asserted here at the MCP
+    output layer because that is the boundary the disposition is read from.
+    """
+    import subprocess as _sp
+
+    from kindex import kinbase as kb
+    mcp = importlib.import_module("kindex.mcp_server")
+
+    refusal = json.dumps({"error": {"code": "COMPANY_UNREACHABLE",
+                                    "message": "Company did not answer"}})
+    monkeypatch.setattr(kb.shutil, "which", lambda name: "/usr/bin/true")
+    monkeypatch.setattr(kb.subprocess, "run",
+                        lambda *a, **k: _sp.CompletedProcess([], 1, refusal, ""))
+    monkeypatch.setattr(mcp, "_get_store", lambda: (store, store.config))
+
+    output = mcp.kinbase_status(str(repo))
+    parsed = json.loads(output)
+    assert parsed["ok"] is False, "a refusal left the tool without a disposition"
+    assert parsed["error"]["code"] == "COMPANY_UNREACHABLE", "Kinbase's own code was lost"
+    assert mcp._health_outcome(output) == "failed", "the refusal was recorded as healthy"
+
+
 def test_the_query_tools_leave_the_repository_and_the_graph_untouched(
         store, repo, monkeypatch, tmp_path):
     """Kinbase closes overdue apologies inside its own `status`, which is a
