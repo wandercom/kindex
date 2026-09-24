@@ -52,7 +52,7 @@ mcp = FastMCP(
         "1. START: `tag_start` or `tag_resume` to name this session\n"
         "2. ORIENT: `search` the current topic to see what's already known\n"
         "3. DURING: capture as you go (see node types below)\n"
-        "4. END: `tag_update` with action='end' and a summary\n\n"
+        "4. END: `tag_update` with your tag's name, action='end', and a summary\n\n"
 
         "## What to capture (use `add` with the right node_type)\n"
         "- concept: patterns, facts, key files, domain terms, how things work\n"
@@ -2200,7 +2200,8 @@ def tag_update(name: str = "", focus: str = "", description: str = "",
     """Update, segment, pause, or end a session tag.
 
     Args:
-        name: Tag name (auto-detects active tag if empty).
+        name: Required tag name from tag_start or tag_resume. Concurrent agents
+            can have active tags in the same project, so omission is unsafe.
         focus: New focus area (used for update and segment actions).
         description: Updated description.
         remaining: Replace remaining items (comma-separated).
@@ -2209,16 +2210,13 @@ def tag_update(name: str = "", focus: str = "", description: str = "",
         summary: Summary for segment/pause/end actions.
         action: One of: update, segment, pause, end.
     """
+    if not name.strip():
+        return "Error: tag_update requires a tag name from tag_start or tag_resume."
+
     store, config = _get_store()
     from .sessions import (update_tag, add_segment, pause_tag,
-                           complete_tag, get_active_tag, get_tag)
+                           complete_tag)
     project_path = _mcp_project_path()
-
-    if not name:
-        active = get_active_tag(store, project_path=_mcp_project_path())
-        if not active:
-            return "No active session tag found. Start one with tag_start."
-        name = (active.get("extra") or {}).get("tag", active["title"])
 
     try:
         if action == "update":

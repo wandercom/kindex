@@ -48,12 +48,14 @@ the current conversation and remain linkable to graph context.
    has `.kin/config`, treat it as tracked project context.
 4. Work: capture discoveries, decisions, tasks, watches, and connections while
    they are fresh.
-5. Segment: when changing topics, call `tag_update` with `action=segment`.
-6. End: call `tag_update` with `action=end` and a concise summary.
+5. Segment: when changing topics, call `tag_update` with your tag's `name`
+   and `action=segment`.
+6. End: call `tag_update` with your tag's `name`, `action=end`, and a concise summary.
 
 `tag_update` is a native MCP tool (segment, pause, end, and focus updates all
-go through it). Earlier releases required a CLI fallback for tag updates; that
-is no longer the case.
+go through it). Pass the explicit tag name for every action; multiple agents can
+have active tags in the same project. Earlier releases required a CLI fallback
+for tag updates; that is no longer the case.
 
 ## Project `.kin/` Contract
 
@@ -301,7 +303,7 @@ transcript. Capture what should help a future agent or future user.
 
 1. Add any final decisions, tasks, watches, or questions
 2. Link newly captured nodes where obvious
-3. `tag_update` with `action=end` and a concise summary
+3. `tag_update` with your tag's `name`, `action=end`, and a concise summary
 
 ## Client Setup
 

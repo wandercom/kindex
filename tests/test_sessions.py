@@ -537,6 +537,21 @@ class TestTagCLI:
         r = run("tag", "start", data_dir=d)
         assert "Usage" in r.stderr or r.returncode != 0
 
+    @pytest.mark.parametrize("action", ["update", "segment", "pause", "end"])
+    def test_tag_mutation_without_name_preserves_concurrent_tags(self, tmp_path,
+                                                                  action):
+        d = str(tmp_path)
+        run("tag", "start", "mine", data_dir=d)
+        run("tag", "start", "theirs", data_dir=d)
+        run("tag", "update", "theirs", "--focus", "recent", data_dir=d)
+
+        result = run("tag", action, data_dir=d)
+
+        assert "requires an explicit tag name" in result.stderr
+        for name in ("mine", "theirs"):
+            shown = run("tag", "show", name, data_dir=d)
+            assert "Status: active" in shown.stdout
+
 
 class TestStoreSessionMethods:
     def test_get_session_tags(self, store):

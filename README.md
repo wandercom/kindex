@@ -440,10 +440,10 @@ kin ingest all
 
 # Session tags — named work context handles
 kin tag start auth-refactor --focus "OAuth2 flow" --remaining "tokens,tests"
-kin tag segment --focus "Token storage" --summary "Flow design done"
+kin tag segment auth-refactor --focus "Token storage" --summary "Flow design done"
 kin tag pause auth-refactor --summary "Waiting for review"
 kin tag resume auth-refactor   # reactivate and render admission-controlled context
-kin tag end --summary "All done"
+kin tag end auth-refactor --summary "All done"
 
 # After 60 days, `kin cron` step 8 (or `kin archive run`) moves completed,
 # unlinked session tags from the fast graph (the live database) into the slow

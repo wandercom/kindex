@@ -6020,6 +6020,11 @@ def cmd_tag(args):
     action = getattr(args, "tag_action", None)
     tag_name = getattr(args, "tag_name", None)
 
+    if action in {"update", "segment", "pause", "end"} and not tag_name:
+        print(f"Error: kin tag {action} requires an explicit tag name.", file=sys.stderr)
+        store.close()
+        return
+
     if action == "start":
         from .sessions import start_tag
 
@@ -6045,16 +6050,7 @@ def cmd_tag(args):
             print(f"Error: {e}", file=sys.stderr)
 
     elif action == "update":
-        from .sessions import get_active_tag, update_tag
-
-        if not tag_name:
-            active = get_active_tag(store, project_path=os.getcwd())
-            if active:
-                tag_name = (active.get("extra") or {}).get("tag", active["title"])
-            else:
-                print("No active session tag. Use: kin tag start <name>", file=sys.stderr)
-                store.close()
-                return
+        from .sessions import update_tag
         remaining = None
         raw = getattr(args, "remaining", None)
         if raw:
@@ -6083,16 +6079,7 @@ def cmd_tag(args):
             print(f"Error: {e}", file=sys.stderr)
 
     elif action == "segment":
-        from .sessions import add_segment, get_active_tag
-
-        if not tag_name:
-            active = get_active_tag(store, project_path=os.getcwd())
-            if active:
-                tag_name = (active.get("extra") or {}).get("tag", active["title"])
-        if not tag_name:
-            print("No active session tag.", file=sys.stderr)
-            store.close()
-            return
+        from .sessions import add_segment
         focus = getattr(args, "focus", None) or "New segment"
         summary = getattr(args, "summary", None) or ""
         try:
@@ -6108,16 +6095,7 @@ def cmd_tag(args):
             print(f"Error: {e}", file=sys.stderr)
 
     elif action == "pause":
-        from .sessions import get_active_tag, pause_tag
-
-        if not tag_name:
-            active = get_active_tag(store, project_path=os.getcwd())
-            if active:
-                tag_name = (active.get("extra") or {}).get("tag", active["title"])
-        if not tag_name:
-            print("No active session tag.", file=sys.stderr)
-            store.close()
-            return
+        from .sessions import pause_tag
         summary = getattr(args, "summary", None) or ""
         try:
             pause_tag(
@@ -6128,16 +6106,7 @@ def cmd_tag(args):
             print(f"Error: {e}", file=sys.stderr)
 
     elif action == "end":
-        from .sessions import complete_tag, get_active_tag
-
-        if not tag_name:
-            active = get_active_tag(store, project_path=os.getcwd())
-            if active:
-                tag_name = (active.get("extra") or {}).get("tag", active["title"])
-        if not tag_name:
-            print("No active session tag.", file=sys.stderr)
-            store.close()
-            return
+        from .sessions import complete_tag
         summary = getattr(args, "summary", None) or ""
         try:
             complete_tag(
@@ -6662,9 +6631,9 @@ Kindex is a persistent knowledge graph. MCP tools (`search`, `add`, `context`, \
 2. **Policy**: if the repo has `.kin/config`, treat it as tracked project context. \
 Run `kin policy check --event agent-start` when shell access is available.
 3. **During**: follow the capture rules below -- this is the whole point of kindex
-4. **Segment**: when switching topics, call `tag_update` with `action=segment`, \
+4. **Segment**: when switching topics, call `tag_update` with your tag's `name` and `action=segment`, \
 summarizing what was done
-5. **End**: call `tag_update` with `action=end` and a summary before the session closes
+5. **End**: call `tag_update` with your tag's `name`, `action=end`, and a summary before the session closes
 
 ### Project `.kin/` contract
 - `.kin/config` and `.kin/index.json` are repo-shipped project artifacts, not \
@@ -6733,9 +6702,9 @@ already known.
 Run `kin policy check --event agent-start` when shell access is available.
 4. **During**: capture important discoveries, decisions, tasks, and connections as \
 they happen.
-5. **Segment**: when switching topics, call `tag_update` with `action=segment` and \
+5. **Segment**: when switching topics, call `tag_update` with your tag's `name`, `action=segment`, and \
 a concise summary.
-6. **End**: call `tag_update` with `action=end` and a summary before the session closes.
+6. **End**: call `tag_update` with your tag's `name`, `action=end`, and a summary before the session closes.
 
 ### Project `.kin/` contract
 - `.kin/config` and `.kin/index.json` are repo-shipped project artifacts, not private cache.
@@ -7940,7 +7909,7 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["start", "update", "segment", "pause", "end",
                             "resume", "list", "show"],
                    help="Tag action")
-    s.add_argument("tag_name", nargs="?", help="Tag name (auto-detects active for update/pause/end)")
+    s.add_argument("tag_name", nargs="?", help="Tag name (required for start/update/segment/pause/end/resume)")
     s.add_argument("--focus", help="Current focus / new segment focus")
     s.add_argument("--description", help="Session description")
     s.add_argument("--summary", help="Summary (for segment/pause/end)")
