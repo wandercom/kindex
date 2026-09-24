@@ -278,6 +278,87 @@ def _node(repo, identity, doc, mode, receipt):
                    "prov_source": "kinbase:" + repo, "extra": {"kinbase": metadata}})
 
 
+#: The most one Kinbase status may take. `status` reaches Company over the
+#: network, and it runs on the MCP event loop, so an unbounded call stalls every
+#: other tool for that client.
+#:
+#: Thirty seconds is measured, not inherited. Against a 0.36 MB store `status`
+#: takes 655-884 ms over ten runs. The cost is linear in store size, so the
+#: 5 MB that Kinbase's own deploy notes name as the point where the query shape
+#: has to be fixed lands near nine seconds, leaving roughly three times the
+#: headroom. Past that the bound is reached before the answer is: a 20 MB store
+#: extrapolates to about thirty-eight seconds and would time out. That is the
+#: query shape failing loudly rather than this bound being wrong, and the
+#: extrapolation is one measured point, not a second measurement.
+STATUS_TIMEOUT_S = 30
+
+
+def _query(argv, binary, timeout_s):
+    """Run one Kinbase query command and parse its JSON.
+
+    Neither command records the asking. `explain` reduces one key and writes
+    nothing; `status` runs Kinbase's own due maintenance first, closing
+    apologies whose deadline has passed, which is a signed write the CLI
+    performs on every invocation and which no caller can suppress. It is
+    bounded by what is already overdue rather than by how often it is asked,
+    so a second call in the same minute writes nothing.
+
+    `project` is deliberately absent on the other side of exactly that line:
+    it records the query and may open an Unknown, so each call adds to the
+    queue people read, and an agent looping over it turns that queue into
+    noise.
+    """
+    executable = shutil.which(str(binary))
+    if not executable:
+        raise RuntimeError("Kinbase binary unavailable; install Kinbase")
+    try:
+        result = subprocess.run([executable, *argv, "--json"],
+                                capture_output=True, text=True,
+                                timeout=timeout_s, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Kinbase {argv[0]} timed out") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Kinbase {argv[0]} failed") from exc
+    envelope = _loads(result.stdout)
+    # A refusal is a typed document on stdout, not a crash. Returning it keeps
+    # the code and remediation Kinbase wrote, which a raised exception loses.
+    if isinstance(envelope, dict) and "error" in envelope:
+        return envelope
+    if result.returncode:
+        raise RuntimeError(f"Kinbase {argv[0]} exited {result.returncode}")
+    if not isinstance(envelope, dict):
+        raise ValueError(f"unsupported Kinbase {argv[0]} response")
+    return envelope
+
+
+def read_status(repo: str | Path, *, binary="kinbase") -> dict:
+    """Certification, trusted fact count and open Unknowns for one repository.
+
+    Bounded, though `status` signs events during its due-maintenance sweep. An
+    earlier revision left this unbounded to avoid tearing that write. The trade
+    was wrong twice over. A deadline SIGKILLs the child exactly as a client quit
+    or a lost machine does, so the tear is reachable either way; and the tear is
+    a no-op rather than corruption, because Kinbase appends with
+    `INSERT OR IGNORE` against an `event_id` primary key, so the re-emitted id
+    the old rationale feared is precisely the case that insert absorbs. What the bound does remove is the
+    unrecoverable case. FastMCP runs a sync tool inline on the event loop, so an
+    unbounded call here does not hang one tool, it hangs every kindex tool for
+    that client with no cancellation path. A recoverable failure that is already
+    possible beats an unrecoverable one that is not.
+    """
+    root = Path(repo).expanduser().resolve(strict=True)
+    return _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
+
+
+def read_explain(repo: str | Path, logical_key: str, decision: str, *,
+                 binary="kinbase") -> dict:
+    """Why one logical key reads as it does, and what evidence would change it."""
+    root = Path(repo).expanduser().resolve(strict=True)
+    return _query(
+        ["explain", logical_key, "--repo", str(root), "--decision", decision],
+        binary, EXPLAIN_TIMEOUT_S)
+
+
 def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase",
                  explain_budget_s: float | None = None) -> dict:
     """Refresh source-scoped evidence atomically; never write signed source files.

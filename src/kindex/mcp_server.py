@@ -197,7 +197,8 @@ def _health_outcome(result) -> str:
                 parsed = json.loads(result)
             except ValueError:
                 parsed = None
-            failed = isinstance(parsed, dict) and parsed.get("ok") is False
+            failed = isinstance(parsed, dict) and (
+                parsed.get("ok") is False or parsed.get("error") is not None)
     else:
         failed = False
     return "failed" if failed else "success"
@@ -471,6 +472,70 @@ def kinbase_sync(repo: str, mode: str = "auto") -> str:
         # untyped tool failures.
         return json.dumps({"ok": False, "error": {
             "code": "kinbase_sync_refused", "message": safe_error(exc)}}, indent=2)
+    return json.dumps(result, indent=2)
+
+
+@_tool()
+def kinbase_status(repo: str) -> str:
+    """Report a repository's Kinbase certification, trusted facts and Unknowns.
+
+    USE THIS: before relying on company direction in a repository, to see
+    whether Company was reachable at all. A withheld snapshot degrades the
+    projection to repository evidence without failing, so a repository that
+    lost Company and one that never had direction read alike until this is
+    asked.
+
+    Not purely a read: Kinbase closes apologies whose deadline has passed
+    before it reports, which is a signed write it performs on every `status`.
+    Nothing here records the asking, and what it writes is bounded by what is
+    already overdue rather than by how often it is called. The `kinbase`
+    executable is the one on PATH: a tool caller does not name what runs.
+
+    Args:
+        repo: Path to the certified repository to report on.
+    """
+    from .kinbase import read_status
+    try:
+        result = read_status(repo)
+    except (ValueError, RuntimeError, OSError) as exc:
+        return json.dumps({"ok": False, "error": {
+            "code": "kinbase_status_refused", "message": safe_error(exc)}}, indent=2)
+    # Kinbase refuses with a typed envelope on stdout and no `ok`. Passing that
+    # through verbatim gave one tool two shapes: a caller reading `ok` saw a
+    # refusal as success, and the health ledger recorded an unreachable Company
+    # as a healthy call. Keep Kinbase's code and remedy, add the disposition.
+    if isinstance(result, dict) and "ok" not in result and result.get("error") is not None:
+        return json.dumps({"ok": False, **result}, indent=2)
+    return json.dumps(result, indent=2)
+
+
+@_tool()
+def kinbase_explain(repo: str, logical_key: str, decision: str) -> str:
+    """Explain why one Kinbase logical key currently reads as it does.
+
+    USE THIS: when company direction and the repository disagree, to see the
+    reducer steps, the rejected events, and the evidence that would change the
+    answer. Read-only, exact-key, and it never submits a question; generating a
+    whole task brief is `kinbase project`, a planner step, because that one
+    writes.
+
+    Args:
+        repo: Path to the certified repository asking.
+        logical_key: The exact key to explain, e.g. `symbol:class:Db`.
+        decision: The decision the answer is being read for.
+    """
+    from .kinbase import read_explain
+    try:
+        result = read_explain(repo, logical_key, decision)
+    except (ValueError, RuntimeError, OSError) as exc:
+        return json.dumps({"ok": False, "error": {
+            "code": "kinbase_explain_refused", "message": safe_error(exc)}}, indent=2)
+    # Kinbase refuses with a typed envelope on stdout and no `ok`. Passing that
+    # through verbatim gave one tool two shapes: a caller reading `ok` saw a
+    # refusal as success, and the health ledger recorded an unreachable Company
+    # as a healthy call. Keep Kinbase's code and remedy, add the disposition.
+    if isinstance(result, dict) and "ok" not in result and result.get("error") is not None:
+        return json.dumps({"ok": False, **result}, indent=2)
     return json.dumps(result, indent=2)
 
 
