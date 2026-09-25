@@ -322,6 +322,21 @@ class TestSequestration:
         with pytest.raises(ProfileMismatchError, match="work"):
             _ = store2.conn
 
+    def test_read_only_profile_mismatch_preserves_primary_error(self, tmp_path):
+        data_dir = tmp_path / "profiled"
+        source_cfg = Config(data_dir=str(data_dir))
+        source_cfg.active_profile = "work"
+        source = Store(source_cfg)
+        source.add_node("Work node")
+        source.close()
+
+        wrong_cfg = Config(data_dir=str(data_dir))
+        wrong_cfg.active_profile = "personal"
+        reader = Store(wrong_cfg, read_only=True)
+        with pytest.raises(ProfileMismatchError, match="stamped for profile 'work'"):
+            _ = reader.conn
+        assert reader._conn is None
+
     def test_legacy_config_does_not_stamp(self, tmp_path):
         cfg = Config(data_dir=str(tmp_path / "plain"))
         store = Store(cfg)

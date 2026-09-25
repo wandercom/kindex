@@ -354,6 +354,7 @@ class Store:
         migration_step_hook: Callable[[int, str], None] | None = None,
         migrate: bool = True,
         manage_project_storage: bool = True,
+        read_only: bool = False,
     ):
         self.config = config
         # Support both kindex.db (new) and conv.db (legacy)
@@ -365,6 +366,7 @@ class Store:
         self._migration_step_hook = migration_step_hook
         self._migrate = migrate
         self._manage_project_storage = manage_project_storage
+        self.read_only = read_only
         # Profile stamp guard: configs that carry an active_profile (added by
         # the profiles feature) bind this database to that profile name.
         self._expected_profile: str | None = getattr(config, "active_profile", None)
@@ -372,6 +374,27 @@ class Store:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
+            if self.read_only:
+                # Secondary retrieval must neither create a missing graph nor
+                # run migrations, profile stamping, or access-time writes.
+                self._conn = sqlite3.connect(
+                    self.db_path.resolve().as_uri() + "?mode=ro", uri=True,
+                    timeout=self._sqlite_timeout)
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute("PRAGMA query_only=ON")
+                try:
+                    row = self._conn.execute(
+                        "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                    if row is None or self._parse_schema_version(row["value"]) != SCHEMA_VERSION:
+                        raise SchemaMigrationPending(
+                            f"Database {self.db_path} needs a current schema for read-only retrieval")
+                    self._check_profile_stamp()
+                except BaseException:
+                    conn, self._conn = self._conn, None
+                    if conn is not None:
+                        conn.close()
+                    raise
+                return self._conn
             # A repo-local store is never meant for version control; the
             # legacy lane created one without saying so.
             # The path as named, not resolved: resolving would walk through a
@@ -2036,7 +2059,7 @@ class Store:
         # A read writes at most once per interval: every read used to take
         # the write lock (and hooks wait only 0.25 s for it).
         cutoff = _minutes_ago(_ACCESS_WRITE_MINUTES)
-        if (row["last_accessed"] or "") < cutoff:
+        if not self.read_only and (row["last_accessed"] or "") < cutoff:
             # The cutoff is rechecked in the write, so concurrent readers
             # record one access, not one each.
             self.conn.execute(

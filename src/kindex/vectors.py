@@ -612,6 +612,24 @@ def ensure_vec_table(store: Store) -> bool:
     dim = _get_embedding_dim(store.config)
     fingerprint = embedding_fingerprint(store.config)
 
+    if getattr(store, "read_only", False):
+        # Search of a secondary graph must never create/rebuild vector state.
+        # Existing compatible vectors remain available for semantic recall.
+        try:
+            import sqlite_vec
+            store.conn.enable_load_extension(True)
+            sqlite_vec.load(store.conn)
+            store.conn.enable_load_extension(False)
+            table = store.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_vectors'").fetchone()
+            if table is None:
+                return False
+            row = store.conn.execute(
+                "SELECT value FROM vec_meta WHERE key='embedding_fingerprint'").fetchone()
+            return row is not None and row["value"] == fingerprint
+        except Exception:
+            return False
+
     try:
         import sqlite_vec
         store.conn.enable_load_extension(True)

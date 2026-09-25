@@ -629,8 +629,10 @@ def format_task_list(tasks: list[dict]) -> str:
         proximity = t.get("proximity")
         prox_str = f" prox={proximity:.2f}" if proximity is not None else ""
 
-        lines.append(
-            f"  [{p_tag}] {t.get('title', '?')}{due_str}{scope_tag}{claim_str}{prox_str}"
-            f"  w={t.get('weight', 0):.2f}  {t.get('id', '?')[:12]}"
-        )
+        task_ref = t.get("_graph_ref") or t.get("id", "?")[:12]
+        line = (f"  [{p_tag}] {t.get('title', '?')}{due_str}{scope_tag}{claim_str}{prox_str}"
+                f"  w={t.get('weight', 0):.2f}  {task_ref}")
+        if t.get("_graph_source"):
+            line += f"  graph:{t['_graph_source']}"
+        lines.append(line)
     return "\n".join(lines)
