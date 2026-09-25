@@ -390,8 +390,9 @@ class Store:
                             f"Database {self.db_path} needs a current schema for read-only retrieval")
                     self._check_profile_stamp()
                 except BaseException:
-                    self._conn.close()
-                    self._conn = None
+                    conn, self._conn = self._conn, None
+                    if conn is not None:
+                        conn.close()
                     raise
                 return self._conn
             # A repo-local store is never meant for version control; the

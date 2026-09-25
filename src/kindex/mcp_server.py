@@ -157,8 +157,10 @@ class MemoryUnavailableError(RuntimeError):
         # A configuration refusal (an ambiguous scope, an unknown profile)
         # is something the caller can act on, so its remedy travels with the
         # error; a broken database says only its class.
+        guidance = getattr(cause, "remedy", "")
         self.remedy = (
-            safe_error(cause, limit=600) if isinstance(cause, ValueError) else ""
+            f"{safe_error(cause, limit=600)}; {guidance}" if guidance
+            else safe_error(cause, limit=600) if isinstance(cause, ValueError) else ""
         )
         super().__init__(f"memory unavailable ({self.error_class})")
 
@@ -298,8 +300,14 @@ def _global_store(store, config, *, write=False):
     if (not project or not home_dir or config.active_profile
             or not is_project_store(store, project)):
         return None
-    home_config = config.model_copy(deep=True)
+    from .config import Config, record_degraded
+
+    home_config = Config(**config._global_config_data)
     home_config.data_dir = home_dir
+    # Profiles are a user-only layer, already anchored to their declaring
+    # config file by load_config. Project edit_policy and other local settings
+    # must never govern the outer graph.
+    home_config.profiles = config.profiles
     matching_profiles = [name for name, entry in config.profiles.items()
                          if entry.data_dir and
                          home_config.data_path.resolve() ==
@@ -307,8 +315,8 @@ def _global_store(store, config, *, write=False):
     if len(matching_profiles) > 1:
         raise ValueError("Configured global data directory matches multiple profiles")
     home_config.active_profile = matching_profiles[0] if matching_profiles else None
-    if not write:
-        home_config._stamp_on_open = False
+    # Selecting a secondary target does not claim or stamp a user database.
+    home_config._stamp_on_open = False
     if home_config.data_path.resolve() == config.data_path.resolve():
         return None
     key = str(home_config.data_path.resolve())
@@ -319,13 +327,23 @@ def _global_store(store, config, *, write=False):
         return None
     # Fail visibly if an existing secondary graph is unreadable; silently
     # returning only project results would recreate the original false negative.
-    home.conn
-    if not home_config.active_profile:
-        row = home.conn.execute(
-            "SELECT value FROM meta WHERE key='kin_profile'").fetchone()
-        if row is not None:
+    try:
+        home.conn
+        if not home_config.active_profile:
+            row = home.conn.execute(
+                "SELECT value FROM meta WHERE key='kin_profile'").fetchone()
+            if row is not None:
+                raise ValueError("Configured global graph is stamped for a different profile")
+    except Exception as error:
+        try:
             home.close()
-            raise ValueError("Configured global graph is stamped for a different profile")
+        except Exception:
+            pass
+        try:
+            record_degraded("mcp", error, config=config)
+        except Exception:
+            pass
+        raise MemoryUnavailableError(error) from error
     if write:
         _global_write_stores[key] = home
         atexit.register(home.close)
@@ -373,14 +391,20 @@ def _routed_ref(ref: str, *, write: bool = False):
         return home, home.config, qualified[1], "global"
     if qualified:
         return store, config, qualified[1], "project"
-    primary_match = store.peek_node(ref) or store.conn.execute(
-        "SELECT 1 FROM nodes WHERE title=? LIMIT 1", (ref,)).fetchone()
+    from .store import AmbiguousTitleError
+
+    try:
+        primary_match = store.resolve_node_for_write(ref)
+    except AmbiguousTitleError as error:
+        raise ValueError(f"title_collision: {error}") from error
     if primary_match:
         home = _global_read_store(store, config)
         if home is not None:
             try:
-                home_match = home.peek_node(ref) or home.conn.execute(
-                    "SELECT 1 FROM nodes WHERE title=? LIMIT 1", (ref,)).fetchone()
+                try:
+                    home_match = home.resolve_node_for_write(ref)
+                except AmbiguousTitleError as error:
+                    raise ValueError(f"title_collision: {error}") from error
                 if home_match:
                     raise ValueError(
                         f"Node {ref} exists in both graphs; use a qualified search result ID")
@@ -663,13 +687,15 @@ def search(query: str, top_k: int = 10, tags: str = "",
 
     home = _global_read_store(store, config)
     home_results = []
+    home_grounding: dict = {}
     if home is not None:
         try:
             home_fence: dict = {}
             home_results = hybrid_search(
                 home, query, top_k=fetch_k,
                 include_archived=include_archived, fence_stats=home_fence,
-                trusted_only=trusted_only, evaluation_time=evaluation_time)
+                trusted_only=trusted_only, evaluation_time=evaluation_time,
+                grounding=home_grounding)
             fence_stats["fenced_nodes"] = (fence_stats.get("fenced_nodes", [])
                                              + home_fence.get("fenced_nodes", []))
             fence_stats["candidate_count"] = (fence_stats.get("candidate_count", 0)
@@ -734,23 +760,27 @@ def search(query: str, top_k: int = 10, tags: str = "",
         from .retrieve import build_trust_note
         trust_note = build_trust_note(fence_stats.get("trusted_omissions"))
 
-    ground_note = ""
-    verdict = grounding.get("verdict")
-    if verdict is not None:
-        try:
-            ground_note = verdict.note()
-        except Exception:
-            ground_note = ""
+    ground_notes = []
+    for graph, evidence in (("project", grounding), ("global", home_grounding)):
+        if results and not any(result["_graph_source"] == graph for result in results):
+            continue
+        verdict = evidence.get("verdict")
+        if verdict is not None:
+            try:
+                note = verdict.note()
+            except Exception:
+                note = ""
+            if note:
+                ground_notes.append(f"{graph}: {note}" if home is not None else note)
 
     if not results:
-        notes = [note for note in (fence_note, trust_note, ground_note) if note]
+        notes = [note for note in (fence_note, trust_note, *ground_notes) if note]
         return "No results found." + (f"\n{' '.join(notes)}" if notes else "")
 
     from .retrieve import _node_age_str, _staleness_caveat
 
     lines = []
-    if ground_note:
-        lines.append(ground_note)
+    lines.extend(ground_notes)
     lines.append(f"Found {len(results)} results for '{query}':\n")
     for i, r in enumerate(results, 1):
         score = (r.get("_merged_score", 0) if home is not None else
@@ -2731,6 +2761,8 @@ def task_get(id: str) -> dict:
     record = task_record(node) if node else None
     if record and graph == "global":
         record["id"] = _graph_ref("global", record["id"])
+        record["dependencies"] = [
+            _graph_ref("global", dependency) for dependency in record["dependencies"]]
     return {"ok": True, "task": record} if node else {
         "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
 
@@ -2779,6 +2811,8 @@ def task_update(id: str, title: str | None = None, content: str | None = None,
     record = task_record(node) if node else None
     if record and graph == "global":
         record["id"] = _graph_ref("global", record["id"])
+        record["dependencies"] = [
+            _graph_ref("global", dependency) for dependency in record["dependencies"]]
     return {"ok": True, "task": record} if node else {
         "ok": False, "error": {"code": "not_found", "message": "Task not found"}}
 

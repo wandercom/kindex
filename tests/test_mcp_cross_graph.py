@@ -117,6 +117,81 @@ def test_duplicate_id_needs_qualified_reference(graphs):
     assert "safe" not in local.get_node(shared)["content"]
 
 
+@pytest.mark.parametrize("name, global_title, global_alias", [
+    ("shared title", "SHARED TITLE", None),
+    ("shared alias", "Other global title", "SHARED ALIAS"),
+])
+def test_bare_write_rejects_canonical_cross_graph_name_collision(
+    graphs, name, global_title, global_alias,
+):
+    server, local, home, _ = graphs
+    local_id = local.add_node(name, content="local original")
+    home.add_node(global_title, aka=[global_alias] if global_alias else None)
+
+    result = server.edit(name, append="wrong graph")
+
+    assert "exists in both graphs" in result
+    assert local.get_node(local_id)["content"] == "local original"
+
+
+def test_global_task_dependencies_round_trip_as_qualified_references(graphs):
+    server, local, home, _ = graphs
+    dependency = create_task(home, "Global prerequisite")
+    task_id = create_task(home, "Global dependent", dependencies=[dependency])
+    task_ref = server._graph_ref("global", task_id)
+    dependency_ref = server._graph_ref("global", dependency)
+    local.add_node("Collision", node_id=dependency)
+
+    fetched = server.task_get(task_ref)
+    assert fetched["ok"]
+    assert fetched["task"]["dependencies"] == [dependency_ref]
+    updated = server.task_update(task_ref, priority=2,
+                                 dependencies=fetched["task"]["dependencies"])
+    assert updated["ok"]
+    assert updated["task"]["dependencies"] == [dependency_ref]
+    assert server.task_get(updated["task"]["dependencies"][0])["task"]["id"] == dependency_ref
+
+
+def test_global_search_surfaces_its_grounding_warning(graphs, monkeypatch):
+    import kindex.retrieve as retrieve
+    from kindex.grounding import RetrievalVerdict, UNGROUNDED
+
+    server, _, home, _ = graphs
+    home.add_node("Global evidence", content="unfamiliar specific query")
+    original = retrieve.hybrid_search
+
+    def search_with_grounding(store, query, *, grounding=None, **kwargs):
+        results = original(store, query, grounding=grounding, **kwargs)
+        if store.read_only:
+            assert grounding is not None
+            grounding["verdict"] = RetrievalVerdict(
+                verdict=UNGROUNDED, floor=0.8, best_similarity=0.2)
+        return results
+
+    monkeypatch.setattr(retrieve, "hybrid_search", search_with_grounding)
+    output = server.search("unfamiliar specific query")
+
+    assert "Global evidence" in output
+    assert "UNGROUNDED" in output
+    assert "global" in output
+
+
+def test_outdated_global_schema_is_typed_and_does_not_mutate_project(graphs):
+    server, local, home, _ = graphs
+    local_id = local.add_node("Local evidence", content="original")
+    home.conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+    home.conn.commit()
+
+    edit_result = server.edit(local_id, append="unsafe")
+    search_result = server.search("Local evidence")
+
+    for result in (edit_result, search_result):
+        assert result.startswith("Error: memory unavailable (SchemaMigrationPending)")
+        assert "kin doctor --fix" in result
+    assert local.get_node(local_id)["content"] == "original"
+    assert home.get_meta("schema_version") == "3"
+
+
 def test_stale_qualified_reference_cannot_mutate_new_graph_selection(graphs, tmp_path, monkeypatch):
     server, _, home, _ = graphs
     shared = "abcdef123456"
@@ -218,6 +293,18 @@ def test_configured_global_profile_target_keeps_its_stamp(graphs):
     assert "graph=global" in server.search("profile target")
 
 
+def test_global_write_does_not_stamp_unstamped_profile_target(graphs):
+    server, local, home, _ = graphs
+    home.add_node("Unstamped seed")
+    local.config.profiles["outer"] = ProfileEntry(data_dir=str(home.config.data_path))
+
+    result = server.add("Explicit outer capture", graph="global")
+
+    assert "Created node: global:" in result
+    assert home.get_node_by_title("Explicit outer capture") is not None
+    assert home.get_meta("kin_profile") is None
+
+
 def test_no_home_database_is_not_created(graphs):
     server, local, home, _ = graphs
     home.close()
@@ -245,3 +332,39 @@ def test_load_config_uses_nondefault_global_data_dir(tmp_path, monkeypatch):
 
     assert cfg.data_path == local_dir
     assert cfg._global_data_dir == str(global_dir)
+
+
+def test_project_edit_policy_does_not_govern_configured_global_graph(tmp_path, monkeypatch):
+    from kindex.config import load_config
+    import kindex.mcp_server as server
+
+    project = tmp_path / "project"
+    local_dir = project / ".kin" / "local" / "kindex"
+    local_dir.mkdir(parents=True)
+    (project / ".kin" / "config").write_text(
+        "edit_policy:\n  decision: editable\n")
+    global_dir = tmp_path / "configured-global"
+    global_config = tmp_path / "kin.yaml"
+    global_config.write_text(f"data_dir: {global_dir}\n")
+    monkeypatch.setattr("kindex.config._GLOBAL_PATHS", [global_config])
+    monkeypatch.setattr("kindex.config._git_root", lambda _: project)
+    monkeypatch.delenv("KIN_PROFILE", raising=False)
+
+    local = Store(Config(data_dir=str(local_dir)))
+    local.add_node("Project seed")
+    home = Store(Config(data_dir=str(global_dir)))
+    decision = home.add_node("Immutable global decision", node_type="decision",
+                             content="original")
+    cfg = load_config(project_path=project)
+    assert cfg.edit_policy["decision"] == "editable"
+    selected = Store(cfg)
+    monkeypatch.setattr(server, "_store", selected)
+    monkeypatch.setattr(server, "_config", cfg)
+    try:
+        result = server.edit(server._graph_ref("global", decision), content="overwritten")
+        assert "additive" in result
+        assert home.get_node(decision)["content"] == "original"
+    finally:
+        selected.close()
+        local.close()
+        home.close()
