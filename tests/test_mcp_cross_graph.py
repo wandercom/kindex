@@ -55,6 +55,35 @@ def test_equal_cross_graph_hits_prefer_global(graphs):
     assert "id=global:" in output
 
 
+@pytest.mark.parametrize("single_graph_reason", ["explicit_profile", "missing_global"])
+def test_single_graph_search_preserves_hybrid_order_and_scores(
+    graphs, monkeypatch, single_graph_reason,
+):
+    import kindex.retrieve as retrieve
+
+    server, local, home, _ = graphs
+    if single_graph_reason == "explicit_profile":
+        local.config.active_profile = "work"
+    else:
+        home.close()
+        home.db_path.unlink(missing_ok=True)
+    semantic_id = local.add_node("Semantic neighbor", content="related evidence")
+    literal_id = local.add_node("Deploy guide", content="deploy guide")
+
+    def ranked_hybrid(store, query, **kwargs):
+        return [
+            {**store.get_node(semantic_id), "rrf_score": 0.9, "confidence": 0.1},
+            {**store.get_node(literal_id), "rrf_score": 0.1, "confidence": 0.9},
+        ]
+
+    monkeypatch.setattr(retrieve, "hybrid_search", ranked_hybrid)
+    output = server.search("deploy guide", top_k=2)
+
+    assert output.index("Semantic neighbor") < output.index("Deploy guide")
+    assert "Semantic neighbor (score=0.900" in output
+    assert "Deploy guide (score=0.100" in output
+
+
 def test_home_search_is_read_only_and_does_not_create_missing_graph(graphs):
     server, _, home, _ = graphs
     node_id = home.add_node(title="Home only", content="distinct home content")

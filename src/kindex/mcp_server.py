@@ -724,31 +724,36 @@ def search(query: str, top_k: int = 10, tags: str = "",
     # not this client's hit.
     results = _scope_results(results, _mcp_client())
     home_results = _scope_results(home_results, _mcp_client())
-    # Each graph's confidence is locally normalized, so it cannot by itself
-    # compare two graphs. Combine it with result position and query coverage;
-    # a project hit matching one generic term must not mask an exact home hit.
-    terms = set(re.findall(r"\w+", query.casefold()))
-    ranked = []
-    for graph, hits in (("project", results), ("global", home_results)):
-        for rank, node in enumerate(hits):
-            score = node.get("confidence", node.get("rrf_score", 0)) or 0
-            title_terms = set(re.findall(r"\w+", (node.get("title") or "").casefold()))
-            body_terms = set(re.findall(r"\w+", (node.get("content") or "").casefold()))
-            coverage = (sum(1 for term in terms if term in title_terms or term in body_terms)
-                        / len(terms)) if terms else 0
-            merge_score = 0.35 * score + 0.30 / (rank + 1) + 0.35 * coverage
-            ranked.append((merge_score, graph == "global", graph, node))
-    ranked.sort(key=lambda item: (-item[0], -item[1], item[3]["id"]))
-    results = []
-    seen = set()
-    for merge_score, _, graph, node in ranked:
-        key = (graph, node["id"])
-        if key not in seen:
-            results.append({**node, "_graph_source": graph,
-                            "_merged_score": merge_score})
-            seen.add(key)
-        if len(results) == top_k:
-            break
+    if home is None:
+        # Preserve hybrid retrieval's ordering and displayed RRF scores when
+        # there is only one graph. Cross-graph scores are needed only to merge.
+        results = [{**node, "_graph_source": "project"} for node in results[:top_k]]
+    else:
+        # Each graph's confidence is locally normalized, so it cannot by itself
+        # compare two graphs. Combine it with result position and query coverage;
+        # a project hit matching one generic term must not mask an exact home hit.
+        terms = set(re.findall(r"\w+", query.casefold()))
+        ranked = []
+        for graph, hits in (("project", results), ("global", home_results)):
+            for rank, node in enumerate(hits):
+                score = node.get("confidence", node.get("rrf_score", 0)) or 0
+                title_terms = set(re.findall(r"\w+", (node.get("title") or "").casefold()))
+                body_terms = set(re.findall(r"\w+", (node.get("content") or "").casefold()))
+                coverage = (sum(1 for term in terms if term in title_terms or term in body_terms)
+                            / len(terms)) if terms else 0
+                merge_score = 0.35 * score + 0.30 / (rank + 1) + 0.35 * coverage
+                ranked.append((merge_score, graph == "global", graph, node))
+        ranked.sort(key=lambda item: (-item[0], -item[1], item[3]["id"]))
+        results = []
+        seen = set()
+        for merge_score, _, graph, node in ranked:
+            key = (graph, node["id"])
+            if key not in seen:
+                results.append({**node, "_graph_source": graph,
+                                "_merged_score": merge_score})
+                seen.add(key)
+            if len(results) == top_k:
+                break
 
     # The fence note is derived in a single place both surfaces call (R3.1).
     from .retrieve import build_fence_note
