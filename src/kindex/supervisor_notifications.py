@@ -254,8 +254,8 @@ def submit_desktop(alert, cfg):
     executable = cfg["desktop_command"]
     if executable == "/usr/bin/osascript" and sys.platform != "darwin":
         return {"accepted": False, "error": "unsupported_platform"}
-    subtitle = alert["scope"]["agent"] + ": " + alert["code"]
-    body = "A sustained issue is in your local Kindex inbox. Alert " + alert["id"] + ". Run python3 -m kindex.supervisor_health inbox --json."
+    from .supervisor_display import desktop_text
+    body, subtitle = desktop_text(alert)
     try:
         result = subprocess.run([executable, "-e", SCRIPT, "--", body, subtitle],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
