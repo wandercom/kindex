@@ -28,6 +28,21 @@ LIFECYCLE_KEYS = (
 )
 
 
+def canonical_status(node: dict) -> str:
+    """Normalize legacy lifecycle omissions for the portable graph contract."""
+    extra = node.get("extra")
+    if isinstance(extra, dict) and extra.get("superseded_by"):
+        return "superseded"
+    status = node.get("status")
+    return status.strip() if isinstance(status, str) and status.strip() else "active"
+
+
+def canonical_standing(node: dict) -> str:
+    """Normalize pre-v13 records, which did not persist an explicit standing."""
+    standing = node.get("standing")
+    return standing.strip() if isinstance(standing, str) and standing.strip() else "unruled"
+
+
 def scrub_shared_text(value: str) -> str:
     """Remove contact and machine-path prose while retaining evidence URLs."""
     value = re.sub(r'\S+@\S+\.\S+', '[email]', value)
@@ -90,8 +105,37 @@ def scrub_kinbase_metadata(metadata: dict) -> dict:
 
 
 def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, public: bool) -> dict:
-    record = {key: node[key] for key in (*TEXT_FIELDS, *LIST_FIELDS, *CLOCK_FIELDS,
-                                       *VERIFICATION_FIELDS, "id", "weight", "referent") if key in node}
+    # This is a public interchange schema, not a projection of whichever
+    # columns an older writer happened to load. Keep every field present so
+    # unchanged JSONL snapshots remain byte-stable across CLI versions.
+    record = {
+        "id": node["id"],
+        "type": node.get("type") or "concept",
+        "title": node.get("title") or "",
+        "content": node.get("content") or "",
+        "intent": node.get("intent") or "",
+        "status": canonical_status(node),
+        "audience": node.get("audience") or "private",
+        "prov_when": node.get("prov_when") or "",
+        "prov_activity": node.get("prov_activity") or "",
+        "prov_why": node.get("prov_why") or "",
+        "prov_source": node.get("prov_source") or "",
+        "created_at": node.get("created_at") or "",
+        "updated_at": node.get("updated_at") or "",
+        "standing": canonical_standing(node),
+        "aka": node.get("aka") or [],
+        "domains": node.get("domains") or [],
+        "prov_who": node.get("prov_who") or [],
+        "valid_at": node.get("valid_at") or None,
+        "invalid_at": node.get("invalid_at") or None,
+        "asserted_at": node.get("asserted_at") or None,
+        "true_of": node.get("true_of") or None,
+        "verified_at": node.get("verified_at") or None,
+        "verified_by": node.get("verified_by") or None,
+        "prov_method": node.get("prov_method") or None,
+        "weight": node.get("weight", 0.5),
+        "referent": node.get("referent") if isinstance(node.get("referent"), dict) else None,
+    }
     for key in LIST_FIELDS:
         record[key] = node.get(key) or []  # Older SQLite defaults used empty text.
     record["extra"] = {k: v for k, v in (node.get("extra") or {}).items() if k in LIFECYCLE_KEYS}
@@ -99,10 +143,14 @@ def export_record(node: dict, edges: list[dict], visible_ids: set[str], *, publi
     for key in ("supersedes", "superseded_by"):
         if record["extra"].get(key) not in visible_ids:
             record["extra"].pop(key, None)
+    visible_edges = [e for e in edges if e["to_id"] in visible_ids]
+    # Store.edges_from sorts by weight only. Add a total tie-break order here
+    # so equivalent graphs serialize identically across insertion histories.
+    visible_edges.sort(key=lambda edge: (-edge["weight"], edge["to_id"], edge["type"]))
     record["edges"] = [
         {"to": e["to_id"], "type": e["type"], "weight": e["weight"],
          "bidirectional": False, "provenance": "" if public else e.get("provenance", "")}
-        for e in edges if e["to_id"] in visible_ids
+        for e in visible_edges
     ]
     if public:
         for key in ("title", "content"):

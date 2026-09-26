@@ -2009,14 +2009,29 @@ def cmd_export(args):
     # A snapshot must not silently truncate at the query helper's display limit.
     nodes = [n for audience in audiences for n in store.all_nodes(audience=audience, limit=-1)]
 
+    from .graph_transfer import canonical_status, export_record
+    if getattr(args, "active_only", False):
+        # Decide retirement against the full graph before audience projection:
+        # a visible predecessor can be superseded by a hidden successor. Only
+        # target IDs are used for filtering; edge serialization remains scoped.
+        superseded_ids = {
+            row["to_id"]
+            for row in store.conn.execute(
+                "SELECT DISTINCT to_id FROM edges WHERE type = 'supersedes'"
+            ).fetchall()
+        }
+        nodes = [node for node in nodes if canonical_status(node) == "active"
+                 and node["id"] not in superseded_ids]
+
     # Apply PII stripping for public/org exports
     strip_pii = target_audience in ("public", "org")
 
-    # Strip edges that cross audience boundaries
+    # Export the stored arcs verbatim. Store.add_edge persists a reciprocal
+    # itself when an edge is bidirectional; inferring one here would invert
+    # directed relationships during an export/import round trip.
     output = []
     node_ids = {n["id"] for n in nodes}
-    from .graph_transfer import export_record
-    for n in nodes:
+    for n in sorted(nodes, key=lambda node: node["id"]):
         if strip_pii:
             n = _strip_pii(n)
         output.append(export_record(n, store.edges_from(n["id"]), node_ids, public=strip_pii))
@@ -7394,6 +7409,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Export graph (default) or a UA-compatible code map")
     s.add_argument("--audience", choices=["private", "team", "org", "public"], default="team")
     s.add_argument("--format", choices=["json", "jsonl", "understand-anything"], default="json")
+    s.add_argument("--active-only", action="store_true",
+                   help="Export only canonical active nodes, excluding superseded predecessors")
     s.add_argument("--directory", help="Repository root for code-map metadata")
     s.add_argument("--project-name", help="Project name for code-map export")
     s.add_argument("--output", help="Write export to this file instead of stdout")
