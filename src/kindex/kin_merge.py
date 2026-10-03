@@ -231,8 +231,8 @@ def merge_code_map(
 ) -> dict:
     """Union ``.kin/code-map.json`` content collections.
 
-    Nodes/edges are unioned (lossless across branches); layers union their
-    members; ``tour`` is recomputed from the merged layers. ``project`` keeps
+    Nodes/edges are unioned by identity; conflicting same-key records keep
+    ours, and supported deletions are honored. Layers union their members; ``tour`` is recomputed from the merged layers. ``project`` keeps
     ours' commit-tied metadata (``kin code-map`` refreshes it) but unions the
     detected ``languages``.
     """

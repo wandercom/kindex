@@ -70,12 +70,18 @@ codebase contract, not private scratch space.
 - `.kin/.gitignore`: ignores only local/private subdirectories such as
   `.kin/local`, `.kin/cache`, `.kin/tmp`, and `.kin/private`.
 
-`.kin/index.json` and `.kin/code-map.json` are generated, id-keyed snapshots:
-never hand-resolve a git conflict in them. `kin index` auto-registers a
-structured merge driver (`kin merge-kin`) on first run that unions them
-losslessly across branches (run `kin setup-merge` to re-install it in a fresh
-clone). If you do need a clean copy, regenerate with `kin index` /
-`kin export code-map` rather than hand-editing the JSON.
+`.kin/index.json` and `.kin/code-map.json` are generated, id-keyed projections,
+not complete canonical knowledge. The structured `kin merge-kin` driver does
+not preserve every conflicting record: same-ID index conflicts select the later
+`updated_at` (ties keep ours), while code-map collisions can keep ours. It also
+honors supported deletions. A successful snapshot merge does not prove canonical
+source coverage or reconcile competing evidence revisions.
+
+Reconcile canonical JSONL records and source references explicitly before
+regenerating snapshots from reconciled knowledge and code with `kin index` /
+`kin export code-map`. Do not regenerate from an incomplete cache or hand-edit
+generated snapshots. `kin index` auto-registers the driver; run `kin setup-merge`
+to install it in a fresh clone.
 
 Never put secrets, API keys, private transcripts, or machine-local cache in
 tracked `.kin` files. Tracked task/report metadata must not point at a local
@@ -476,12 +482,15 @@ UUID. The UUID identifies that database, not the Git repository, branch, commit,
 or evidence revision. A sibling cache's matching node ID cannot establish source
 identity or authorize mutation.
 
-Worktrees are ephemeral and may be deleted outside our control. No knowledge
-guarantee may require preserving, archiving, merging, or rescuing their SQLite
-databases, or running a pre-deletion hook. Optional database merging is an
-optimization only. Agents must maintain canonical sources continuously and
-commit project JSONLs alongside the relevant code; deletion is not the point at
-which durable knowledge should first be serialized.
+Worktrees are ephemeral and may be deleted outside our control. Encourage
+best-effort cleanup and persisting pending knowledge when possible, but
+correctness and recovery cannot depend on a pre-deletion hook or SQLite
+preservation, archival, merging, or rescue. Optional database merging is an
+optimization only. Agents maintain canonical sources continuously and commit
+project JSONLs with code; prompting them reduces loss but is not a runtime
+guarantee. The system must reconstruct disposable state from surviving canonical
+knowledge after uncoordinated deletion. Never-persisted knowledge may be
+unrecoverable and must be disclosed, not fabricated.
 
 The current locator-only resolver has a narrower observable contract. A Git
 merge transfers tracked files, not the ignored cache. After worktree removal,
@@ -500,4 +509,7 @@ paths, `.kin/index.json` stores selected summaries, and `repo-memory` publishes
 selected shareable evidence. None establishes complete coverage or independent
 source resolution. This PR adds graph-bound cache locators, not canonical JSONL
 serialization or a resolver for those canonical sources. Those implementation
-gaps remain real; database survival is not their remedy.
+gaps remain real: a rebuilt cache has a new UUID and the locator-only resolver
+does not automatically recover traversal even when canonical evidence survives.
+Expected data loss is not a desired outcome or blanket acceptance of ongoing
+unrecoverability. Database survival or cleanup cannot be the required remedy.

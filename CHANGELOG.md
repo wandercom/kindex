@@ -4,6 +4,75 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- Agent guidance makes JSONLs the canonical bearer of project knowledge and
+  SQLite databases disposable caches. The agent is responsible for maintaining
+  complete, lossless JSONL knowledge after captures, edits, and links. Worktree
+  deletion can bypass cleanup. Best-effort cleanup is encouraged, but correctness
+  and recovery never depend on database preservation, archival, merge, or rescue;
+  optional database merging is an optimization only. Prompting reduces loss but
+  does not implement a runtime recovery guarantee.
+- Generated agent prompts qualify snapshot merging: same-ID conflicts can select
+  one side, so successful merges do not prove canonical source coverage. Agents
+  reconcile canonical JSONL records/references before regenerating snapshots.
+
+### Migration guidance for existing users
+
+Updating Kindex or its instruction files does not automatically migrate existing
+knowledge. Reinstall the agent instructions for your client, then explicitly
+prompt your agent:
+
+> Ensure all existing knowledge in my Kindex `kindex.db` is represented losslessly
+> in the canonical JSONLs. Inventory all durable records, relationships,
+> metadata, provenance, and source bindings; reconcile existing JSON and JSONL
+> sources without silently choosing one; verify exact source coverage and
+> reference consistency. Respect audience and secret boundaries. Commit the
+> project knowledge sources with the code and keep them current after future
+> writes. Report anything the current serializer or reader cannot preserve;
+> list intentional migration exclusions with their reasons and consequences in
+> release notes, and report accidental or unexplained omissions separately. Do
+> not describe excluded knowledge as losslessly migrated. SQLite is a
+> disposable cache. Encourage best-effort cleanup, but recover from surviving
+> canonical knowledge without relying on it. Disclose never-persisted knowledge
+> that cannot be recovered.
+
+### Intentional migration tradeoffs
+
+- Legacy format precedence is deliberate: if both `knowledge.json` and
+  `knowledge.jsonl` exist, `repo-memory` reads JSON only. JSONL records are not
+  deleted, but are absent from that import until the agent explicitly reconciles
+  the files. There is no automatic union, dual-write, or old-client JSONL support.
+  This documented compatibility limitation is accepted, not a merge blocker.
+- Existing captures with only expired session handles are not automatically
+  backfilled with durable source bindings. Their historical sources can remain
+  unresolved; the agent may reconstruct them only from verifiable canonical
+  evidence, otherwise it must record the missing bindings. Node knowledge is not
+  automatically deleted by this migration.
+- Intentional migration exclusions are permitted when release notes identify
+  the omitted knowledge/bindings, scope, reasons, and consequences. Preserve the
+  remaining knowledge accurately and report those exclusions explicitly.
+  This does not excuse unexplained loss or dropped provenance on new writes.
+- #71 now retains supplied `source_refs` for relationship-only `learn` through
+  linked learned-text evidence documents, including existing concepts and replay.
+  This closes incomplete coverage of its new guarantee; it is not an accepted
+  migration exclusion or a regression from previously working structured provenance.
+
+### Recovery limits
+
+The system must rebuild disposable state from surviving canonical knowledge when
+cleanup did not happen. This prompt/docs change does not implement complete
+canonical serialization, graph reconstruction, or canonical source-reference
+resolution. `index.json` is incomplete, `repo-memory` is a selected quarantined
+transport, and #71's saved cache locators/UUIDs are not automatically rebound to
+canonical evidence or rebuilt caches. Never-persisted knowledge may be
+unrecoverable and must be reported explicitly. Expected data loss is not desired
+or blanket permission for ongoing loss; accepted migration exclusions stay scoped.
+
+See the [migration guide](docs/canonical-knowledge-migration.md) for the full
+checklist and current limits. `kin index` and selected `repo-memory` exports
+alone are not complete knowledge migrations. No automatic storage rewrite or
+software release is included in this guidance.
+
 ## [0.46.0] - 2026-10-01
 
 ### Added

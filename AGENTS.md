@@ -81,6 +81,40 @@ When working in this codebase, follow these practices:
 - **Session tags**: Use `kin tag start <name> --focus "what you're working on"` to create a named session handle. Update with `kin tag update <name> --focus "..."` or `kin tag segment <name> --focus "new topic" --summary "what happened"`. Resume in a new session with `kin tag resume <name>`. End with `kin tag end <name> --summary "..."`. See `kin tag list` for all tags.
 - **Project policy**: `.kin/config` ships with the repo. Run `kin policy check --event agent-start` before meaningful code work when shell access is available. Linear is opt-in only; enforce it only when `work_policy.linear.enabled` is true in the project config.
 
+## Canonical project knowledge
+
+JSONLs are the canonical bearer of project knowledge. SQLite databases,
+including `kindex.db`, are disposable caches. **The agent is responsible** for
+keeping all durable database knowledge represented losslessly in canonical
+JSONLs throughout its work, not only when a workspace is being removed.
+
+- Persist complete captured or changed records, relationships, metadata,
+  provenance, and source bindings in canonical JSONLs and commit them with code.
+- Migrate existing database-only knowledge into JSONLs and verify coverage.
+  Intentional migration loss is acceptable when release notes explicitly name
+  the omitted knowledge, scope, reason, and consequences. Report those exclusions
+  separately; do not call an incomplete migration lossless or relabel accidental
+  ongoing loss as intentional. Reconcile legacy JSON explicitly.
+- Preserve audience and secret boundaries. Private knowledge requires protected
+  canonical sources, not publication into a public repository or omission.
+- `index.json` is a summary, and selected evidence exports can omit data;
+  neither alone proves lossless representation of the database's knowledge.
+- After clone, checkout, or merge, reconcile canonical JSONL records and source
+  references explicitly before regenerating snapshots. Preserve independent
+  changes and resolve identity/edit conflicts at the canonical-source level.
+- Worktrees may be deleted outside our control. Encourage best-effort cleanup
+  and persisting pending knowledge when possible; correctness/recovery must not
+  depend on cleanup, SQLite rescue, merging, or archival. Optional database
+  merging is an optimization.
+- The system must recover disposable state from surviving canonical knowledge.
+  Agent prompting reduces loss but is not a runtime recovery guarantee. Report
+  serializer/rebuilder/reference-resolution gaps and unrecoverable knowledge
+  that was never persisted. Expected data loss is not a desired outcome or
+  blanket acceptance of ongoing unrecoverability.
+
+For an existing installation, use the user-to-agent migration prompt and
+coverage checklist in [canonical-knowledge-migration.md](docs/canonical-knowledge-migration.md).
+
 ## Auto-Context Loading
 
 At the start of each session, load relevant context:
@@ -132,4 +166,4 @@ When asked to release, follow these steps exactly. Do NOT install twine or attem
 | managed | task, session, coordination | Refused — use `kin task` / `kin tag` / `kin coord` |
 - Audience: private / team / public scoping with export boundary enforcement
 - Weight decay: Nodes and edges naturally fade unless accessed, keeping the graph fresh
-- Generated `.kin` artifacts (`.kin/index.json`, `.kin/code-map.json`): never hand-resolve a git conflict in them. `kin index` auto-registers the `kin merge-kin` structured union merge driver (via `.gitattributes` + local `.git/config`); `kin setup-merge` (re)installs it per clone. Regenerate with `kin index` / `kin export code-map` rather than hand-editing the JSON.
+- Generated `.kin` snapshots are not complete canonical knowledge or lossless conflict archives. `kin merge-kin` selects same-ID index conflicts by timestamp (ties keep ours); code-map collisions can keep ours. Reconcile canonical JSONL records and source references explicitly before regenerating with `kin index` / `kin export code-map` from reconciled knowledge and code, never from an incomplete cache. Do not hand-edit generated snapshots. `kin index` auto-registers the driver; `kin setup-merge` (re)installs it per clone.

@@ -490,7 +490,7 @@ def prime_context(
         lines.append("- `tag_start`/`tag_update` to track session focus and progress")
         lines.append("**Project graph (`.kin/`)** — keep it with the code:")
         lines.append("- Look for a `.kin/` directory in the tree of the files you touch — not just your cwd root — and honor its config/index.")
-        lines.append("- When you `git add`/commit, stage the matching `.kin/` changes (config, index.json) alongside the code so the graph travels with the work.")
+        lines.extend(PROJECT_KNOWLEDGE_DIRECTIVES)
         lines.append("")
 
     if search_failed and ops_failed:
@@ -844,6 +844,17 @@ def write_inbox_item(
     return target
 
 
+PROJECT_KNOWLEDGE_DIRECTIVES = (
+    "- Canonical project knowledge lives in tracked `.kin/` JSONLs (existing JSON is legacy); SQLite databases are disposable caches.",
+    "- You, the agent, must keep all durable knowledge from `kindex.db` losslessly represented in JSONLs after captures, edits, and links.",
+    "- Migrate existing knowledge losslessly; list intentional migration omissions and reasons in release notes. Never excuse accidental ongoing loss.",
+    "- `git add` and commit canonical sources with code; summaries/selected exports do not prove coverage. Honor audience and secret boundaries.",
+    "- After clone/checkout/merge, reconcile canonical JSONL sources/references before snapshot regeneration; an id-keyed merge is not lossless.",
+    "- Encourage best-effort cleanup; correctness/recovery cannot depend on it. Reconstruct disposable state from surviving canonical knowledge.",
+    "- Disclose unrecoverable never-persisted knowledge. Optional database merging is an optimization; prompts alone are not runtime recovery guarantees.",
+)
+
+
 def generate_session_directive(store: Store) -> str:
     """Generate CLAUDE.md text that instructs Claude Code to write back discoveries.
 
@@ -872,7 +883,7 @@ def generate_session_directive(store: Store) -> str:
         "",
         "### Project graph (`.kin/`)",
         "- Honor `.kin/` for the files you touch — look up the directory tree, not just the repo root.",
-        "- Stage and commit `.kin/` changes (config, index.json) together with the related code.",
+        *PROJECT_KNOWLEDGE_DIRECTIVES,
         "",
     ]
 
