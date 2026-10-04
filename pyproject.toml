@@ -64,6 +64,7 @@ projects = "kindex.adapters.projects:adapter"
 sessions = "kindex.adapters.sessions:adapter"
 codex-sessions = "kindex.adapters.codex_sessions:adapter"
 code = "kindex.adapters.code:adapter"
+conversations = "kindex.adapters.conversations:adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kindex"]

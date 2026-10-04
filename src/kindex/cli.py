@@ -3754,6 +3754,28 @@ def cmd_ask(args):
     """
     store = _store(args)
     question = " ".join(args.question)
+
+    # The answer pipeline (answer.py): planned searches, dated evidence in a
+    # token budget, today's date, and answering rules. None without an LLM.
+    from .answer import answer_question
+    ledger, cfg = _ledger(args)
+    try:
+        team = None
+        if getattr(args, "context_file", None):
+            team = Path(args.context_file).read_text().splitlines()
+        result = answer_question(store, question, cfg, ledger, as_of=getattr(args, "as_of", None), team=team)
+    except Exception as exc:
+        print(f"Answer failed ({safe_error(exc)}); showing search results.", file=sys.stderr)
+        result = None
+    if result is not None:
+        print(result.answer)
+        if result.omitted or result.truncated:
+            print(f"Note: {result.omitted} retrieved item(s) did not fit in the context"
+                  f"{f' and {result.truncated} were shortened' if result.truncated else ''} "
+                  "(ask.context_tokens).", file=sys.stderr)
+        store.close()
+        return
+
     qtype = _classify_question(question)
 
     from .retrieve import format_context_block, hybrid_search
@@ -4165,6 +4187,24 @@ def cmd_cron(args):
 
 
 # ── dream ─────────────────────────────────────────────────────────────
+
+def cmd_digest(args):
+    """Digest ingested conversations: standing directives and long-conversation summaries."""
+    from .conversations import backfill_digests
+    from .vectors import drain_embedding_queue
+
+    store = _store(args)
+    ledger, cfg = _ledger(args)
+    try:
+        if not cfg.llm.enabled:
+            print("No LLM configured; nothing to digest.", file=sys.stderr)
+            return
+        n = backfill_digests(store, cfg, ledger)
+        drain_embedding_queue(store, cfg, max_jobs=10**9, time_budget=10**9, report_coverage=False)
+        print(f"Digested {n} conversation(s).")
+    finally:
+        store.close()
+
 
 def cmd_dream(args):
     """Run knowledge consolidation (dream cycle)."""
@@ -7599,6 +7639,10 @@ def build_parser() -> argparse.ArgumentParser:
     # ask
     s = sub.add_parser("ask", help="Query the knowledge graph")
     s.add_argument("question", nargs="+")
+    s.add_argument("--as-of", dest="as_of", default=None,
+                   help="Today's date for the answer (resolves 'now', 'ago'); defaults to the current date")
+    s.add_argument("--context-file", dest="context_file", default=None,
+                   help="Shared knowledge to answer with, one item per line (Kinbase passes its signed facts)")
     _common(s)
     s.set_defaults(func=cmd_ask)
 
@@ -7888,6 +7932,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_cron)
 
     # dream
+    s = sub.add_parser("digest", help="Digest ingested conversations (directives, summaries)")
+    _common(s)
+    s.set_defaults(func=cmd_digest)
+
     s = sub.add_parser("dream", help="Knowledge consolidation (dream cycle)")
     s.add_argument("--verbose", "-v", action="store_true", help="Detailed logging")
     s.add_argument("--dry-run", action="store_true", help="Report without making changes")

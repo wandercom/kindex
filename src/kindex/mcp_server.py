@@ -1418,6 +1418,67 @@ def _render_context_sources(stores, results, warnings, *, topic: str, level: str
     return preamble + "\n\n".join(sections)
 
 
+# The evidence `ask` returns: what `kin ask` shows its answer model.
+MCP_ASK_TOKENS = 8000
+MCP_EVIDENCE_TOKENS = 4000
+_COMPLETENESS = re.compile(r"\b(how many|how much|how often|list|all|every|each|total|count|order|"
+                           r"sequence|first|last|summar\w*)\b", re.I)
+
+
+def _render_evidence_sources(stores, results, warnings, *, budget: int, client: str | None,
+                             evaluation_time: str, trusted_only: bool = False) -> tuple[str, int]:
+    """Graph-local sections in `kin ask`'s form: each graph's standing directives,
+    then its matching nodes in full, dated and oldest first, each named by its
+    title and the ref show and edit accept. One total budget is split across
+    the graphs that contribute. Returns the text and how many nodes did not fit."""
+    from .answer import assemble, standing_directives
+    from .retrieve import GRAPH_DATA_NOTE, _estimate_tokens, _trusted_context_nodes, build_trust_note, graph_text
+
+    by_graph = {graph: [] for graph in stores}
+    for row in results:
+        by_graph[row["_graph_source"]].append(row)
+    contributing = [graph for graph in stores if by_graph[graph]]
+    if not contributing:
+        return "", 0
+    aware = _graph_aware_session()
+    headings = len(contributing) > 1 or aware or "global" in contributing
+    denied = []
+    if trusted_only:
+        for graph in stores:
+            omissions = warnings[graph][1] or {}
+            if graph not in contributing and any(omissions.values()):
+                denied.append(f"{graph.title()} graph: {build_trust_note(omissions)}")
+    preamble = "\n".join(denied) + ("\n\n" if denied else "")
+    per_budget = max(1, (budget - _estimate_tokens(preamble)) // len(contributing))
+    sections, omitted = [], 0
+    for graph in contributing:
+        grounding, omissions = warnings[graph]
+        verdict = (grounding or {}).get("verdict")
+        try:
+            note = verdict.note() if verdict is not None else ""
+        except Exception:
+            note = ""
+        prefix = (f"## {graph.title()} graph\n\n" if headings else "") + (f"{note}\n\n" if note else "")
+        if trusted_only and omissions is not None:
+            prefix += build_trust_note(omissions) + "\n\n"
+        prefix += GRAPH_DATA_NOTE + "\n\n"
+
+        def label(node, graph=graph):
+            ref = _display_ref(graph, node["id"]) if aware or graph == "global" else node["id"]
+            title = graph_text(node.get("title") or node["id"], 120, single_line=True)
+            return f"{title} [{graph_text(ref, single_line=True)}]"
+
+        # Directives obey the same client scope and trust admission as hits.
+        directives = _trusted_context_nodes(
+            stores[graph], _scope_results(standing_directives(stores[graph]), client),
+            trusted_only=trusted_only, evaluation_time=evaluation_time)
+        assembly = assemble(by_graph[graph], directives, max(per_budget - _estimate_tokens(prefix), 250),
+                            label=label)
+        omitted += assembly.omitted
+        sections.append(prefix + assembly.text)
+    return preamble + "\n\n".join(sections), omitted
+
+
 @_tool()
 def context(
     topic: str = "",
@@ -1430,8 +1491,11 @@ def context(
 
     Args:
         topic: Topic to search for (auto-detects from cwd if empty).
-        level: Context tier (full, abridged, summarized, executive, index).
-        max_tokens: Token budget (overrides level with auto-selection if set).
+        level: Context tier (full, abridged, summarized, executive, index), or
+            evidence: the matching nodes in full, dated and oldest first, with
+            the standing directives (what `ask` returns; default 4,000 tokens).
+        max_tokens: Token budget (overrides level with auto-selection if set;
+            with level=evidence, the evidence budget).
         trusted_only: Admit only current, explicitly verified,
             non-contradicted knowledge. False preserves ordinary recall.
         graph: Read scope: auto, project, or global.
@@ -1443,14 +1507,20 @@ def context(
                       (("project", selected), ("global", outer)) if source is not None}
             now = operation_now()
             client = _mcp_client()
+            evidence = level == "evidence"
             results, warnings = _context_hits(
-                stores, topic, 15, client, trusted_only=trusted_only,
-                evaluation_time=now)
+                stores, topic, _get_config().ask.top_k if evidence else 15, client,
+                trusted_only=trusted_only, evaluation_time=now)
             if not results:
                 notes = ("\n" + "\n".join(
                     f"{name}: {build_trust_note(warnings[name][1])}" for name in stores)
                          if trusted_only else "")
                 return "No relevant knowledge found." + notes
+            if evidence:
+                text, _ = _render_evidence_sources(
+                    stores, results, warnings, budget=max_tokens if max_tokens > 0 else MCP_EVIDENCE_TOKENS,
+                    client=client, evaluation_time=now, trusted_only=trusted_only)
+                return text
             return _render_context_sources(
                 stores, results, warnings, topic=topic, level=level,
                 client=client, evaluation_time=now, trusted_only=trusted_only,
@@ -1972,17 +2042,26 @@ def status(graph: str = "auto") -> str:
 
 
 @_tool()
-def ask(question: str, graph: str = "auto") -> str:
+def ask(question: str, graph: str = "auto", answer: bool = False, max_tokens: int = 0) -> str:
     """Ask a question of the knowledge graph.
 
-    Classifies the question type (factual, procedural, decision, exploratory),
-    searches for relevant knowledge, and returns a formatted answer.
+    Returns the evidence `kin ask` answers from: the matching nodes in full,
+    dated and oldest first, with today's date and the standing directives, in
+    graph-local sections whose refs show and edit accept. Counting, listing
+    and ordering questions search deeper and say when the evidence may be
+    incomplete. With answer=True and an LLM configured, it also drafts the
+    answer the way `kin ask` does (planned searches, answering rules), within
+    the LLM budget; otherwise it makes no model call.
 
     Args:
         question: Natural language question.
         graph: Read scope: auto, project, or global.
+        answer: Also draft an answer with the configured LLM (spends budget).
+        max_tokens: Token budget for the evidence (default 8,000).
     """
-    # Simple question classification
+    from .answer import (COMPLETE_TOP_K, COMPLETENESS_INTENTS, answer_client,
+                         answer_prompt, coverage_note, draft_answer, fuse, plan_question)
+
     q_lower = question.lower()
     if any(p in q_lower for p in ["how do i", "how to", "steps to", "guide to"]):
         qtype = "procedural"
@@ -1993,23 +2072,50 @@ def ask(question: str, graph: str = "auto") -> str:
     else:
         qtype = "exploratory"
 
-    top_k = {"factual": 5, "procedural": 8, "decision": 10, "exploratory": 12}.get(qtype, 10)
     try:
         with _selected_read_stores(graph) as (selected, outer):
             stores = {name: source for name, source in
                       (("project", selected), ("global", outer)) if source is not None}
+            config = _get_config()
             now = operation_now()
             client = _mcp_client()
-            results, warnings = _context_hits(
-                stores, question, top_k, client, trusted_only=False,
-                evaluation_time=now)
+            intent, searches = "fact", [question]
+            complete = bool(_COMPLETENESS.search(question))
+            llm = ledger = None
+            if answer:
+                from .budget import BudgetLedger
+                ledger = BudgetLedger(config.ledger_path, config.budget)
+                llm = answer_client(config, ledger)
+                if llm is not None:
+                    intent, queries, needs_all = plan_question(question, config, llm, ledger, now[:10])
+                    searches += [q for q in queries if q.lower() != question.lower()]
+                    complete = complete or needs_all or intent in COMPLETENESS_INTENTS
+            depth = max(config.ask.top_k, COMPLETE_TOP_K) if complete else config.ask.top_k
+            rankings, warnings, saturated = [], None, False
+            for search in searches:
+                rows, found_warnings = _context_hits(stores, search, depth, client, trusted_only=False,
+                                                     evaluation_time=now)
+                warnings = warnings or found_warnings  # the question's own verdicts
+                saturated = saturated or len(rows) >= depth
+                rankings.append(rows)
+            results = fuse(rankings, key=lambda row: (row["_graph_source"], row["id"]))
             if not results:
                 return f"[{qtype}] No relevant knowledge found for: {question}"
-            level = "full" if qtype in ("procedural", "decision") else "abridged"
-            block = _render_context_sources(
-                stores, results, warnings, topic=question, level=level,
+            evidence, omitted = _render_evidence_sources(
+                stores, results, warnings, budget=max_tokens if max_tokens > 0 else MCP_ASK_TOKENS,
                 client=client, evaluation_time=now)
-            return f"[{qtype} question]\n\n{block}"
+            header = f"[{qtype} question] Today's date: {now[:10]}"
+            coverage = coverage_note(complete, omitted, saturated)
+            if llm is None:
+                skipped = ("\n(No answer drafted: no LLM is configured or the budget is spent.)"
+                           if answer else "")
+                return f"{header}{skipped}\n\n{evidence}{coverage}"
+            drafted = draft_answer(llm, config, answer_prompt(
+                question, evidence, intent, as_of=now[:10], readings=config.ask.readings,
+                coverage=coverage), ledger)
+            if drafted is None:
+                return f"{header}\n(No answer drafted: the budget ran out.)\n\n{evidence}{coverage}"
+            return f"{drafted}\n\n---\n{header}\n\n{evidence}"
     except ValueError as exc:
         return f"Error: {exc}"
 

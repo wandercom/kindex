@@ -317,6 +317,26 @@ class LLMConfig(BaseModel):
     tier2_max_tokens: int = 4000
 
 
+class AskConfig(BaseModel):
+    """`kin ask`: how a question is searched for and answered (see answer.py).
+    These settings decide LLM spend, so only user config may set them (see
+    _PROJECT_LAYER_UNTRUSTED_KEYS), and each is bounded."""
+    plan: bool = True                # an LLM planner writes the searches and classifies the question
+    top_k: int = Field(default=60, ge=1, le=200)               # nodes retrieved per search
+    context_tokens: int = Field(default=24000, ge=1000, le=400000)  # budget for the whole context
+    samples: int = Field(default=1, ge=1, le=9)  # independent answers; with more than one, an adjudication pass picks
+    readings: bool = False           # answer each plausible reading when the answer depends on it
+    effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "high"  # reasoning effort, for providers that take one
+    plan_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
+    max_output_tokens: int = Field(default=16000, ge=256, le=128000)  # includes a reasoning model's reasoning
+    timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
+
+
+class ConversationsConfig(BaseModel):
+    """Conversation digests (conversations.py). User config only."""
+    facts: bool = False              # also record each conversation's facts as dated nodes
+
+
 class BudgetConfig(BaseModel):
     daily: float = 0.50
     weekly: float = 2.00
@@ -718,6 +738,8 @@ class Config(BaseModel):
     cursor_dir: str = "~/.cursor"
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    ask: AskConfig = Field(default_factory=AskConfig)
+    conversations: ConversationsConfig = Field(default_factory=ConversationsConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
@@ -897,6 +919,8 @@ _PROJECT_LAYER_UNTRUSTED_KEYS = frozenset({
     "project_dirs", "claude_dir", "codex_dir", "gemini_dir", "antigravity_dir",
     "antigravity_cli_dir", "opencode_dir", "cursor_dir",
     "user", "agent_id",
+    # LLM spend: how hard `kin ask` and conversation digests work.
+    "ask", "conversations",
 })
 # Sections a repository may tune only partly. Reminder channels carry private
 # reminder text to webhooks and mailboxes, and the rest of the section decides

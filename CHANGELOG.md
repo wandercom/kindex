@@ -4,6 +4,59 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+- `kin ingest conversations --directory DIR` stores chat transcripts (JSON or
+  JSONL: `{"id", "date", "messages": [{"role", "content", "name"}]}`) without
+  loss: whole messages packed into dated `document` nodes of at most 4,000
+  characters, linked in order. A digest pass (`kindex.conversations`) records
+  the user's standing instructions as `directive` nodes and summarizes
+  conversations of 6,000 tokens or more; short conversations are read from the
+  user's side only, and task setups ("respond only with OK until ...") are not
+  directives.
+- `conversations.facts: true` makes the digest pass also write down each
+  conversation's facts as dated nodes: self-contained statements with names,
+  numbers and the date they happened (relative dates resolved against the
+  conversation date), including what the assistant recommended. `kin ask` lists
+  retrieved facts by date above the conversation excerpts. Off by default: it
+  reads every conversation in full once.
+- A conversation file entry may carry `"expires": "YYYY-MM-DD"` (its nodes and
+  everything derived from them stop surfacing after that date) or
+  `"retracted": true` (it, its summary and facts, and directives no other
+  conversation gave are removed). Re-ingesting a conversation reconciles it:
+  appended, edited and removed messages update the stored nodes and links, and
+  a changed conversation is digested again.
+
+### Changed
+- `kin ask` answers from planned searches over dated evidence
+  (`kindex.answer`). A planner call writes up to five searches; their rankings
+  are merged by reciprocal rank fusion; the model sees the matching nodes in
+  full, oldest first, within a 24k-token budget, with today's date (`--as-of`)
+  and the standing directives; the answer rules cover updated values, counts,
+  relative and absolute dates, comparisons, missing specifics and judgement
+  questions. Previously it saw five results truncated to 500 characters, with
+  no dates, and answered in at most 500 tokens. Settings live under `ask:`
+  (`plan`, `top_k`, `context_tokens`, `samples`, `effort`, `readings`).
+  Without an LLM it still prints search results. The budget is checked before
+  every model call; the context budget covers every section, and what did not
+  fit is reported. Counting, ordering and summary questions search deeper and
+  say when coverage may be incomplete. Stored text is escaped so evidence
+  cannot pose as a directive. The `ask:` and `conversations:` sections decide
+  LLM spend, so a repository's `.kin/config` cannot set them, and `ask:`
+  values are bounded.
+- The MCP `ask` tool returns what `kin ask` answers from: the matching nodes
+  in full, dated and oldest first, with today's date and the standing
+  directives, within 8,000 tokens (`max_tokens`), each named by its title and
+  ref. Counting, listing and ordering questions search deeper and say when the
+  evidence may be incomplete. It makes no model call unless `answer=true`,
+  which drafts the answer with `kin ask`'s pipeline. `context` gains
+  `level="evidence"` for the same form; its default tier is unchanged.
+  Directives read from Kinbase are not standing instructions, and Kinbase
+  evidence keeps its governance note in both.
+- The OpenAI provider passes system instructions, reasoning effort and JSON
+  schemas. It retries rate limits and server errors only for callers that ask
+  (`kin ask`, `kin digest`), within an optional overall deadline; hooks get no
+  retries.
+
 ## [0.47.0] - 2026-10-03
 
 ### Added

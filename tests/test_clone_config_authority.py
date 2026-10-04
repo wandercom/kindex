@@ -291,6 +291,30 @@ def test_repo_config_cannot_set_spend_identity_or_ingest_paths(world):
         "True True True True ['budget', 'claude_dir', 'llm', 'project_dirs', 'user']")
 
 
+def test_repo_config_cannot_raise_ask_or_digest_spend(world):
+    (world["repo"] / ".kin").mkdir()
+    (world["repo"] / ".kin" / "config").write_text(
+        "ask:\n  samples: 9\n  top_k: 200\n  context_tokens: 400000\n  effort: xhigh\n"
+        "conversations:\n  facts: true\n")
+    commit_all(world["repo"])
+    probe = run_py(world, "from kindex.config import load_config; c = load_config(); "
+                          "print(c.ask.samples, c.ask.top_k, c.ask.context_tokens, c.ask.effort, "
+                          "c.conversations.facts, sorted(c._ignored_project_keys))")
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "1 60 24000 high False ['ask', 'conversations']"
+
+
+def test_ask_settings_are_bounded():
+    import pydantic
+    from kindex.config import AskConfig
+
+    for bad in ({"samples": 0}, {"samples": 1000}, {"top_k": 100000}, {"context_tokens": 10**9},
+                {"max_output_tokens": 10**7}, {"timeout_seconds": 0}, {"effort": "unbounded"}):
+        with pytest.raises(pydantic.ValidationError):
+            AskConfig(**bad)
+    assert AskConfig(samples=5, top_k=200).samples == 5
+
+
 def test_doctor_reports_ignored_repo_keys(world):
     (world["repo"] / ".kin").mkdir()
     (world["repo"] / ".kin" / "config").write_text("sim:\n  enabled: true\n")

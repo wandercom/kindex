@@ -265,8 +265,8 @@ Nodes have types, weights, domains, and audiences. Edges carry provenance and de
 ### Operational guardrails
 Constraints block deploys. Directives encode preferences. Watches flag attention items. Checkpoints run pre-flight. No other memory plugin has this.
 
-### Cache-optimized LLM retrieval
-Three-tier prompt architecture with Anthropic prompt caching. Stable knowledge (codebook) is cached at 10% cost. Query-relevant context is predicted via graph expansion and cached per-topic. Only the question pays full price. Transparent — `kin ask` just works better and cheaper.
+### Answers from dated evidence
+`kin ask` plans its searches (one per kind of item for a counting question, the earlier state for a "still / now" question), merges them by rank fusion, and gives the model the matching nodes in full, dated and in chronological order within a token budget, with today's date and your standing directives. The answer rules cover updated values, counts across conversations, date arithmetic and missing details. `kin ingest conversations --directory DIR` stores chat transcripts without loss for it to search. The MCP `ask` tool returns the same dated evidence to the agent that called it (and drafts the answer itself with `answer=true`); `context(level="evidence")` returns it for a topic.
 
 ### Team and org ready
 `.kin` inheritance chains let a service repo inherit from a platform context, which inherits from an org voice. Private/team/org/public scoping with PII stripping on export. Enterprise-ready from day one.
@@ -953,10 +953,11 @@ Retrieval pipeline:
   Embedding providers (configurable):
       voyage-context-4 (contextual chunks) | openai | gemini | local
 
-LLM cache tiers (kin ask):
-  Tier 1: codebook (stable node index)     <- cached @ 10% cost
-  Tier 2: query-relevant context           <- cached per-topic @ 10% cost
-  Tier 3: user question                    <- full price, tiny
+kin ask (answer.py), configured under `ask:`:
+  plan       one cheap call: intent + 1-5 searches        (ask.plan, ask.plan_effort)
+  retrieve   hybrid_search per search, rank fusion          (ask.top_k = 60)
+  assemble   full nodes, dated, oldest first + directives   (ask.context_tokens = 24000)
+  answer     answering rules, reasoning effort              (ask.effort, ask.samples, ask.readings)
 
 Reminders:
   reminders table (SQLite)    <- separate from knowledge graph
@@ -1011,7 +1012,7 @@ Code structure lives in the same graph as your decisions, watches, and constrain
 | `kin add <text>` | Quick capture with auto-extraction and linking (--tags, --type) |
 | `kin show <id>` | Full node details with edges, provenance, and state |
 | `kin list` | List nodes (--type, --status, --tags, --audience, --mine, --limit) |
-| `kin ask <question>` | Question classification + LLM or context answer |
+| `kin ask <question>` | Planned searches + an answer from dated evidence (`--as-of` sets today's date); search results without an LLM |
 
 ### Knowledge Management
 | Command | Description |
