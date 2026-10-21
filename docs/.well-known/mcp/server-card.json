@@ -131,7 +131,9 @@
       "kinbase_status",
       "kinbase_explain",
       "kinbase_submit",
-      "candidate_create"
+      "candidate_create",
+      "practical_memory",
+      "correction_references"
     ],
     "resources": [],
     "prompts": []

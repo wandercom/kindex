@@ -892,6 +892,94 @@ def _node_detail(store, node: dict, *, graph: str = "project",
 # ── Tools ─────────────────────────────────────────────────────────────
 
 
+class _PracticalConfigError(ValueError):
+    """Safe configuration refusal for the explicit practical-memory tools."""
+
+
+def _practical_config():
+    """Resolve host configuration without the writable singleton initializer."""
+    scoped = _request_scope.get()
+    if scoped is not None:
+        return scoped.config
+    if _config is not None:
+        return _config
+    from .config import load_config
+    try:
+        return load_config()
+    except ValueError:
+        raise _PracticalConfigError("Configuration is unavailable") from None
+
+
+def _strict_practical_arguments(fn):
+    """Retain JSON types and reject extra arguments for these two tools only."""
+    from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+    from pydantic import ConfigDict
+
+    tool = mcp._tool_manager.get_tool(fn.__name__)
+
+    class StrictArguments(tool.fn_metadata.arg_model):
+        model_config = ConfigDict(arbitrary_types_allowed=True, strict=True, extra="forbid")
+
+    class StrictMetadata(FuncMetadata):
+        def pre_parse_json(self, data):
+            if type(data) is not dict:
+                raise ValueError("Tool arguments must be a JSON object")
+            return data
+
+    previous = tool.fn_metadata
+    tool.fn_metadata = StrictMetadata(
+        arg_model=StrictArguments, output_schema=previous.output_schema,
+        output_model=previous.output_model, wrap_output=previous.wrap_output)
+    tool.parameters = StrictArguments.model_json_schema(by_alias=True)
+    return fn
+
+
+@_strict_practical_arguments
+@mcp.tool()
+def practical_memory(action: str, request_json: str) -> str:
+    """Explicit experimental prepare/audit/organize/persist/index/ack operation.
+
+    The strict JSON request follows practical-memory-contract-v1. No workflow
+    is enabled by calling a read. Persist/index/ack are explicit local writes;
+    a receipt does not prove model delivery or use. No provider is invoked.
+    """
+    from . import practical_memory as memory
+    from .practical_memory_host import run_practical_memory
+    try:
+        request = memory._loads(request_json)
+        result = run_practical_memory(_practical_config(), action, request)
+        return memory._c(result).decode("utf-8")
+    except memory.PracticalMemoryError as exc:
+        return memory._c({"error": {"code": exc.code, "message": exc.message}}).decode("utf-8")
+    except _PracticalConfigError:
+        return memory._c({"error": {"code": "scope_mismatch", "message": "Practical memory scope is unavailable"}}).decode("utf-8")
+    except (sqlite3.Error, OSError, RuntimeError):
+        return memory._c({"error": {"code": "unavailable", "message": "Practical memory storage is unavailable"}}).decode("utf-8")
+
+
+@_strict_practical_arguments
+@mcp.tool()
+def correction_references(operation: str, request_json: str,
+                          metadata_encoding: str = "full", incoming_later: bool = False) -> str:
+    """Explicit experimental reference/expand/correction_add/correction_retire/dream_import.
+
+    Host config and current session select the scope; JSON supplies no grants.
+    Packing and incoming navigation are opt-in. Correction and dream imports
+    are explicit local writes, not verification, truth or source replacement.
+    """
+    from . import correction_references as references
+    from .practical_memory_host import run_correction_references
+    try:
+        request = references._loads(request_json)
+        result = run_correction_references(_practical_config(), operation, request,
+            metadata_encoding=metadata_encoding, incoming_later=incoming_later, recorded_at=operation_now())
+        return references._j(result).decode("utf-8")
+    except references.ReferenceError as exc:
+        return references._j({"error": {"code": exc.code, "message": "Correction reference operation is unavailable"}}).decode("utf-8")
+    except (_PracticalConfigError, sqlite3.Error, OSError, RuntimeError):
+        return references._j({"error": {"code": "unavailable", "message": "Correction reference storage or host context is unavailable"}}).decode("utf-8")
+
+
 @_tool()
 def kinbase_sync(repo: str, mode: str = "auto") -> str:
     """Refresh signed Kinbase evidence; raw verifies bytes, reduced retains governance snapshots.

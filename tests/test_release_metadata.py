@@ -59,11 +59,21 @@ def test_public_command_counts_match_registered_surfaces():
         for node in ast.walk(mcp_tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and any(
-            (isinstance(decorator, ast.Call)
-             and isinstance(decorator.func, ast.Name)
-             and decorator.func.id == "_tool")
-            or (isinstance(decorator, ast.Name)
-                and decorator.id == "_readonly_query_tool")
+            (
+                isinstance(decorator, ast.Call)
+                and (
+                    isinstance(decorator.func, ast.Name)
+                    and decorator.func.id in {"_tool", "_readonly_query_tool"}
+                    or isinstance(decorator.func, ast.Attribute)
+                    and isinstance(decorator.func.value, ast.Name)
+                    and decorator.func.value.id == "mcp"
+                    and decorator.func.attr == "tool"
+                )
+            )
+            or (
+                isinstance(decorator, ast.Name)
+                and decorator.id == "_readonly_query_tool"
+            )
             for decorator in node.decorator_list
         )
     ]
@@ -79,7 +89,7 @@ def test_public_command_counts_match_registered_surfaces():
     )
 
     assert f"{tool_count} MCP Tools" in docs
-    assert tool_count == 76
+    assert tool_count == 78
     assert len(card_tools) == len(set(card_tools)), "Server card lists duplicate MCP tools"
     assert set(card_tools) == set(tool_names)
     assert len(choices) >= 80
