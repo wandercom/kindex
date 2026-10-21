@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 import pytest
+from kindex import platform_io
 from kindex.config import Config
 
 
@@ -684,6 +685,20 @@ class TestSetupCron:
         assert r.returncode == 0
         assert "Would" in r.stdout
 
+    def test_a_system_without_crontab_reads_as_a_failed_run(self, monkeypatch):
+        """Windows has no crontab: setup-cron reported a traceback, not a reason."""
+        import subprocess as sp
+
+        import kindex.setup as setup
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        monkeypatch.setattr(setup.subprocess, "run", missing)
+        result = setup.run_crontab("-l")
+        assert isinstance(result, sp.CompletedProcess)
+        assert result.returncode == 127 and result.stdout == ""
+        assert "No such file" in result.stderr
+
     def test_install_launchd_dry_run(self, tmp_path):
         """install_launchd with dry_run should not write plist."""
         from kindex.setup import install_launchd
@@ -713,7 +728,7 @@ class TestSetupCron:
         from kindex.setup import uninstall_launchd
         from unittest.mock import patch
 
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(platform_io, "home", lambda: tmp_path)
         plist = tmp_path / "Library" / "LaunchAgents" / "com.kindex.cron.plist"
         plist.parent.mkdir(parents=True)
         plist.write_text("<plist/>")
@@ -729,7 +744,7 @@ class TestSetupCron:
         from kindex.setup import uninstall_launchd
         from unittest.mock import patch
 
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(platform_io, "home", lambda: tmp_path)
         with patch("subprocess.run") as run:
             actions = uninstall_launchd(dry_run=True)
 

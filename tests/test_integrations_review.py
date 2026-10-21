@@ -322,7 +322,9 @@ def test_capture_has_provenance_but_never_enters_context_fts(scope, monkeypatch)
     store = integrations.open_project_store(scope)
     try:
         candidate = store.get_capture_candidate(captured["candidate_id"])
-        assert scope["session_id"] in candidate["content"] and scope["project_path"] in candidate["content"]
+        # The scope is embedded as JSON, where a Windows path's backslashes are escaped.
+        assert scope["session_id"] in candidate["content"]
+        assert json.dumps(scope["project_path"], ensure_ascii=False)[1:-1] in candidate["content"]
         assert candidate["created_at"]
     finally:
         store.close()

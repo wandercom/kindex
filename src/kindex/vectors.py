@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from . import platform_io
 from .privacy import redact, redact_serialized, redact_text, safe_error
 from .privacy import redacting_print as print
 
@@ -1260,7 +1261,7 @@ def _node_embedding_fresh(store: Store, node: dict, fingerprint: str) -> bool:
 def _normalize_project_path(path: str | None) -> str | None:
     if not path:
         return None
-    p = Path(path).expanduser()
+    p = platform_io.expanduser(Path(path))
     if p.name == "config" and p.parent.name == ".kin":
         p = p.parent.parent
     elif p.name == ".kin":

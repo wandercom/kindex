@@ -21,6 +21,7 @@ import pytest
 
 from kindex.config import Config
 from kindex.schema import SCHEMA_VERSION
+from kindex.sessions import normalize_project_path
 from kindex.snapshots import DEFAULT_KEEP, snapshot_db, snapshot_dir_for
 from kindex.store import (
     SCHEMA_RECOVERY_PATH_META,
@@ -98,7 +99,8 @@ def test_snapshot_records_changelog_entry(store, tmp_path):
     path = snapshot_db(store, "audit-test", state_dir=tmp_path / "snaps")
     entries = [e for e in store.recent_activity(20) if e["action"] == "db_snapshot"]
     assert entries, "db_snapshot entry missing from activity log"
-    assert str(path) in str(entries[0].get("details"))
+    # The path field itself: in the dict's repr a Windows path's backslashes are doubled.
+    assert entries[0]["details"]["path"] == str(path)
 
 
 def test_schema_migration_takes_and_records_pre_state_snapshot(
@@ -159,7 +161,7 @@ def test_schema_migration_takes_and_records_pre_state_snapshot(
         value["project_path"]
         for value in session_state.values()
         if value["session_status"] == "active"
-    } == {"/project/a", "/project/b"}
+    } == {normalize_project_path("/project/a"), normalize_project_path("/project/b")}  # c:\project\a on Windows
     paused = [
         value for value in session_state.values()
         if value["session_status"] == "paused"
@@ -171,7 +173,7 @@ def test_schema_migration_takes_and_records_pre_state_snapshot(
     )
     assert {
         value["project_path"] for value in session_state.values()
-    } == {"/project/a", "/project/b"}
+    } == {normalize_project_path("/project/a"), normalize_project_path("/project/b")}
 
     snapshots = list(
         (snapshot_dir_for(db_path) / "migrations").glob(
@@ -196,7 +198,7 @@ def test_schema_migration_takes_and_records_pre_state_snapshot(
         entry for entry in migrated.recent_activity(20)
         if entry["action"] == "db_snapshot"
     ]
-    assert str(snapshots[0]) in str(entries[0]["details"])
+    assert entries[0]["details"]["path"] == str(snapshots[0])
     assert migrated.get_meta(SCHEMA_RECOVERY_PATH_META) == str(snapshots[0])
     assert migrated.get_meta(SCHEMA_RECOVERY_REASON_META) == f"schema-v11-to-v{SCHEMA_VERSION}"
     assert migrated.pending_suggestions()[0]["identity_kind"] == "node_id"

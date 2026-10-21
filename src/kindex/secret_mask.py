@@ -32,6 +32,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from . import platform_io
+
 #: Name fragments selected when ``keys`` is omitted (case-insensitive substrings).
 DEFAULT_KEY_PATTERNS: tuple[str, ...] = (
     "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PW", "CREDENTIAL",
@@ -212,7 +214,7 @@ _active: SecretMask | None = None
 
 
 def configure(settings: SecretMaskConfig | Mapping | None,
-              resolve=lambda p: Path(p).expanduser()) -> SecretMask | None:
+              resolve=lambda p: platform_io.expanduser(Path(p))) -> SecretMask | None:
     """Install the process-wide mask from the user's settings (None turns it off).
 
     ``resolve`` maps a configured file path to a filesystem path; config passes

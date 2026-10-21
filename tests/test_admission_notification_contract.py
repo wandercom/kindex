@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from kindex import platform_io
 
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
@@ -125,6 +126,7 @@ class AdmissionNotificationContract(unittest.TestCase):
         self.home.mkdir(mode=0o700)
         (self.root / 'tmp').mkdir(mode=0o700)
         self.env = {
+            **platform_io.essential_environment(),
             'HOME': str(self.home),
             'XDG_CONFIG_HOME': str(self.home / '.config'),
             'XDG_DATA_HOME': str(self.home / '.local' / 'share'),

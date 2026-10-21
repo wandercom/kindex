@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 import json
 import logging
@@ -26,6 +25,9 @@ import uuid
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import platform_io
+from .platform_io import open_nofollow
 
 _MAX_OUTPUT = 1024 * 1024
 _EXECUTABLES = {"codex": "codex", "claude": "claude", "antigravity": "agy"}
@@ -144,11 +146,7 @@ def _write(path, data: _PersistentModel):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        platform_io.fsync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -156,14 +154,14 @@ def _write(path, data: _PersistentModel):
 
 @contextmanager
 def _lock(path, *, deadline=None):
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = open_nofollow(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         if deadline is None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            platform_io.lock(fd)
         else:
             while True:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    platform_io.lock(fd, blocking=False)
                     break
                 except BlockingIOError:
                     remaining = deadline - time.monotonic()
@@ -301,7 +299,8 @@ def _session_id(value):
 
 
 def _environment():
-    return {**{key: os.environ[key] for key in ("HOME", "PATH", "USER", "LANG", "TMPDIR", "KIN_HEALTH_DIR") if key in os.environ},
+    return {**platform_io.essential_environment(),
+            **{key: os.environ[key] for key in ("HOME", "PATH", "USER", "LANG", "TMPDIR", "KIN_HEALTH_DIR") if key in os.environ},
             "KINDEX_REVIEW_WORKER": "1"}
 
 
@@ -490,7 +489,7 @@ def _bounded_process(argv, prompt, env, workspace, timeout, backend=None):
             streams.close()
             # Children must not outlive a review, even when their parent exited.
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                platform_io.kill_tree(proc.pid)
             except ProcessLookupError:
                 pass
             proc.wait()

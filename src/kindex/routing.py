@@ -25,6 +25,8 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from . import platform_io
+
 if TYPE_CHECKING:
     from .config import Config
 
@@ -74,14 +76,14 @@ def cwd_profile_owner(cwd: str, profiles: dict) -> str | None:
     if not cwd:
         return None
     try:
-        cp = _resolved(Path(cwd).expanduser())
+        cp = _resolved(platform_io.expanduser(Path(cwd)))
     except (ValueError, OSError):
         return None
     best: tuple[int, str] | None = None
     for pname, entry in profiles.items():
         for root in getattr(entry, "roots", None) or []:
             try:
-                rp = _resolved(Path(root).expanduser())
+                rp = _resolved(platform_io.expanduser(Path(root)))
             except (ValueError, OSError):
                 continue
             if cp == rp or rp in cp.parents:
@@ -132,7 +134,7 @@ def _session_profile_owner(jsonl_path: Path, profiles: dict) -> str | None:
     best: tuple[int, str] | None = None
     for pname, entry in profiles.items():
         for root in getattr(entry, "roots", None) or []:
-            rp = Path(root).expanduser()
+            rp = platform_io.expanduser(Path(root))
             rp_res = _resolved(rp)
             matched = False
             # Claude encodes its physical cwd, so the resolved encoding is

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -351,7 +352,7 @@ def test_git_merge_resolves_via_driver(tmp_path):
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@t.t")
     _git(repo, "config", "user.name", "T")
-    driver = f"{sys.executable} -m kindex.cli merge-kin %O %A %B %P"
+    driver = f"{shlex.quote(sys.executable)} -m kindex.cli merge-kin %O %A %B %P"
     _git(repo, "config", "merge.kindex.driver", driver)
     (repo / ".gitattributes").write_text(".kin/index.json merge=kindex\n")
     idx = repo / ".kin" / "index.json"
@@ -374,6 +375,23 @@ def test_git_merge_resolves_via_driver(tmp_path):
     assert "<<<<<<<" not in text  # no conflict markers
     ids = [n["id"] for n in json.loads(text)["nodes"]]
     assert ids == ["a", "b", "c"]  # lossless union, both sides preserved
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "git"], capture_output=True).returncode != 0,
+    reason="git not available",
+)
+def test_setup_merge_driver_quotes_the_kin_program_for_sh(tmp_path, monkeypatch):
+    """git runs the driver through sh; an unquoted path lost its spaces (and,
+    on Windows, its backslashes)."""
+    import kindex.setup as setup
+    repo = tmp_path / "r"; repo.mkdir()
+    _git(repo, "init", "-q")
+    kin = r"C:\Program Files\kin dir\kin.exe"
+    monkeypatch.setattr(setup.shutil, "which", lambda name: kin if name == "kin" else None)
+    setup.install_merge_driver(setup.git_repo_root(repo))
+    driver = _git(repo, "config", "merge.kindex.driver").stdout.strip()
+    assert shlex.split(driver) == [kin, "merge-kin", "%O", "%A", "%B", "%P"]
 
 
 @pytest.mark.skipif(

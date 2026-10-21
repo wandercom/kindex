@@ -11,6 +11,8 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import platform_io
+from .platform_io import open_nofollow
 from .privacy import redact
 
 SCHEMA = "kindex-evidence/1"
@@ -130,17 +132,15 @@ def _artifact_lock(root):
     A concurrent publisher/importer gets an explicit retry, not a lost update.
     This is not isolation against a hostile process running as the same user.
     """
-    import fcntl
-
     path = _path(root)
     local = path.parent / "local"
     if local.is_symlink():
         raise ValueError("Refusing symlinked repo evidence lock directory")
     local.mkdir(parents=True, exist_ok=True)
-    fd = os.open(local / "repo-memory.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = open_nofollow(local / "repo-memory.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            platform_io.lock(fd, blocking=False)
         except BlockingIOError:
             raise ValueError("Repo evidence is being updated; retry publication/import") from None
         yield

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kindex import platform_io
 from kindex.claude_install import install, legacy_manifest, unresolved_handlers
 from kindex.config import Config
 from kindex.agent_adapters import render_hook_context
@@ -37,7 +38,7 @@ def test_packaged_manifest_expands_plugin_root_in_hook_shell(tmp_path):
     manifest = legacy_manifest(Config(), PACKAGED_PLUGIN_KIN)
     handlers = [h for entries in manifest.values() for entry in entries for h in entry["hooks"]]
     for handler in handlers:
-        done = subprocess.run(["/bin/sh", "-c", handler["command"]], cwd=cwd, input="{}",
+        done = subprocess.run([platform_io.posix_shell(), "-c", handler["command"]], cwd=cwd, input="{}",
                               capture_output=True, text=True, timeout=30,
                               env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
                                    "CLAUDE_PLUGIN_ROOT": str(root)})
@@ -161,6 +162,15 @@ def test_a_host_that_refuses_the_plugin_blocks_the_modern_switch(tmp_path, monke
     with pytest.raises(ValueError, match="refuses the Kindex plugin"):
         install(cfg, mode="modern")
     assert not (cfg.claude_path / "skills/kindex-modern").exists()
+
+
+def test_modern_hook_modules_declare_themselves_es_modules():
+    """Node takes a .ts file's module type from the nearest package.json; one
+    above the plugin declaring commonjs made kindex.ts fail to load."""
+    import kindex
+
+    hooks = Path(kindex.__file__).parent / "claude_modern" / "hooks"
+    assert json.loads((hooks / "package.json").read_text(encoding="utf-8"))["type"] == "module"
 
 
 def test_a_host_between_early_access_and_mods_is_refused(tmp_path, monkeypatch):

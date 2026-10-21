@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -13,6 +14,8 @@ import tempfile
 import unittest
 
 import pytest
+
+from kindex import platform_io
 
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
@@ -78,6 +81,11 @@ class ScopeContract(unittest.TestCase):
             'PYTHONNOUSERSITE': '1',
             'PYTHONDONTWRITEBYTECODE': '1',
         }
+        if os.name == 'nt':
+            # The POSIX PATH above names nothing on Windows: the product would
+            # find no git to confirm the repository. Keep only git's directory.
+            self.env.update(platform_io.essential_environment(),
+                            PATH=str(Path(shutil.which('git')).parent))
         init = self.run_process(['git', 'init', '--quiet', str(self.project)])
         self.assertEqual(init.returncode, 0, init.stderr)
         (self.project / '.kin' / 'config').write_text('name: scope-fixture\n', encoding='utf-8')

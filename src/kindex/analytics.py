@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import platform_io
+
 if TYPE_CHECKING:
     from .config import Config
 
@@ -16,7 +18,7 @@ def find_archive_db(config: "Config") -> Path | None:
     candidates = [
         config.claude_path / "archive" / "index.db",
         config.claude_path / "archive.db",
-        Path.home() / ".claude" / "archive" / "index.db",
+        platform_io.home() / ".claude" / "archive" / "index.db",
     ]
     for p in candidates:
         if p.exists():

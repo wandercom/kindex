@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import platform_io
 from .privacy import redact_text, safe_error
 
 if TYPE_CHECKING:
@@ -284,8 +285,10 @@ def _run_process(
     With ``max_bytes`` each stream keeps only its first ``max_bytes`` (the
     rest is still drained, so the child never blocks on a full pipe).
     """
+    if os.name == "nt":
+        return _run_process_windows(cmd, shell=shell, input_text=input_text, timeout=timeout,
+                                    grace=grace, max_bytes=max_bytes)
     import selectors
-    import signal
 
     proc = subprocess.Popen(
         cmd, shell=shell, start_new_session=True,
@@ -295,7 +298,7 @@ def _run_process(
 
     def kill_group() -> None:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            platform_io.kill_tree(proc.pid)
         except (ProcessLookupError, PermissionError):
             pass
 
@@ -382,6 +385,106 @@ def _run_process(
             decode(chunks[proc.stdout]), decode(chunks[proc.stderr]))
 
 
+_SHELL_COMMAND = "KINDEX_SHELL_COMMAND"
+_SHELL_RUNNER = f'command=${_SHELL_COMMAND}; unset {_SHELL_COMMAND}; eval "$command"'
+
+
+def _run_process_windows(cmd, *, shell, input_text, timeout, grace, max_bytes):
+    """``_run_process`` for Windows, with the same contract.
+
+    Windows cannot select() on pipes and has no process groups: threads
+    drain the pipes and feed the prompt, and a timeout or interruption kills
+    the process tree. A descendant still holding the pipes after ``grace``
+    leaves its reader thread (a daemon) blocked; the pipe is then not closed
+    here, because closing it would wait on that blocked read.
+    """
+    import threading
+
+    env = None
+    if shell and isinstance(cmd, str):
+        # A shell command line is POSIX shell: run it under Git's sh, as /bin/sh
+        # would; without Git it falls back to cmd.exe. The line travels in the
+        # environment, not in sh's arguments: MSYS re-parses its own command
+        # line (a quoted \\ becomes \, globs and @files expand).
+        sh = platform_io.posix_shell()
+        if sh:
+            env = {**os.environ, _SHELL_COMMAND: cmd}
+            cmd, shell = [sh, "-c", _SHELL_RUNNER], False
+    proc = subprocess.Popen(
+        cmd, shell=shell, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    chunks: dict = {proc.stdout: [], proc.stderr: []}
+
+    def drain(stream) -> None:
+        held = 0
+        try:
+            while True:
+                data = stream.read1(65536)
+                if not data:
+                    return
+                room = None if max_bytes is None else max_bytes - held
+                if room is None or room > 0:
+                    kept = data if room is None else data[:room]
+                    chunks[stream].append(kept)
+                    held += len(kept)
+        except (OSError, ValueError):
+            return
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(input_text.encode("utf-8", errors="replace"))
+        except OSError:
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
+    readers = [threading.Thread(target=drain, args=(s,), daemon=True) for s in chunks]
+    workers = readers + ([threading.Thread(target=feed, daemon=True)] if input_text is not None else [])
+    for worker in workers:
+        worker.start()
+
+    def kill_tree() -> None:
+        try:
+            platform_io.kill_tree(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+
+    timed_out = False
+    try:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_tree()
+        settle = time.monotonic() + grace
+        for reader in readers:
+            reader.join(timeout=max(0.0, settle - time.monotonic()))
+    except BaseException:
+        # Interrupted (Ctrl-C) or failed: the tree must not outlive the runner.
+        kill_tree()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        for stream in chunks:
+            if not any(r.is_alive() for r in readers):
+                stream.close()
+    try:
+        returncode = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        returncode = None
+    decode = lambda parts: b"".join(list(parts)).decode("utf-8", errors="replace")  # noqa: E731
+    return (None if timed_out else returncode,
+            decode(chunks[proc.stdout]), decode(chunks[proc.stderr]))
+
+
 def _resolve_cli(name: str) -> str | None:
     """An agent CLI's absolute path. A scheduler starts jobs with a bare
     system PATH, so the usual install locations are searched as well."""
@@ -390,8 +493,8 @@ def _resolve_cli(name: str) -> str | None:
         return found
     extra = [
         "/opt/homebrew/bin", "/usr/local/bin",
-        str(Path.home() / ".local" / "bin"), str(Path.home() / ".npm-global" / "bin"),
-        str(Path.home() / ".bun" / "bin"), str(Path.home() / ".cargo" / "bin"),
+        str(platform_io.home() / ".local" / "bin"), str(platform_io.home() / ".npm-global" / "bin"),
+        str(platform_io.home() / ".bun" / "bin"), str(platform_io.home() / ".cargo" / "bin"),
     ]
     return shutil.which(name, path=os.pathsep.join(extra))
 

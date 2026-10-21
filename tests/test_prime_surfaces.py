@@ -277,13 +277,20 @@ def test_a_contended_attention_lock_leaks_no_descriptor(config):
 
     from kindex.attention import _acquire_attention_lock, _release_attention_lock
 
+    def lowest_free_descriptor():
+        # Descriptors are allocated lowest-first on POSIX and in Windows' CRT,
+        # so a leaked one raises it; /dev/fd, which lists them, is POSIX-only.
+        fd = _os.open(_os.devnull, _os.O_RDONLY)
+        _os.close(fd)
+        return fd
+
     held = _acquire_attention_lock(config)
     assert held is not None
     try:
-        before = len(_os.listdir("/dev/fd"))
+        before = lowest_free_descriptor()
         for _ in range(20):
             assert _acquire_attention_lock(config) is None
-        assert len(_os.listdir("/dev/fd")) == before
+        assert lowest_free_descriptor() == before
     finally:
         _release_attention_lock(held)
 

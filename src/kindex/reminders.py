@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import platform_io
 from .scoping import item_matches_conversation
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ def _checked_wake(
                         if os.environ.get(key, "").strip()), "")
         if not current and client == "codex":
             home = os.environ.get("CODEX_HOME") or str(store.config.codex_path)
-            current = _newest_codex_session(Path(home).expanduser())
+            current = _newest_codex_session(platform_io.expanduser(Path(home)))
         if not current:
             raise ValueError(
                 f"Cannot resolve the latest {client} session now; pass its id "
@@ -129,7 +130,7 @@ def _checked_wake(
     if session_id and not WAKE_TOKEN.fullmatch(session_id):
         raise ValueError(f"Invalid wake session id {session_id!r}")
 
-    directory = Path(cwd or os.getcwd()).expanduser()
+    directory = platform_io.expanduser(Path(cwd or os.getcwd()))
     if not directory.is_absolute():
         directory = Path(os.getcwd()) / directory
     if not directory.is_dir():

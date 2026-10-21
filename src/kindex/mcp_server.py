@@ -18,6 +18,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
+from . import platform_io
 from .privacy import redact, redact_serialized, safe_error, redacting_print as print
 
 #: How long a reduced Kinbase sync may run inside one MCP tool call.
@@ -330,7 +331,7 @@ def _global_store(store, config, *, write=False):
         matching_profiles = [name for name, entry in config.profiles.items()
                              if entry.data_dir and
                              home_config.data_path.resolve() ==
-                             Path(entry.data_dir).expanduser().resolve()]
+                             platform_io.expanduser(Path(entry.data_dir)).resolve()]
         if len(matching_profiles) > 1:
             raise ValueError("Configured global data directory matches multiple profiles")
         home_config.active_profile = matching_profiles[0] if matching_profiles else None
@@ -429,7 +430,7 @@ def _graph_aware_session() -> bool:
     return (bool(project and getattr(config, "_global_data_dir", None))
             and not config.active_profile and is_project_store(store, project)
             and config.data_path.resolve() !=
-            Path(config._global_data_dir).expanduser().resolve())
+            platform_io.expanduser(Path(config._global_data_dir)).resolve())
 
 
 def _display_ref(graph: str, node_id: str, *, incoming_ref: str = "") -> str:

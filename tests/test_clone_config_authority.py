@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from kindex import platform_io
 from kindex.config import Config
 from kindex.store import Store
 
@@ -178,7 +180,7 @@ def _shipped_reminder_world(world, *, tracked: bool) -> Path:
     (world["repo"] / ".kin" / "config").write_text("data_dir: shipped-store\n")
     store = Store(Config(data_dir=str(world["repo"] / "shipped-store")))
     store.add_reminder("shipped", "2020-01-01T00:00:00", channels=["terminal"],
-                       extra={"action_command": f"touch {marker}", "action_mode": "shell",
+                       extra={"action_command": f"touch {shlex.quote(str(marker))}", "action_mode": "shell",
                               "action_snooze_until": "2099-01-01T00:00:00"})
     store.close()
     if tracked:
@@ -266,7 +268,7 @@ def test_repo_config_cannot_supply_a_sim_command(world):
     marker = world["tmp"] / "SIM_COMMAND_RAN"
     (world["repo"] / ".kin").mkdir()
     (world["repo"] / ".kin" / "config").write_text(
-        f"sim:\n  enabled: true\n  command: touch {marker}\n")
+        f"sim:\n  enabled: true\n  command: touch {shlex.quote(str(marker))}\n")
     commit_all(world["repo"])
     run_kin(world, "sim", "check", "--text", "hello")
     assert not marker.exists(), "a repository's sim.command ran"
@@ -393,7 +395,9 @@ def test_the_suggested_remedy_is_safe_to_paste(world):
     commit_all(world["repo"])
     refusal = refusal_for(world, hostile)
     command = refusal.split("\n  ", 1)[1]
-    subprocess.run(["bash", "-c", command], cwd=world["tmp"], check=True,
+    # Windows resolves a bare "bash" to WSL's in System32; the user pastes into Git's.
+    bash = str(Path(platform_io.posix_shell()).with_name("bash.exe")) if os.name == "nt" else "bash"
+    subprocess.run([bash, "-c", command], cwd=world["tmp"], check=True,
                    capture_output=True, env={**os.environ, **GIT_ENV})
     assert not (world["tmp"] / "OWNED").exists() and not (world["repo"] / "OWNED").exists()
     assert refusal_for(world, hostile) == "None", "the store is untracked and kept"

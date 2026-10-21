@@ -364,7 +364,7 @@ class TestDreamCycle:
 
     def test_cycle_skips_when_locked(self, tmp_path):
         """Simulate lock contention."""
-        import fcntl
+        from kindex import platform_io
 
         cfg = Config(data_dir=str(tmp_path))
         s = Store(cfg)
@@ -373,14 +373,14 @@ class TestDreamCycle:
         lock_file = cfg.data_path / "dream.lock"
         lock_file.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        platform_io.lock(fd, blocking=False)
 
         from kindex.dream import dream_cycle
         results = dream_cycle(cfg, s, mode="lightweight")
         assert results.get("skipped") == "locked"
 
         # Cleanup
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        platform_io.unlock(fd)
         os.close(fd)
         s.close()
 

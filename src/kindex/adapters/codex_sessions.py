@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .. import platform_io
 from .base import AdapterMeta, AdapterOption, IngestResult
 
 
@@ -18,7 +19,7 @@ class CodexSessionsAdapter:
         from ..config import load_config
 
         cfg = load_config()
-        return (cfg.codex_path / "sessions").expanduser().exists()
+        return platform_io.expanduser(cfg.codex_path / "sessions").exists()
 
     def ingest(self, store, *, limit=50, since=None, verbose=False, **kwargs):
         from ..config import load_config

@@ -249,3 +249,51 @@ def test_ledger_trim_survives_short_writes(tmp_path, monkeypatch):
     assert len(lines) <= 4, "the cap ran"
     assert json.loads(lines[-1])["msg"] == "written in pieces"
     assert all(json.loads(line)["cmd"] == "prompt-check" for line in lines)
+
+
+def _numbered(*numbers):
+    return "".join(f"{number}\n" for number in numbers).encode()
+
+
+def test_windows_cap_reads_a_ledger_a_crash_left_aside_first(tmp_path, monkeypatch):
+    import kindex.config as config
+    monkeypatch.setattr(config, "_DEGRADED_KEEP_LINES", 3)
+    ledger = tmp_path / "degraded.jsonl"
+    ledger.write_bytes(_numbered(4, 5))
+    (tmp_path / "degraded.jsonl.capping").write_bytes(_numbered(1, 2, 3))
+    config._cap_degraded_ledger_windows(ledger)
+    assert ledger.read_bytes() == _numbered(3, 4, 5)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["degraded.jsonl"]
+
+
+def test_windows_cap_declines_while_an_appender_holds_the_ledger(tmp_path, monkeypatch):
+    import kindex.config as config
+    monkeypatch.setattr(config, "_DEGRADED_KEEP_LINES", 3)
+    ledger = tmp_path / "degraded.jsonl"
+    ledger.write_bytes(_numbered(1, 2, 3, 4, 5))
+
+    def held_open(source, target):
+        raise PermissionError(13, "The process cannot access the file", str(source))
+    monkeypatch.setattr(config.os, "replace", held_open)
+    config._cap_degraded_ledger_windows(ledger)
+    assert ledger.read_bytes() == _numbered(1, 2, 3, 4, 5)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["degraded.jsonl"]
+
+
+def test_windows_cap_folds_in_appends_that_recreated_the_ledger(tmp_path, monkeypatch):
+    import kindex.config as config
+    monkeypatch.setattr(config, "_DEGRADED_KEEP_LINES", 3)
+    ledger = tmp_path / "degraded.jsonl"
+    ledger.write_bytes(_numbered(1, 2, 3, 4, 5))
+    real_rename, renames = os.rename, []
+
+    def appender_got_there_first(source, target):
+        renames.append(target)
+        if len(renames) == 1:
+            ledger.write_bytes(_numbered(6))
+            raise FileExistsError(17, "File exists", str(target))
+        real_rename(source, target)
+    monkeypatch.setattr(config.os, "rename", appender_got_there_first)
+    config._cap_degraded_ledger_windows(ledger)
+    assert ledger.read_bytes() == _numbered(3, 4, 5, 6)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["degraded.jsonl"]

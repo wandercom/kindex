@@ -222,7 +222,7 @@ def _walk_files(root: Path, exclude: list[str],
             continue
         if path.suffix.lower() not in extensions:
             continue
-        rel = str(path.relative_to(root))
+        rel = path.relative_to(root).as_posix()
         if any(fnmatch(rel, pat) for pat in exclude):
             continue
         # Skip hidden directories
@@ -258,7 +258,7 @@ def _get_file_list(directory: Path, repo_root: Path | None,
                 if not f.suffix.lower() in extensions:
                     continue
                 try:
-                    rel = str(f.relative_to(directory))
+                    rel = f.relative_to(directory).as_posix()
                 except ValueError:
                     continue  # outside target directory
                 if any(fnmatch(rel, pat) for pat in exclude):
@@ -659,7 +659,7 @@ def _extract_cscope_includes(cscope_dir: Path,
                     included = text[start:end]
                 if included:
                     try:
-                        includer_rel = str(Path(includer).relative_to(repo_root))
+                        includer_rel = Path(includer).relative_to(repo_root).as_posix()
                         results.append((includer_rel, included))
                     except ValueError:
                         results.append((includer, included))
@@ -1169,7 +1169,7 @@ def ingest_code(
     for abs_path_str, file_tags in grouped.items():
         abs_path = Path(abs_path_str)
         try:
-            rel_path = str(abs_path.relative_to(effective_root))
+            rel_path = abs_path.relative_to(effective_root).as_posix()
         except ValueError:
             rel_path = abs_path_str
 
@@ -1397,7 +1397,7 @@ def ingest_code(
             # Find the source file's module node
             src_path = t.get("path", "")
             try:
-                src_rel = str(Path(src_path).relative_to(effective_root))
+                src_rel = Path(src_path).relative_to(effective_root).as_posix()
             except (ValueError, TypeError):
                 continue
             src_mod_id = module_node_ids.get(src_rel)
@@ -1492,7 +1492,7 @@ def ingest_code(
         language = _infer_language(abs_path, file_tags, lang_by_ext)
         if language != "Unknown":
             try:
-                rel_path = str(abs_path.relative_to(effective_root))
+                rel_path = abs_path.relative_to(effective_root).as_posix()
             except ValueError:
                 continue
             lang_files.setdefault(language, []).append((rel_path, abs_path))
@@ -1641,7 +1641,7 @@ def ingest_code(
     # cut short by its limit saw only part of the tree and retires nothing.
     def relative(path_str: str) -> str:
         try:
-            return str(Path(path_str).relative_to(effective_root))
+            return Path(path_str).relative_to(effective_root).as_posix()
         except ValueError:
             return path_str
 

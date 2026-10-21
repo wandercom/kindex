@@ -20,7 +20,7 @@ import pytest
 
 from kindex.config import Config
 from kindex.store import Store
-from kindex import tasks
+from kindex import platform_io, tasks
 from kindex.sessions import start_tag
 
 
@@ -51,18 +51,28 @@ def sandbox(tmp_path):
     # Real owner detection is unchanged; no policy callback is bypassed.
     tool_bin = tmp_path / "isolated-bin"
     tool_bin.mkdir()
+    # Windows loads a program's DLLs (and a venv launcher its pyvenv.cfg) from
+    # the directory it starts in, so a symlinked tool cannot run there: the
+    # tool's own directory goes on PATH instead.
+    tool_dirs = [str(tool_bin)]
     for name in ("git", "kin", "sh", "bash", "env"):
         executable = shutil.which(name)
-        if executable:
+        if executable and os.name == "nt":
+            tool_dirs.append(str(Path(executable).parent))
+        elif executable:
             (tool_bin / name).symlink_to(executable)
-    for name in ("python", "python3", f"python{sys.version_info.major}.{sys.version_info.minor}"):
-        (tool_bin / name).symlink_to(sys.executable)
+    if os.name == "nt":
+        tool_dirs.append(str(Path(sys.executable).parent))
+    else:
+        for name in ("python", "python3", f"python{sys.version_info.major}.{sys.version_info.minor}"):
+            (tool_bin / name).symlink_to(sys.executable)
     # Fresh processes import config with an isolated user home. Never pass live
     # credentials or agent/profile routing from the author's environment.
     env = {key: os.environ[key] for key in
            ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "LANG", "LC_ALL")
            if key in os.environ}
-    env.update(PATH=str(tool_bin), HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+    env.update(platform_io.essential_environment())
+    env.update(PATH=os.pathsep.join(dict.fromkeys(tool_dirs)), HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
                KIN_PROJECT=str(project), GIT_CONFIG_NOSYSTEM="1",
                GIT_CONFIG_GLOBAL=str(home / "empty-gitconfig"))
     return Harness(tmp_path, project, home, config, env)

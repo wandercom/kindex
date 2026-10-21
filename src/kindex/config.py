@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterator, Literal
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
+from . import platform_io
 from .secret_mask import SecretMaskConfig
 from .secret_mask import configure as configure_secret_mask
 
@@ -110,8 +111,8 @@ def bound_root(root: str | os.PathLike) -> Iterator[Path]:
 # These are the UNBOUND defaults; when a binding is active, _bound_global_paths
 # and _bound_local_paths resolve them under the bound root instead.
 _GLOBAL_PATHS = [
-    Path.home() / ".config" / "kindex" / "kin.yaml",  # XDG-ish
-    Path.home() / ".config" / "conv" / "conv.yaml",   # legacy
+    platform_io.home() / ".config" / "kindex" / "kin.yaml",  # XDG-ish
+    platform_io.home() / ".config" / "conv" / "conv.yaml",   # legacy
 ]
 _LOCAL_PATHS = [
     Path(".kin") / "config",                           # cwd (repo-local, .kin/ directory)
@@ -152,7 +153,7 @@ def _effective_home() -> Path:
     """HOME for resolution, under the bound root when bound (R1.5)."""
     if _bound_root is not None:
         return _bound_root
-    return Path.home()
+    return platform_io.home()
 
 
 def _resolve_path(path: str | Path) -> Path:
@@ -166,13 +167,13 @@ def _resolve_path(path: str | Path) -> Path:
     - relative traversals (``../escaped``) are collapsed so they cannot
       escape above the root
     This ensures no config resolution can escape the binding (R1.5).
-    When unbound, behavior is byte-identical to ``Path(path).expanduser().resolve()``.
+    When unbound, behavior is byte-identical to ``platform_io.expanduser(Path(path)).resolve()``.
     """
     s = str(path)
     if s.startswith("~"):
         resolved = (_effective_home() / s[1:].lstrip("/")).resolve()
     else:
-        resolved = Path(s).expanduser().resolve()
+        resolved = platform_io.expanduser(Path(s)).resolve()
     if _bound_root is not None:
         root = _bound_root
         try:
@@ -209,7 +210,7 @@ def _contained_resolve(path: str | Path) -> Path | None:
     return None (unusable candidate). When unbound, return the resolved
     path unchanged.
     """
-    resolved = Path(str(path)).expanduser().resolve()
+    resolved = platform_io.expanduser(Path(str(path))).resolve()
     if _bound_root is not None:
         try:
             resolved.relative_to(_bound_root)
@@ -233,7 +234,7 @@ def _global_write_path() -> Path | None:
     if _bound_root is not None:
         fallback = _contained_resolve(_bound_root / "kin.yaml")
     else:
-        fallback = Path.home() / "kin.yaml"
+        fallback = platform_io.home() / "kin.yaml"
     path = _contained_resolve(_effective_global_paths()[0]) or fallback
     if path is None:
         return None
@@ -1041,7 +1042,7 @@ def _detect_user(project_path: str | Path | None = None) -> str:
 
     commands: list[list[str]] = []
     if project_path:
-        repo_path = str(Path(project_path).expanduser().resolve())
+        repo_path = str(platform_io.expanduser(Path(project_path)).resolve())
         # `git config user.name` follows git's normal precedence: local, then global.
         commands.append(["git", "-C", repo_path, "config", "user.name"])
     commands.append(["git", "config", "--global", "user.name"])
@@ -1124,7 +1125,7 @@ def _strip_project_authority(data: dict) -> tuple[dict, list[str]]:
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
     try:
-        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+        return platform_io.expanduser(Path(left)).resolve() == platform_io.expanduser(Path(right)).resolve()
     except (OSError, ValueError):
         return False
 
@@ -1186,7 +1187,7 @@ def _load_config(
     project_root = resolve_project_root(project_path)
 
     if config_path:
-        p = _resolve_path(config_path)
+        p = _resolve_path(platform_io.null_device(config_path))
         if not p.exists() and _bound_root is None:
             raise ValueError(f"Kindex config file not found: {config_path}")
         if p.exists():
@@ -1238,9 +1239,9 @@ def _load_config(
             # with --project-path would silently open <cwd>/.kindex-data, and
             # a run from a subdirectory would split the graph.
             raw_dd = data.get("data_dir")
-            if raw_dd and not Path(str(raw_dd)).expanduser().is_absolute():
+            if raw_dd and not platform_io.expanduser(Path(str(raw_dd))).is_absolute():
                 config_root = p.parent.parent if p.parent.name == ".kin" else p.parent
-                data["data_dir"] = str(config_root / Path(str(raw_dd)).expanduser())
+                data["data_dir"] = str(config_root / platform_io.expanduser(Path(str(raw_dd))))
             if data.get("data_dir"):
                 project_data_dir = str(data["data_dir"])
             merged = _deep_merge(merged, data)
@@ -1289,7 +1290,7 @@ def _load_config(
     explicit_canonical = bool(data_dir and canonical)
     declared_local = False
     if project_data_dir:
-        declared_path = Path(project_data_dir).expanduser().resolve()
+        declared_path = platform_io.expanduser(Path(project_data_dir)).resolve()
         declared_local = (declared_path.is_relative_to(project_root.resolve())
                           and _same_path(cfg.data_dir, declared_path)
                           and not _same_path(declared_path, _resolve_path(global_data_dir)))
@@ -1314,7 +1315,7 @@ def _override_data_dir(config: Config, data_dir: str | Path | None) -> Config:
         return config
     if config.active_profile:
         try:
-            same = Path(data_dir).expanduser().resolve() == Path(config.data_dir).expanduser().resolve()
+            same = platform_io.expanduser(Path(data_dir)).resolve() == platform_io.expanduser(Path(config.data_dir)).resolve()
         except (OSError, ValueError):
             same = False
         if not same:
@@ -1367,7 +1368,7 @@ def _resolve_profile(cfg: Config, explicit: str | None,
         best: tuple[int, str] | None = None
         for name, entry in cfg.profiles.items():
             for root in entry.roots:
-                rp = Path(root).expanduser()
+                rp = platform_io.expanduser(Path(root))
                 try:
                     rp = rp.resolve()
                 except OSError:
@@ -1394,7 +1395,7 @@ def _anchor_profile_dirs(cfg: Config, profiles_base: Path | None) -> None:
     if profiles_base is None:
         return
     for entry in cfg.profiles.values():
-        data_dir = Path(entry.data_dir).expanduser()
+        data_dir = platform_io.expanduser(Path(entry.data_dir))
         if not data_dir.is_absolute():
             entry.data_dir = str(profiles_base / data_dir)
 
@@ -1408,7 +1409,7 @@ def _activate_profile(cfg: Config, name: str, source: str,
             f"known profiles: {known}"
         )
     cfg._legacy_data_dir = cfg.data_dir
-    profile_dir = Path(cfg.profiles[name].data_dir).expanduser()
+    profile_dir = platform_io.expanduser(Path(cfg.profiles[name].data_dir))
     if not profile_dir.is_absolute():
         # Relative to the config that declared it, not to wherever the
         # process runs (which made one profile a store per directory).
@@ -1513,6 +1514,65 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view):]
 
 
+def _cap_degraded_ledger_windows(path: Path) -> None:
+    """The cap where an open file cannot be replaced (Windows), under the
+    cap's lock. The ledger is first moved aside: the move fails while an
+    appender holds it open (the cap is then declined), and once it succeeds
+    no append can reach the moved file, so it is read whole. The trimmed
+    ledger is renamed back without replacing; a ledger appenders created in
+    the meantime is moved aside and folded in after it. A run that cannot
+    finish appends what it holds instead (R4.1: no silent loss), and a
+    moved-aside file a crash left behind is read first on the next cap."""
+    import tempfile
+
+    binary = getattr(os, "O_BINARY", 0)  # os.open is text mode on Windows: \n became \r\n
+    aside = path.with_name(path.name + ".capping")
+    held = aside.read_bytes() if aside.exists() else b""
+    try:
+        os.replace(path, aside)
+    except OSError:
+        return  # an appender has it open: decline, the file grows for now
+    held += aside.read_bytes()
+    lines = held.splitlines(keepends=True)
+    if lines and not lines[-1].endswith(b"\n"):
+        lines[-1] += b"\n"
+    content = b"".join(lines[-_DEGRADED_KEEP_LINES:])
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+            _write_all(fd, content)
+        finally:
+            os.close(fd)
+        for _ in range(3):
+            try:
+                os.rename(tmp, path)  # never replaces on Windows
+                break
+            except FileExistsError:
+                pass
+            try:
+                os.replace(path, aside)  # fresh appends: fold them in after
+            except OSError:
+                continue
+            fresh = aside.read_bytes()
+            content += fresh
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_APPEND | binary)
+            try:
+                _write_all(fd, fresh)
+            finally:
+                os.close(fd)
+        else:
+            fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT | binary, 0o600)
+            try:
+                _write_all(fd, content)
+            finally:
+                os.close(fd)
+        aside.unlink(missing_ok=True)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _try_cap_degraded_ledger(path: Path) -> None:
     """Try to cap the ledger under a non-blocking lock. If the lock is
     unavailable, decline (the file grows temporarily). When the cap runs,
@@ -1520,7 +1580,7 @@ def _try_cap_degraded_ledger(path: Path) -> None:
     the read but before the replace goes to the old inode — the cap
     recovers it by re-reading the old inode's tail after the replace
     (R4.1: no silent loss). Never blocks."""
-    import fcntl
+    from . import platform_io
 
     try:
         if path.stat().st_size <= _DEGRADED_MAX_BYTES:
@@ -1531,9 +1591,13 @@ def _try_cap_degraded_ledger(path: Path) -> None:
         return
     try:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            platform_io.lock(lock_fd, blocking=False)
         except (BlockingIOError, OSError):
             return  # Lock unavailable — decline the cap, never block
+
+        if os.name == "nt":
+            _cap_degraded_ledger_windows(path)
+            return
 
         # Keep a handle to the current inode so we can detect appends
         # that land after our read but before os.replace.
@@ -1581,7 +1645,7 @@ def _try_cap_degraded_ledger(path: Path) -> None:
         pass
     finally:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            platform_io.unlock(lock_fd)
         except Exception:
             pass
         os.close(lock_fd)

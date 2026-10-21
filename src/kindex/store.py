@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from . import platform_io
+from .platform_io import open_nofollow
 from .privacy import POLICY_VERSION, protect_logger, redact, redact_serialized, redact_text
 from .privacy import redacting_print as print
 
@@ -401,7 +403,7 @@ class Store:
             # symlinked .kin and hide it from the guard.
             if self._manage_project_storage:
                 from .project_store import ensure_local_ignored
-                ensure_local_ignored(Path(os.path.abspath(os.path.expanduser(self.config.data_dir))))
+                ensure_local_ignored(Path(os.path.abspath(platform_io.expanduser(self.config.data_dir))))
             self.config.data_path.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(
                 str(self.db_path),
@@ -725,12 +727,9 @@ class Store:
         lock_path = self.db_path.with_name(
             f".{self.db_path.name}.schema-migration-lock.sqlite3"
         )
-        flags = os.O_CREAT | os.O_RDWR
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
         lock_conn: sqlite3.Connection | None = None
         try:
-            fd = os.open(lock_path, flags, 0o600)
+            fd = open_nofollow(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 if hasattr(os, "fchmod"):
                     os.fchmod(fd, 0o600)
@@ -1702,7 +1701,12 @@ class Store:
         except ValueError:
             return since_iso
         if parsed.tzinfo is None:
-            parsed = parsed.astimezone()
+            try:
+                parsed = parsed.astimezone()
+            except (OSError, OverflowError):
+                # Windows' localtime() refuses instants before the epoch
+                # (e.g. since=1970-01-01 west of UTC): use the epoch's offset.
+                parsed = parsed.replace(tzinfo=datetime.fromtimestamp(86400).astimezone().tzinfo)
         return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     def activity_counts_since(self, since_iso: str) -> dict[str, int]:

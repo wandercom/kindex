@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .. import platform_io
 from .base import AdapterMeta, AdapterOption, IngestResult
 
 if TYPE_CHECKING:
@@ -20,7 +21,7 @@ log = protect_logger(logging.getLogger(__name__))
 # Must match fetch_conversations.py's DEFAULT_OUTPUT. These two drifted once
 # (fetcher -> ~/Downloads/_Claude, adapter -> ~/_Claude) and a bare
 # `kin ingest claude-web` silently ingested a stale store and reported success.
-DEFAULT_DIR = Path.home() / "_Claude" / "conversations"
+DEFAULT_DIR = platform_io.home() / "_Claude" / "conversations"
 
 
 def _extract_text(conv: dict, max_chars: int = 6000) -> str:

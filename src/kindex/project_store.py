@@ -7,6 +7,9 @@ import sqlite3
 import subprocess
 import tempfile
 
+from . import platform_io
+from .platform_io import open_nofollow
+
 
 class ProjectStoreConflict(ValueError):
     pass
@@ -90,7 +93,7 @@ def tracked_store_refusal(directory: Path) -> str | None:
     worktree, a store git cannot vouch for (git missing, timed out, or
     refusing the repository) is refused: the answer must come from git.
     """
-    directory = Path(directory).expanduser()
+    directory = platform_io.expanduser(Path(directory))
     if not directory.exists():
         return None
     real = directory.resolve()
@@ -160,7 +163,7 @@ def ensure_local_ignored(data_path: Path) -> None:
     existing = ignore.read_bytes() if ignore.exists() else b""
     if b"local/" in (line.rstrip(b"\r") for line in existing.splitlines()):
         return
-    fd = os.open(str(ignore), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    fd = open_nofollow(ignore, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
         os.write(fd, (b"\n" if existing and not existing.endswith(b"\n") else b"") + b"local/\n")
     finally:
@@ -171,7 +174,7 @@ def project_graph_registry_path() -> Path:
     """The machine's record of repo-local graphs opened outside any profile,
     beside the scheduler state."""
     base = os.environ.get("XDG_STATE_HOME", "").strip()
-    state = Path(base) if base else Path.home() / ".local" / "state"
+    state = Path(base) if base else platform_io.home() / ".local" / "state"
     return state / "kindex" / "project-graphs.json"
 
 

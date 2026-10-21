@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from . import platform_io
+
 if TYPE_CHECKING:
     from .config import Config
     from .store import Store
@@ -73,7 +75,7 @@ def _scheduler_state_path(config: "Config") -> Path:
     one."""
     import os
     base = os.environ.get("XDG_STATE_HOME", "").strip()
-    root = Path(base) if base else Path.home() / ".local" / "state"
+    root = Path(base) if base else platform_io.home() / ".local" / "state"
     return root / "kindex" / "scheduler-state.json"
 
 
@@ -98,11 +100,8 @@ class _StateLock:
         import os
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            import fcntl
-            fcntl.flock(self.fd, fcntl.LOCK_EX)
-        except ImportError:
-            pass
+        from . import platform_io
+        platform_io.lock(self.fd)
         return self
 
     def __exit__(self, *exc):
@@ -273,7 +272,7 @@ def apply_schedule(interval: int, config: "Config") -> dict:
 
 def _apply_launchd(interval: int, config: "Config") -> dict:
     """Update the launchd plist with a new interval."""
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.kindex.cron.plist"
+    plist_path = platform_io.home() / "Library" / "LaunchAgents" / "com.kindex.cron.plist"
 
     if not plist_path.exists():
         if interval == 0:
@@ -308,7 +307,8 @@ def _apply_launchd(interval: int, config: "Config") -> dict:
 
 def _apply_crontab(interval: int, config: "Config") -> dict:
     """Update the crontab entry with a new interval."""
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    from .setup import run_crontab
+    result = run_crontab("-l")
     if result.returncode != 0:
         return {"action": "skipped", "reason": "no crontab"}
 
@@ -339,8 +339,7 @@ def _apply_crontab(interval: int, config: "Config") -> dict:
             f"*/{minutes} * * * * {env} {kin_path} cron >> {log_dir}/cron.log 2>&1")
 
     new_crontab = "\n".join(new_lines) + "\n"
-    proc = subprocess.run(["crontab", "-"], input=new_crontab,
-                          capture_output=True, text=True)
+    proc = run_crontab("-", input=new_crontab)
     if proc.returncode == 0:
         return {"action": "disabled" if interval == 0 else "updated"}
     return {"action": "failed", "error": proc.stderr}

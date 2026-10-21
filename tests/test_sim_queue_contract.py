@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from kindex import platform_io
 
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
@@ -103,6 +104,7 @@ class SimQueueContract(unittest.TestCase):
             (self.root / name).mkdir(mode=0o700)
         home = self.root / 'home'
         self.env = {
+            **platform_io.essential_environment(),
             'HOME': str(home),
             'XDG_CONFIG_HOME': str(home / '.config'),
             'XDG_DATA_HOME': str(home / '.local' / 'share'),

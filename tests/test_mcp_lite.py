@@ -340,6 +340,7 @@ def test_hardlinked_database_escape_is_rejected(isolated, tmp_path, database_nam
 
 
 def test_ambient_provider_credentials_do_not_enable_network_calls(isolated, monkeypatch):
+    import ipaddress
     import socket
     import urllib.request
 
@@ -355,7 +356,16 @@ def test_ambient_provider_credentials_do_not_enable_network_calls(isolated, monk
     for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "VOYAGE_API_KEY",
                 "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         monkeypatch.setenv(key, "fixture-provider-credential")
-    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    real_connect = socket.socket.connect
+
+    def loopback_or_forbidden(sock, address, *args, **kwargs):
+        # Windows' asyncio builds its self-pipe with a loopback connect; that is
+        # no provider. Every other address is.
+        host = address[0] if isinstance(address, tuple) else None
+        if host is not None and ipaddress.ip_address(host).is_loopback:
+            return real_connect(sock, address, *args, **kwargs)
+        return forbidden(sock, address, *args, **kwargs)
+    monkeypatch.setattr(socket.socket, "connect", loopback_or_forbidden)
     monkeypatch.setattr(urllib.request, "urlopen", forbidden)
     monkeypatch.setattr(httpx.Client, "send", forbidden)
     monkeypatch.setattr(httpx.AsyncClient, "send", forbidden)

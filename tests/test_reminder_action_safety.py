@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shlex
 import time
 
 import pytest
@@ -160,7 +161,7 @@ def test_a_command_that_starts_a_background_service_finishes(tmp_path):
 def test_undecodable_output_is_not_a_failure(tmp_path):
     from kindex.actions import _run_shell
     marker = tmp_path / "ran"
-    result = _run_shell(f"printf 'done\\377\\n'; touch {marker}", timeout=10)
+    result = _run_shell(f"printf 'done\\377\\n'; touch {shlex.quote(str(marker))}", timeout=10)
     assert result["ok"] and marker.exists()
 
 

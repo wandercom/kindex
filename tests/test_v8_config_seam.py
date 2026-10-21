@@ -14,6 +14,7 @@ from __future__ import annotations
 import builtins
 import io
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -258,7 +259,7 @@ def test_r1_4_nested_context_restores_prior_binding_and_direct_rebind_errors(
 
     bind_root(outer)
     try:
-        with pytest.raises(RuntimeError, match=str(outer)):
+        with pytest.raises(RuntimeError, match=re.escape(str(outer))):
             bind_root(inner)
         assert active_root() == outer
         with bound_root(inner) as yielded:
