@@ -370,7 +370,7 @@ def resume_tag(
     return resumed
 
 
-def format_resume_context(
+def _format_native_resume_context(
     store: Store,
     name: str,
     max_tokens: int = 1500,
@@ -609,3 +609,47 @@ def format_resume_context(
         parts.pop()
     result = rendered()
     return result if fits(result) else ""
+
+
+def format_resume_context(
+    store: Store, name: str, max_tokens: int = 1500, *,
+    counter: Callable[[str], int] | None = None,
+    evaluation_time: str | datetime.datetime | None = None,
+    trusted_only: bool = True, project_path: str | None = None,
+    include_evidence: bool = False, evidence_session_id: str | None = None,
+    evidence_max_bytes: int = 4096, evidence_action: str = "",
+) -> str:
+    """Native resume, optionally followed by independently bounded evidence.
+
+    ``max_tokens`` is retained for API compatibility, but the default counter
+    is exact UTF-8 byte length. Callers that need provider-token guarantees
+    must pass that provider's exact deterministic ``counter``.
+
+    The disabled path delegates unchanged. Evidence requires an explicit stable
+    session identity and has an additional ``evidence_max_bytes`` UTF-8 byte
+    ceiling, independent of the native ``max_tokens`` budget and ``counter``.
+    """
+    evaluation = evaluation_time
+    if include_evidence:
+        if not evidence_session_id:
+            raise ValueError("Evidence resume requires an explicit stable session ID")
+        if not project_path:
+            raise ValueError("Evidence resume requires an explicit project path")
+        tag = get_tag(store, name, project_path=project_path)
+        if tag is None or tag["id"] != evidence_session_id:
+            raise ValueError("Evidence session ID does not match the resolved tag")
+        if evaluation is None:
+            evaluation = datetime.datetime.now(datetime.timezone.utc)
+        from .evidence import project_evidence
+        prepared = project_evidence(
+            store, session_id=evidence_session_id, project_path=project_path,
+            action=evidence_action, evaluation_time=evaluation,
+            max_aux_bytes=evidence_max_bytes,
+        )
+    native = _format_native_resume_context(
+        store, name, max_tokens, counter=counter, evaluation_time=evaluation,
+        trusted_only=trusted_only, project_path=project_path,
+    )
+    if include_evidence and prepared["text"]:
+        return native + ("\n" if native else "") + prepared["text"]
+    return native

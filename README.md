@@ -163,7 +163,11 @@ require the launcher's `--allow-kinbase-submit`; `--no-kinbase` omits Kinbase en
 See [repository-bound MCP](docs/mcp-lite.md)
 for configuration and the isolation boundary.
 
-The MCP server exposes 50+ native tools to supported clients: `search`, `add`, `context`, `show`, `ask`, `learn`, `link`, `edit`, `supersede`, `list_nodes`, `status`, `suggest`, `candidate_*`, `verify`, `invalidate`, `stale_check`, `graph_stats`, `graph_merge`, `dream`, `changelog`, `ingest`, `tag_start`, `tag_update`, `tag_resume`, `task_claim`, `coord_*`, `lock_acquire`, `lock_release`, `remind_*`, `mode_*`, and more.
+The MCP server exposes 50+ native tools to supported clients: `search`, `add`, `context`, `show`, `ask`, `learn`, `link`, `edit`, `supersede`, `list_nodes`, `status`, `suggest`, `candidate_*`, `verify`, `invalidate`, `stale_check`, `graph_stats`, `graph_merge`, `dream`, `changelog`, `ingest`, `tag_start`, `tag_update`, `tag_resume`, `query_context`, `task_claim`, `coord_*`, `lock_acquire`, `lock_release`, `remind_*`, `mode_*`, and more.
+
+For explicitly scoped read-only query preparation and optional additive retained
+evidence, see [query context](docs/query-context.md). The supported pilot paths
+are `kin context-query` and full MCP `query_context`.
 
 For coding agents, install both the MCP server and the instruction file. The
 instruction file tells the model how to use kindex: start a session tag, read
