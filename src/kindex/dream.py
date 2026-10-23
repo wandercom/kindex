@@ -802,7 +802,7 @@ def detach_dream(config: Config, mode: str = "lightweight", *, force: bool = Fal
 
     cmd = [kin_path, "dream", f"--{mode}"]
 
-    with open(log_file, "a") as log_fd:
+    with open(log_file, "a", encoding="utf-8") as log_fd:
         proc = subprocess.Popen(
             cmd,
             start_new_session=True,

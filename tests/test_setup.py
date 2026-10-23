@@ -677,6 +677,25 @@ class TestSetupCursor:
 
 
 class TestSetupCron:
+    def test_setup_cron_reports_legacy_scheduler_state_without_traceback(self, tmp_path):
+        import os
+
+        state_home = tmp_path / "state"
+        state_file = state_home / "kindex" / "scheduler-state.json"
+        state_file.parent.mkdir(parents=True)
+        raw = '{"stores":{"C:/Users/José/db.sqlite":{}},"applied":60}'.encode("cp1252")
+        state_file.write_bytes(raw)
+        env = {**os.environ, "XDG_STATE_HOME": str(state_home)}
+        result = subprocess.run(
+            [sys.executable, "-m", "kindex.cli", "setup-cron", "--method", "launchd",
+             "--dry-run", "--data-dir", str(tmp_path / "data")],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert result.returncode == 2
+        assert "Back it up and convert a copy" in result.stderr
+        assert "Traceback" not in result.stderr
+        assert state_file.read_bytes() == raw
+
     def test_setup_cron_dry_run(self, tmp_path):
         d = str(tmp_path)
         run("init", data_dir=d)

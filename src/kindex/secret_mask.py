@@ -177,7 +177,7 @@ class SecretMask:
                     continue
                 self._stamps[path] = stamps[path]
                 try:
-                    text = path.read_text(errors="replace")
+                    text = path.read_text(errors="replace", encoding="utf-8")
                 except OSError as error:
                     self._pairs[path] = []
                     if path not in self._warned:

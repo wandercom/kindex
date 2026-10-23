@@ -40,17 +40,17 @@ def install_hooks(repo_path: str | Path, config: "Config") -> list[str]:
 '''
 
     if pre_commit.exists():
-        existing = pre_commit.read_text()
+        existing = pre_commit.read_text(encoding="utf-8")
         if "kin policy check" in existing:
             actions.append("pre-commit hook already has Kindex policy integration")
         else:
-            with open(pre_commit, "a") as f:
+            with open(pre_commit, "a", encoding="utf-8") as f:
                 f.write("\n# --- Kindex integration ---\n")
                 f.write(pre_commit_content.split("\n", 1)[1])
             pre_commit.chmod(0o755)
             actions.append("Appended Kindex to existing pre-commit hook")
     else:
-        pre_commit.write_text(pre_commit_content)
+        pre_commit.write_text(pre_commit_content, encoding="utf-8")
         pre_commit.chmod(0o755)
         actions.append("Created pre-commit hook")
 
@@ -65,18 +65,18 @@ AUTHOR=$(git log -1 --pretty=%an)
 '''
 
     if post_commit.exists():
-        existing = post_commit.read_text()
+        existing = post_commit.read_text(encoding="utf-8")
         if "kindex" in existing.lower() or "kin add" in existing:
             actions.append("post-commit hook already has Kindex integration")
         else:
             # Append to existing hook
-            with open(post_commit, "a") as f:
+            with open(post_commit, "a", encoding="utf-8") as f:
                 f.write("\n# --- Kindex integration ---\n")
                 f.write(post_commit_content.split("\n", 1)[1])  # Skip shebang
             post_commit.chmod(0o755)
             actions.append("Appended Kindex to existing post-commit hook")
     else:
-        post_commit.write_text(post_commit_content)
+        post_commit.write_text(post_commit_content, encoding="utf-8")
         post_commit.chmod(0o755)
         actions.append("Created post-commit hook")
 
@@ -89,17 +89,17 @@ AUTHOR=$(git log -1 --pretty=%an)
 '''
 
     if pre_push.exists():
-        existing = pre_push.read_text()
+        existing = pre_push.read_text(encoding="utf-8")
         if "kin policy check" in existing:
             actions.append("pre-push hook already has Kindex integration")
         else:
-            with open(pre_push, "a") as f:
+            with open(pre_push, "a", encoding="utf-8") as f:
                 f.write("\n# --- Kindex integration ---\n")
                 f.write(pre_push_content.split("\n", 1)[1])
             pre_push.chmod(0o755)
             actions.append("Appended Kindex to existing pre-push hook")
     else:
-        pre_push.write_text(pre_push_content)
+        pre_push.write_text(pre_push_content, encoding="utf-8")
         pre_push.chmod(0o755)
         actions.append("Created pre-push hook")
 
@@ -116,7 +116,7 @@ def uninstall_hooks(repo_path: str | Path) -> list[str]:
     for hook_name in ["pre-commit", "post-commit", "pre-push"]:
         hook_path = hooks_dir / hook_name
         if hook_path.exists():
-            content = hook_path.read_text()
+            content = hook_path.read_text(encoding="utf-8")
             if "Kindex" in content:
                 # Remove Kindex section
                 lines = content.split("\n")
@@ -137,7 +137,7 @@ def uninstall_hooks(repo_path: str | Path) -> list[str]:
                     hook_path.unlink()
                     actions.append(f"Removed {hook_name} hook (was only Kindex)")
                 else:
-                    hook_path.write_text(new_content)
+                    hook_path.write_text(new_content, encoding="utf-8")
                     actions.append(f"Removed Kindex section from {hook_name}")
 
     if not actions:

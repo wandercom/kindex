@@ -20,7 +20,7 @@ def _atomic_json(path: Path, value: dict) -> None:
     import tempfile
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".kindex-install-", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(value, indent=2) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -165,9 +165,9 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
     if settings.is_symlink() or record_path.is_symlink():
         raise ValueError("Refusing linked Claude integration settings")
     settings_before = settings.read_bytes() if settings.exists() else None
-    data = json.loads(settings.read_text()) if settings.exists() else {}
+    data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
     original_data = json.loads(json.dumps(data))
-    record = json.loads(record_path.read_text()) if record_path.exists() else {}
+    record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else {}
     kin_path = _find_kin_path()
     commands = _known_commands(config, kin_path) | set(record.get("commands", [])) | set(retire_commands or [])
     removed = remove_owned(data, commands)
@@ -205,7 +205,7 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
             data.setdefault("env", {})["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] = "1"
         manifest_path = plugin / ".claude-plugin" / "plugin.json"
         if plugin.exists() and (not manifest_path.exists() or
-                               json.loads(manifest_path.read_text()).get("name") != PLUGIN_NAME):
+                               json.loads(manifest_path.read_text(encoding="utf-8")).get("name") != PLUGIN_NAME):
             raise ValueError(f"Refusing to overwrite an unowned plugin directory: {plugin}")
         if plugin.is_symlink() or (plugin.exists() and any(path.is_symlink() for path in plugin.rglob("*"))):
             raise ValueError("Refusing linked files in installed Kindex plugin")
@@ -222,7 +222,7 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
             (staged_plugin / "hooks" / "runtime.ts").write_text("export default " + json.dumps({
                 "argv": _kin_command_parts(kin_path),
                 "signetExecutable": shutil.which("signet-eval") or "",
-            }) + ";\n")
+            }) + ";\n", encoding="utf-8")
     elif not uninstall:
         manifest = legacy_manifest(config, kin_path)
         for event, entries in manifest.items():
@@ -265,6 +265,6 @@ def install(config, *, mode="legacy", dry_run=False, uninstall=False,
                 shutil.copy2(settings, backup)
         if data != original_data or not settings.exists():
             _atomic_json(settings, data)
-        if not record_path.exists() or json.loads(record_path.read_text()) != record:
+        if not record_path.exists() or json.loads(record_path.read_text(encoding="utf-8")) != record:
             _atomic_json(record_path, record)
     return actions

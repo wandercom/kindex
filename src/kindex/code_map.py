@@ -480,7 +480,9 @@ def ingest_understand_anything(
         return IngestResult(errors=[f"Understand-Anything graph not found: {graph_path}"])
 
     try:
-        graph = json.loads(graph_path.read_text())
+        from .setup import require_kin_text_attributes
+        require_kin_text_attributes(graph_path)
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         return IngestResult(errors=[f"Invalid JSON in {graph_path}: {e}"])
 

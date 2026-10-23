@@ -41,7 +41,7 @@ def _encode_claude_project_dir(path: str) -> str:
 def _session_cwd(jsonl_path: Path, max_lines: int = 10) -> str:
     """Best-effort cwd extraction from a session JSONL's leading entries."""
     try:
-        with open(jsonl_path, "r", errors="replace") as f:
+        with open(jsonl_path, "r", errors="replace", encoding="utf-8") as f:
             for i, line in enumerate(f):
                 if i >= max_lines:
                     break

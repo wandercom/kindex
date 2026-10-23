@@ -70,7 +70,7 @@ def _codex_rollout_id(path: Path) -> str:
     import json
 
     try:
-        with open(path, errors="replace") as handle:
+        with open(path, errors="replace", encoding="utf-8") as handle:
             for _, line in zip(range(20), handle):
                 try:
                     entry = json.loads(line)

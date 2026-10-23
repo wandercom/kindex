@@ -400,7 +400,9 @@ def test_setup_merge_driver_install_is_idempotent_and_reversible(tmp_path):
 
     uninstall_merge_driver(root)
     assert _git(repo, "config", "merge.kindex.driver").returncode != 0
-    assert "merge=kindex" not in (repo / ".gitattributes").read_text()
+    attrs = (repo / ".gitattributes").read_text()
+    assert "merge=kindex" not in attrs
+    assert ".kin/config text eol=lf" in attrs
 
 
 def _init_repo(repo):
@@ -471,4 +473,6 @@ def test_kin_index_respects_no_merge_driver_flag(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert _git(repo, "config", "merge.kindex.driver").returncode != 0
-    assert not (repo / ".gitattributes").exists()
+    attrs = (repo / ".gitattributes").read_text(encoding="utf-8")
+    assert ".kin/*.json text eol=lf" in attrs
+    assert "merge=kindex" not in attrs

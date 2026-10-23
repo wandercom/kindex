@@ -3,3 +3,9 @@
 .kin/code-map.json merge=kindex
 .kin/events/** -text -diff -merge
 .kin/manifests/** -text -diff -merge
+
+# Kindex tracked text: UTF-8 bytes and LF in every worktree
+.kin/config text eol=lf !working-tree-encoding -filter -ident
+.kin/*.json text eol=lf !working-tree-encoding -filter -ident
+.kin/*.jsonl text eol=lf !working-tree-encoding -filter -ident
+.kin/*.md text eol=lf !working-tree-encoding -filter -ident

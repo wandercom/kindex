@@ -63,7 +63,7 @@ def settings():
     path = health_dir() / "config.json"
     result = dict(DEFAULTS)
     if path.exists():
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("Health configuration must be an object")
         for key, default in DEFAULTS.items():
@@ -502,7 +502,7 @@ def install_monitor(*, uninstall=False, dry_run=False):
     plist = Path.home() / "Library/LaunchAgents" / (label + ".plist")
     command = [sys.executable, "-m", "kindex.supervisor_health", "check", "--json", "--quiet"]
     configuration = root / "config.json"
-    old = json.loads(configuration.read_text()) if configuration.exists() else {}
+    old = json.loads(configuration.read_text(encoding="utf-8")) if configuration.exists() else {}
     if not isinstance(old, dict):
         raise ValueError("Health configuration must be an object")
     updated = {**old, "enabled": not uninstall}

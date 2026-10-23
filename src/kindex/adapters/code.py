@@ -292,7 +292,7 @@ def _run_ctags_once(files: list[Path], repo_root: Path) -> tuple[list[dict], boo
     if not files:
         return [], False
     # Write file list to a temp file to avoid arg length limits
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".txt", delete=False) as f:
         for path in files:
             f.write(str(path) + "\n")
         listfile = f.name
@@ -434,7 +434,7 @@ def _unity_guid(path: Path) -> str:
     try:
         if not meta.is_file():
             return ""
-        match = _UNITY_GUID_RE.search(meta.read_text(errors="replace")[:2048])
+        match = _UNITY_GUID_RE.search(meta.read_text(errors="replace", encoding="utf-8")[:2048])
     except OSError:
         return ""
     return match.group(1).lower() if match else ""
@@ -578,7 +578,7 @@ def _build_cscope_db(files: list[Path], repo_root: Path) -> Path | None:
 
     tmpdir = Path(tempfile.mkdtemp(prefix="kindex-cscope-"))
     namefile = tmpdir / "cscope.files"
-    namefile.write_text("\n".join(str(f) for f in c_files) + "\n")
+    namefile.write_text("\n".join(str(f) for f in c_files) + "\n", encoding="utf-8")
 
     try:
         r = subprocess.run(

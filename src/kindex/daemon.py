@@ -27,7 +27,9 @@ def _step_failed(results: dict, step: str, error: BaseException) -> None:
     """A maintenance step that failed is reported in `errors` and the degraded
     ledger. It used to report 0 with no signal, so a failing drain looked like
     an empty queue."""
-    results.setdefault("errors", {})[step] = safe_error(error)
+    errors = results.setdefault("errors", {})
+    message = safe_error(error)
+    errors[step] = f"{errors[step]}\n{message}" if step in errors else message
     try:
         from .config import record_degraded
         record_degraded("cron", error)
@@ -75,7 +77,7 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
     results["sessions"] = session_count
 
     # 3. Process inbox items
-    inbox_count = _process_inbox(config, store, verbose=verbose)
+    inbox_count = _process_inbox(config, store, verbose=verbose, results=results)
     results["inbox"] = inbox_count
 
     # 4. Apply weight decay (nodes/edges + stigmergic pheromone trails)
@@ -548,16 +550,27 @@ def _cron_run_all(base_config: "Config", verbose: bool = False) -> list[dict]:
     return passes
 
 
-def _process_inbox(config: "Config", store: "Store", verbose: bool = False) -> int:
+def _process_inbox(config: "Config", store: "Store", verbose: bool = False,
+                   results: dict | None = None) -> int:
     """Process pending inbox items (markdown files in inbox/)."""
     inbox = config.inbox_dir
     if not inbox.exists():
         return 0
 
     count = 0
+    if results is None:
+        results = {}
     for md_file in sorted(inbox.glob("*.md")):
         try:
-            text = md_file.read_text(errors="replace").strip()
+            text = md_file.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            error = ValueError(
+                f"Inbox item {md_file} is not UTF-8; file left unprocessed. "
+                "Back it up and convert a copy after confirming its encoding."
+            )
+            _step_failed(results, "inbox", error)
+            results["inbox_decode_errors"] = results.get("inbox_decode_errors", 0) + 1
+            continue
         except OSError:
             continue
 

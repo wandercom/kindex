@@ -829,7 +829,7 @@ def write_inbox_item(
 
     fd, tmp_path = tempfile.mkstemp(dir=str(tmp_dir), suffix=".md", prefix="inbox-")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(file_content)
         # Atomic rename (same filesystem)
         os.rename(tmp_path, str(target))

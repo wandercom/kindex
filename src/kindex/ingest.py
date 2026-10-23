@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -85,7 +86,7 @@ def _project_slug(project_root: Path) -> str:
 def _infer_title(project_root: Path, claude_md: Path) -> str:
     """Infer project title from CLAUDE.md or directory name."""
     try:
-        text = claude_md.read_text(errors="replace")[:2000]
+        text = claude_md.read_text(errors="replace", encoding="utf-8")[:2000]
         # Look for a markdown heading
         for line in text.split("\n"):
             line = line.strip()
@@ -99,7 +100,7 @@ def _infer_title(project_root: Path, claude_md: Path) -> str:
 def _extract_project_context(claude_md: Path) -> str:
     """Extract the key content from a CLAUDE.md file."""
     try:
-        text = redact_text(claude_md.read_text(errors="replace"))
+        text = redact_text(claude_md.read_text(errors="replace", encoding="utf-8"))
         # Limit to reasonable size but keep the important stuff
         if len(text) > 4000:
             text = text[:4000] + "\n...(truncated)"
@@ -371,7 +372,7 @@ def _extract_codex_session(jsonl_path: Path, max_chars: int = 8000) -> tuple[dic
     total_len = 0
 
     try:
-        with open(jsonl_path, "r", errors="replace") as f:
+        with open(jsonl_path, "r", errors="replace", encoding="utf-8") as f:
             for line in f:
                 if total_len >= max_chars:
                     break
@@ -611,7 +612,25 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
             slug = _project_slug(project_root)
 
             try:
-                data = yaml.safe_load(config_file.read_text()) or {}
+                from .setup import require_kin_text_attributes
+                require_kin_text_attributes(config_file)
+                data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+            except UnicodeDecodeError:
+                from .config import record_degraded
+                error = ValueError(
+                    f"Project config {config_file} is not UTF-8; file left unchanged. "
+                    "Back it up and convert a copy after confirming its encoding."
+                )
+                record_degraded("scan-kin-files", error, config)
+                if verbose:
+                    print(f"  {error}", file=sys.stderr)
+                continue
+            except ValueError as error:
+                from .config import record_degraded
+                record_degraded("scan-kin-files", error, config)
+                if verbose:
+                    print(f"  {error}", file=sys.stderr)
+                continue
             except Exception:
                 continue
 
@@ -628,6 +647,16 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                     from .config import _load_kin_config_with_inheritance
                     raw_dir = _load_kin_config_with_inheritance(
                         config_file).get("data_dir")
+                except UnicodeError:
+                    from .config import record_degraded
+                    error = ValueError(
+                        f"Project config inherited by {config_file} is not UTF-8; "
+                        "source files left unchanged. Back them up and convert "
+                        "a copy after confirming their encoding."
+                    )
+                    record_degraded("scan-kin-files", error, config)
+                    print(f"  {error}", file=sys.stderr)
+                    raw_dir = None
                 except Exception:
                     raw_dir = None
             if raw_dir:
@@ -801,8 +830,15 @@ def _resolve_kin_recursive(
     if not resolved.is_file():
         return
 
+    from .setup import require_kin_text_attributes
+    require_kin_text_attributes(resolved)
     try:
-        data = yaml.safe_load(resolved.read_text()) or {}
+        data = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    except UnicodeDecodeError as exc:
+        raise UnicodeError(
+            f"Project config {resolved} is not UTF-8; file left unchanged. "
+            "Back it up and convert a copy after confirming its encoding."
+        ) from exc
     except Exception:
         return
 
@@ -906,7 +942,7 @@ def load_synonym_rings(config: "Config", store: "Store", verbose: bool = False) 
     count = 0
     for syn_file in sorted(syn_dir.glob("*.syn")):
         try:
-            data = yaml.safe_load(syn_file.read_text()) or {}
+            data = yaml.safe_load(syn_file.read_text(encoding="utf-8")) or {}
         except Exception:
             if verbose:
                 print(f"  Warning: could not parse {syn_file.name}")
@@ -1143,7 +1179,9 @@ def _kin_declared_audience(output_dir: Path) -> str:
     config_file = output_dir / ".kin" / "config"
     try:
         if config_file.is_file():
-            data = yaml.safe_load(config_file.read_text()) or {}
+            from .setup import require_kin_text_attributes
+            require_kin_text_attributes(config_file)
+            data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
             return str(data.get("audience", "") or "")
     except (OSError, yaml.YAMLError):
         pass
@@ -1226,5 +1264,8 @@ def write_kin_index(store: "Store", output_dir: Path) -> Path:
 
     output_path = output_dir / ".kin" / "index.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
+    from .setup import prepare_kin_text_write
+    prepare_kin_text_write(output_path)
+    output_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n",
+                           encoding="utf-8", newline="\n")
     return output_path

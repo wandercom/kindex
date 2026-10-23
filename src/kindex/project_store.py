@@ -219,7 +219,7 @@ def register_project_graph(root: Path, data_dir: Path) -> None:
 
 def _merge_project_graph(path: Path, root: Path, data_dir: Path) -> None:
     try:
-        current = json.loads(path.read_text()) if path.exists() else {}
+        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (OSError, ValueError):
         current = {}
     if not isinstance(current, dict):
@@ -228,14 +228,15 @@ def _merge_project_graph(path: Path, root: Path, data_dir: Path) -> None:
         return
     current[str(root)] = str(data_dir)
     with tempfile.NamedTemporaryFile(
-            "w", dir=path.parent, delete=False, prefix=".project-graphs.") as out:
+            "w", encoding="utf-8", dir=path.parent, delete=False,
+            prefix=".project-graphs.") as out:
         json.dump(current, out, sort_keys=True)
     os.replace(out.name, path)
 
 
 def registered_project_graphs() -> dict[str, str]:
     try:
-        current = json.loads(project_graph_registry_path().read_text())
+        current = json.loads(project_graph_registry_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {str(k): str(v) for k, v in current.items()} if isinstance(current, dict) else {}

@@ -4,6 +4,52 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- Kindex reads and writes text files as UTF-8, including project `.kin/config`,
+  inbox items, and scheduler state. On Windows, older Kindex versions could
+  write non-ASCII text using the system code page. Files containing only ASCII
+  need no conversion. An invalid UTF-8 inbox item is left pending, and invalid
+  scheduler state is left unchanged; Kindex reports the affected path so it can
+  be repaired manually.
+
+  If a previously written text file reports an encoding error, stop Kindex's
+  background jobs and back up the original file and the selected Kindex graph
+  database. Confirm the file's original encoding before conversion; cp1252 is
+  common on older Western Windows installations but is not guaranteed. For a
+  file confirmed to be cp1252, create a UTF-8 copy with Python:
+
+  ```python
+  from pathlib import Path
+
+  source = Path("PATH_FROM_THE_ERROR")
+  raw = source.read_bytes()
+  try:
+      raw.decode("utf-8")
+  except UnicodeDecodeError:
+      pass
+  else:
+      raise SystemExit("Already valid UTF-8; inspect its text instead")
+  candidate = source.with_name(source.name + ".utf8")
+  candidate.write_bytes(raw.decode("cp1252").encode("utf-8"))
+  print(candidate)
+  ```
+
+  Review the copy's text and, for a Git-tracked file, its diff before replacing
+  the original. Then restart Kindex and retry the failed operation. Git tracks
+  selected `.kin` artifacts, but `.kin/local/` and database files are ignored;
+  generated `.kin/index.json` and `.kin/code-map.json` are not complete database
+  backups. Preserve those local files during repair.
+
+  Git can also convert tracked `.kin` files during checkout or `git add` when
+  attributes specify another working-tree encoding or a content filter.
+  `kin index`, `kin export code-map`, `kin repo-memory publish`, and
+  `kin setup-merge` now install UTF-8/LF text rules for tracked `.kin` text.
+  `kin doctor` reports effective attribute overrides and invalid UTF-8 before
+  opening the graph; Kindex refuses affected reads and writes. If Git has
+  already transformed a file, changing `.gitattributes` alone does not repair
+  it: preserve the file and inspect the committed blob before restoring or
+  converting a copy. `kin doctor --fix` does not rewrite affected files.
+
 ### Added
 - `kindex-remote` serves the graph to agents on other machines over streamable
   HTTP behind Cloudflare Access (extra `kindex[remote]`). It binds loopback

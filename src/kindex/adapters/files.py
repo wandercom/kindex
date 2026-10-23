@@ -62,7 +62,7 @@ def scan_registered_files(store: "Store", verbose: bool = False) -> int:
 
                 # Read file content (first 2000 chars)
                 try:
-                    content = path.read_text(errors="replace")[:2000]
+                    content = path.read_text(errors="replace", encoding="utf-8")[:2000]
                     new_content_parts.append(f"## {path.name}\n{content}")
                 except OSError:
                     pass
@@ -126,7 +126,7 @@ def ingest_directory(store: "Store", directory: str | Path,
             continue
 
         try:
-            content = path.read_text(errors="replace")[:4000]
+            content = path.read_text(errors="replace", encoding="utf-8")[:4000]
         except OSError:
             continue
 

@@ -66,7 +66,7 @@ def load_json(path: str | Path) -> dict | None:
     p = Path(path)
     if not p.exists():
         return None
-    text = p.read_text()
+    text = p.read_text(encoding="utf-8")
     if not text.strip():
         return None
     try:

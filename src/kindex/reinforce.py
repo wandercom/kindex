@@ -155,7 +155,7 @@ def _bounded_trace(transcript_path: str, max_chars: int) -> str:
         if not transcript_path or not os.path.exists(transcript_path):
             return ""
         size = os.path.getsize(transcript_path)
-        with open(transcript_path, "r", errors="replace") as fh:
+        with open(transcript_path, "r", errors="replace", encoding="utf-8") as fh:
             if size > max_chars:
                 fh.seek(size - max_chars)
             return redact_text(fh.read())

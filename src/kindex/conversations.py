@@ -213,7 +213,7 @@ def retract_conversation(store: Store, conversation_id: str) -> int:
 
 
 def load_conversations(path: Path) -> list[dict]:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     try:
         data = json.loads(text)
         return data if isinstance(data, list) else [data]
