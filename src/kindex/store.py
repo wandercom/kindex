@@ -339,6 +339,17 @@ def node_retired(node: dict) -> bool:
 #: How long the activity log keeps an entry (days).
 ACTIVITY_RETENTION_DAYS = 365
 
+
+def unconfirmed_digest_directive(node: dict) -> bool:
+    """A directive `kin digest` read from an imported conversation that nobody has
+    confirmed yet (`kin set-state <id> confirmed true`). Such a directive stays
+    out of session context and standing directives: an instruction from an old
+    chat is not a standing instruction to coding agents."""
+    extra = node.get("extra") or {}
+    state = extra.get("current_state") if isinstance(extra, dict) else None
+    return (node.get("prov_activity") == "conversation-digest"
+            and not (isinstance(state, dict) and state.get("confirmed") is True))
+
 class Store:
     """SQLite-backed knowledge graph with FTS5 full-text search.
 
@@ -4553,7 +4564,8 @@ class Store:
         constraints = self.active_constraints(trigger)
         checkpoints = self.active_checkpoints(trigger)
         watches = self.active_watches()
-        directives = self.all_nodes(node_type="directive", status="active")
+        directives = [d for d in self.all_nodes(node_type="directive", status="active")
+                      if not unconfirmed_digest_directive(d)]
 
         if owner:
             watches = [w for w in watches if (w.get("extra") or {}).get("owner") == owner]

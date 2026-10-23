@@ -215,7 +215,7 @@ def _recency_score(store: Store, node_ids: set[str], now: datetime | None = None
     results = []
     now = now or datetime.now()
     for nid in node_ids:
-        node = store.get_node(nid)
+        node = store.peek_node(nid)  # scoring a candidate is not a use of it
         if not node:
             continue
         ts = node.get("updated_at") or node.get("created_at")
@@ -235,7 +235,7 @@ def _node_weight_scores(store: Store, node_ids: set[str]) -> list[tuple[str, flo
     """Score nodes by their stored weight (already [0, 1] range)."""
     results = []
     for nid in node_ids:
-        node = store.get_node(nid)
+        node = store.peek_node(nid)  # scoring a candidate is not a use of it
         if node:
             results.append((nid, node.get("weight", 0.5)))
     return results

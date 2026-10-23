@@ -234,7 +234,9 @@ def test_a_small_verification_cap_still_answers_with_a_plain_draft(store, tmp_pa
         return _reply("Your first kayak trip was on the river.")
 
     monkeypatch.setattr(answer_mod, "get_client", lambda *a, **kw: SimpleNamespace(messages=SimpleNamespace(create=create)))
-    cfg = Config(data_dir=str(tmp_path), llm=LLMConfig(enabled=True, provider="openai", model="m"))
+    # The benchmarked reading rules fill most of a 4,000-token verification cap.
+    cfg = Config(data_dir=str(tmp_path), llm=LLMConfig(enabled=True, provider="openai", model="m"),
+                 ask={"preset": "benchmark"})
     cfg.ask = cfg.ask.model_copy(update={"verify": True, "verify_input_tokens": 4000})
     result = answer_mod.answer_question(store, "Where was my first kayak trip?", cfg, as_of="2024-03-15")
     assert result is not None and result.answer.startswith("Your first kayak trip")

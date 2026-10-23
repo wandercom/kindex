@@ -12,8 +12,9 @@ what moved those benchmarks for other memory systems:
 - Every search runs through `hybrid_search`; the rankings are merged by
   reciprocal rank fusion.
 - The answer model sees the retrieved nodes in full, each with the date it was
-  recorded, in chronological order, inside a token budget (24k by default:
-  readers did worse with 12k), together with today's date and the graph's
+  recorded, in chronological order, inside a token budget (ask.context_tokens
+  for a single answer, ask.wide_context_tokens for counts, lists and
+  summaries; config.AskConfig), together with today's date and the graph's
   standing directives.
 - The answer prompt states rules for reading dated evidence: latest value
   wins, count every distinct instance, compute dates explicitly, separate
@@ -78,6 +79,13 @@ ANSWER_RULES = {
     'premise': 'Premises: if the question gets a small detail wrong (a date, a year, a number or a spelling) but clearly means one recorded event or item, answer about that event or item; do not point out the discrepancy, and give its date only if the question asks when. If it names a different person, title, role, course or thing than any the records hold, do not substitute the recorded one: say the one named is not recorded, then mention the related one.',
     'direct': 'Be direct: lead with the answer and commit to the best-supported one. Do not open with a question back to the user; answer the most likely reading (you may name another reading after). Do not add caveats the evidence does not support.',
 }
+# For an agent asking about its own work: a wrong version, name or date in the
+# question is worth correcting (ask.premise_corrections; the benchmarked rule
+# above answers without pointing it out, as the judges expect).
+PREMISE_CORRECTION = (
+    "Premises: if the question gets a detail wrong (a date, a number, a version, a name or a spelling) "
+    "but clearly means one recorded event or item, say briefly what the record says, then answer about "
+    "that item. If it names something the records do not hold, say so, then mention the related one.")
 # The answering rules each kind of question needs; the rest are left out of
 # the prompt. `ask.rules: all` sends every rule.
 INTENT_RULES = {
@@ -187,7 +195,8 @@ _OPTION_RULES = {
 }
 
 
-def answer_system(intent: str | None = None, needs_all: bool = False, *, options=None) -> str:
+def answer_system(intent: str | None = None, needs_all: bool = False, *, options=None,
+                  corrections: bool = False) -> str:
     """The answer model's instructions: how to read the evidence, then the
     answering rules for this kind of question (every rule when None), with
     the counting rule whenever the answer needs every instance."""
@@ -196,6 +205,8 @@ def answer_system(intent: str | None = None, needs_all: bool = False, *, options
         keys.insert(0, "count")
     rules = dict(ANSWER_RULES)
     head = _SYSTEM_HEAD
+    if getattr(options, "premise_corrections", corrections):
+        rules["premise"] = PREMISE_CORRECTION
     if options is not None:
         if options.dialogue_focus:
             rules["premise"] = _DIALOGUE_PREMISE
@@ -608,11 +619,18 @@ def every_fact(store: Store, cap_tokens: int) -> list[dict]:
 
 
 @_scope_nodes
-def standing_directives(store: Store) -> list[dict]:
+def standing_directives(store: Store, digest: bool = False) -> list[dict]:
+    """Active directives every answer follows. A directive `kin digest` read from
+    an imported conversation counts only once confirmed (`kin set-state <id>
+    confirmed true`), unless `digest` (ask.digest_directives) takes them all."""
+    from .store import unconfirmed_digest_directive
+
     today = date.today().isoformat()
     out = []
     for node in store.all_nodes(node_type="directive", limit=200):
         if node.get("status") in ("archived", "superseded") or node_expired(node, today=today):
+            continue
+        if not digest and unconfirmed_digest_directive(node):
             continue
         # Kinbase evidence is shown with its governance note where it was
         # retrieved, never as an instruction.
@@ -679,6 +697,8 @@ def informative_terms(terms: set[str], results: list[dict]) -> set[str]:
         return terms
     speakers: set[str] = set()
     for node in results:
+        if not conversation_chunk(node):
+            continue  # a note's title or "Key: value" line is not a speaker
         for line in (node_text(node) or "").split("\n"):
             match = _LINE_SPEAKER.match(line)
             if match:
@@ -1025,10 +1045,14 @@ def memory_scale(store: Store) -> float:
     """How much more evidence a question needs because the graph is large: a
     graph of thousands of nodes holds more competing mentions of anything (an
     earlier value, a near-duplicate) than one of a few hundred. 1 up to 1,000
-    nodes, then one more for each doubling, at most 3."""
+    nodes, then one more for each doubling, at most 3. Only imported
+    conversations and what `kin digest` wrote from them count: code, sessions,
+    decisions and tasks do not make a graph a large chat memory."""
     import math
 
-    count = store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    count = store.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE prov_activity IN ('conversation-ingest', 'conversation-digest')"
+    ).fetchone()[0]
     return min(3.0, max(1.0, 1.0 + math.log2(max(count, 1) / 1000)))
 
 
@@ -1252,6 +1276,33 @@ def annotate_dates(text: str, when: datetime | None, *, conservative: bool = Fal
         return f"{match.group(0)} [= {resolved}]" if resolved else match.group(0)
 
     return pattern.sub(sub, text)
+
+
+def conversation_chunk(node: dict) -> bool:
+    """Imported conversation text (a `kin ingest conversations` chunk), the only
+    nodes whose lines are speakers. A node without provenance counts when it
+    belongs to a conversation and is not a digest."""
+    activity = node.get("prov_activity")
+    if activity:
+        return activity == "conversation-ingest"
+    extra = node.get("extra") or {}
+    return isinstance(extra, dict) and extra.get("conversation_id") is not None and not extra.get("kind")
+
+
+def conversation_material(node: dict) -> bool:
+    """An imported conversation chunk or something `kin digest` wrote from one."""
+    activity = node.get("prov_activity")
+    if activity:
+        return activity in ("conversation-ingest", "conversation-digest")
+    extra = node.get("extra") or {}
+    return isinstance(extra, dict) and extra.get("conversation_id") is not None
+
+
+def undigested(results: list[dict]) -> bool:
+    """An answer that has to be found in conversation text with no digested facts
+    among the results: it gets the wide budget. Results with no conversation
+    material at all (a graph of decisions, code and sessions) do not."""
+    return any(conversation_material(n) for n in results) and not has_facts(results)
 
 
 def has_facts(results: list[dict]) -> bool:
@@ -1801,7 +1852,7 @@ def large_claim_denial_hits(store: Store, question: str) -> list[dict]:
         return []
     denial = re.compile(r"\bnever\b|\b(?:have|has|had) not\b|\bnot yet\b|"
                         r"\b(?:haven't|hasn't|hadn't)\b", re.I)
-    today = (_CLOCK.get() or datetime.now()).date().isoformat()
+    today = date.today().isoformat()  # expiry is real time, not the archive clock
     rows = store.conn.execute(
         "SELECT * FROM nodes WHERE status NOT IN ('archived', 'superseded') "
         "AND prov_activity = 'conversation-ingest' "
@@ -2167,7 +2218,7 @@ def large_slack_assembly(store: Store, results: list[dict], question: str,
         if (n.get("extra") or {}).get("conversation_id") is not None))
     candidates = []
     visible = " ".join(baseline.split())
-    today = (_CLOCK.get() or datetime.now()).date().isoformat()
+    today = date.today().isoformat()  # expiry is real time, not the archive clock
     for conv in conversations:
         rows = store.conn.execute(
             "SELECT id FROM nodes WHERE json_extract(extra, '$.conversation_id') = ? "
@@ -3548,6 +3599,8 @@ def named_dialogue(results: list[dict], look: int = 20) -> bool:
     assistant (`user: ...`, `assistant: ...`)."""
     names, assistant = set(), False
     for node in results[:look]:
+        if not conversation_chunk(node):
+            continue  # "Language: ...", "Rationale: ..." in notes and code are not speakers
         text = node.get("content") or ""
         roles = list(_ROLE_LINE.finditer(text))
         if roles:
@@ -3567,6 +3620,29 @@ def list_position(question: str) -> bool:
     27th parameter on that list"); an excerpt keeps only lines sharing the
     question's words, which drops the item asked for."""
     return bool(_LIST_POSITION.search(question))
+
+
+def shape_options(cfg, question: str, intent: str, store: Store | None, dialogue: bool):
+    """The ask options with the reading rules that fit one shape of question or
+    evidence kept only there: stopping at a missing recalled detail for questions
+    asking for particulars, dialogue focus for conversations between named people.
+    `kin ask` and MCP `ask` both answer with these. Without a `store`, the
+    named-dialogue (round 14) options are off."""
+    shaped = {}
+    if cfg.recall_only and not (intent == "fact" and _DETAILS.search(question)):
+        shaped["recall_only"] = False
+    if cfg.dialogue_focus and not dialogue:
+        shaped["dialogue_focus"] = False
+    if cfg.recall_relation and not dialogue:
+        shaped["recall_relation"] = False
+    if any(getattr(cfg, name) for name in ROUND14_OPTIONS):
+        shapes14 = round14_scope(question, intent, named=True)
+        active14 = any(getattr(cfg, name) and shapes14[name] for name in ROUND14_OPTIONS)
+        named14 = (store is not None and active14 and not cfg.verify and not cfg.count_inventory
+                   and memory_scale(store) <= 1.0 and named_memory(store))
+        shaped.update({name: bool(getattr(cfg, name) and shapes14[name] and named14)
+                       for name in ROUND14_OPTIONS})
+    return cfg.model_copy(update=shaped) if shaped else cfg
 
 
 def named_memory(store: Store, look: int = 20) -> bool:
@@ -3809,7 +3885,8 @@ def plain_draft(question: str, config: Config, client, ledger, as_of, team, inte
     left of the cap: the answer when a small cap cannot hold the configured
     reading rules or verification. None only when not even this fits."""
     cfg = config.ask
-    system = answer_system(intent if cfg.rules == "intent" else None, complete)
+    system = answer_system(intent if cfg.rules == "intent" else None, complete,
+                           corrections=cfg.premise_corrections)
     empty = answer_prompt(question, "", intent, as_of=as_of)
     budget = _input_left() - _prompt_cost(system, empty) - 300
     if budget < 100:
@@ -3979,24 +4056,11 @@ def _answer(store: Store, question: str, config: Config, client, ledger, as_of, 
     # Reading rules that fit one shape of question or evidence apply only there:
     # stopping at a missing recalled detail to questions asking for particulars,
     # dialogue focus to conversations between named people.
-    shaped = {}
     extended = cfg.plan_route or cfg.effort_route or cfg.recall_relation or cfg.archive_clock
     dialogue = bool(dialogue_sessions) or named_dialogue(results, look=len(results) if extended else 20)
-    if cfg.recall_only and not (intent == "fact" and _DETAILS.search(question)):
-        shaped["recall_only"] = False
-    if cfg.dialogue_focus and not dialogue:
-        shaped["dialogue_focus"] = False
-    if cfg.recall_relation and not dialogue:
-        shaped["recall_relation"] = False
-    if any(getattr(cfg, name) for name in ROUND14_OPTIONS):
-        shapes14 = round14_scope(question, intent, named=True)
-        active14 = any(getattr(cfg, name) and shapes14[name] for name in ROUND14_OPTIONS)
-        named14 = (active14 and not cfg.verify and not cfg.count_inventory
-                   and memory_scale(store) <= 1.0 and named_memory(store))
-        shaped.update({name: bool(getattr(cfg, name) and shapes14[name] and named14)
-                       for name in ROUND14_OPTIONS})
-    if shaped:
-        config = config.model_copy(update={"ask": cfg.model_copy(update=shaped)})
+    shaped = shape_options(cfg, question, intent, store, dialogue)
+    if shaped is not cfg:
+        config = config.model_copy(update={"ask": shaped})
         cfg = config.ask
     words = query_terms(*searches)
     # Facts first only for a count: a judgement wants the conversation's nuance.
@@ -4015,7 +4079,7 @@ def _answer(store: Store, question: str, config: Config, client, ledger, as_of, 
     if recall_window:
         results = focus_relative_results(results, question, recall_window)
     scale = memory_scale(store)
-    budget = context_budget(cfg, wide, has_facts(results), summary=intent == "summary", scale=scale)
+    budget = context_budget(cfg, wide, not undigested(results), summary=intent == "summary", scale=scale)
     if window and not wide:
         # The span's conversations are read, not only the best match in it.
         budget = max(budget, cfg.window_tokens)
@@ -4030,7 +4094,7 @@ def _answer(store: Store, question: str, config: Config, client, ledger, as_of, 
     balanced = cfg.history_coverage and complete and not cfg.verify
     if balanced:
         results = history_order(results)
-    directives = standing_directives(store)
+    directives = standing_directives(store, digest=cfg.digest_directives)
     refs = {n["id"]: f"r{i + 1}" for i, n in enumerate(results)}
     if cfg.verify:
         system = answer_system(intent if cfg.rules == "intent" else None, complete, options=cfg)
@@ -4217,7 +4281,7 @@ def _answer(store: Store, question: str, config: Config, client, ledger, as_of, 
                     sequence=cfg.large_topic_sequence)
             if inventory:
                 refs = {n["id"]: f"r{i + 1}" for i, n in enumerate(reread_results)}
-            wider = assemble(reread_results, standing_directives(store), reread_budget, team,
+            wider = assemble(reread_results, standing_directives(store, digest=cfg.digest_directives), reread_budget, team,
                              note_omitted=False, label=(lambda n: refs[n["id"]]) if inventory else None,
                              profiles=question_profiles(store, question) if cfg.profiles and wants_profile(question, intent)
                              else None, terms=None, history_coverage=balanced, date_anchors=cfg.date_anchors,

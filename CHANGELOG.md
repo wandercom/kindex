@@ -4,6 +4,39 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- `kin ask` and MCP `ask` defaults are for agents asking about their own
+  graph again. 0.49.0 made the configuration measured on LoCoMo,
+  LongMemEval-S and BEAM (F25) the default without noting it here; on a
+  coding graph it read about 16k tokens of evidence per question, answered
+  at reasoning effort xhigh once a graph passed 1,000 nodes, could take
+  "today" from the date of the last imported conversation, and applied
+  answering rules written for those benchmarks' judges. That configuration
+  is now `ask.preset: benchmark` (every option set explicitly still wins),
+  and the published scores are reproduced with it and `--as-of`. The agent
+  defaults:
+  - The wall clock, unless `--as-of` is given (`fixed_clock`,
+    `archive_clock` and `archival_time` off).
+  - No reasoning escalation: `hard_effort`, `large_effort` and
+    `dialogue_effort` are empty, and the named-dialogue planner is off.
+  - No second reading of a declining draft (`reread` off), so answers
+    stream again.
+  - The judge-oriented rules (`details`, `recall_only`, `episode_scope`,
+    `dialogue_focus`, `inference_candidates`, the LongMemEval question-shape
+    rules) and every large-memory (BEAM) option off.
+  - `wide_context_tokens` 8000, `max_output_tokens` 4000 and
+    `timeout_seconds` 120.
+  - A question that gets a detail wrong is told what the record says
+    (`ask.premise_corrections`).
+- MCP `ask` without `answer` returns about 4,000 tokens of evidence (8,000
+  for a count, list or summary), the size `context(level="evidence")`
+  returns, instead of the answer model's budget.
+- Directives `kin digest` reads from imported chats stay out of the
+  session-start prime and the standing directives until confirmed
+  (`kin set-state <id> confirmed true`; `ask.digest_directives` takes them
+  all). Per-person profiles are written only with `conversations.profiles:
+  true`.
+
 ### Added
 - `kindex-remote` serves the graph to agents on other machines over streamable
   HTTP behind Cloudflare Access (extra `kindex[remote]`). It binds loopback
@@ -12,6 +45,18 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   command, reads a host path or ingests from the host is reachable.
 
 ### Fixed
+- `kin ask` counts only imported conversations and their digests as a large
+  memory, not code, notes and sessions, and reads the wide evidence budget
+  only for conversation text that has no digested facts.
+- Named-dialogue detection reads only conversation chunks: two "Key:"
+  lines in a code module or a decision ("Language:", "Rationale:") no longer
+  count as two people talking, and no longer move "today" or pull in
+  dialogue rules. Speaker names are stripped from search terms only there.
+- MCP `ask` with `answer=true` applies the same per-question reading rules
+  as `kin ask`.
+- Expiry is checked against real time, never against a fixed archive clock.
+- Scoring search candidates no longer records them as used: only returned
+  nodes are, so a deep search does not reset hundreds of nodes' decay.
 - Attention no longer treats a mutating `git` command as pure read-only
   inspection. The read-only list named subcommands, so `git stash`, `git tag
   v1`, `git branch feature`, `git config key value`, `git remote add` and

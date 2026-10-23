@@ -4230,7 +4230,7 @@ def cmd_digest(args):
     With --claims, conversations digested before `conversations.claims` was on are given
     turn-level claims in place of their facts (without digesting them again); claims the
     digest pass just read are not read a second time."""
-    from .conversations import backfill_claims, backfill_digests, build_profiles
+    from .conversations import backfill_claims, backfill_digests, build_profiles, profiles_enabled
     from .vectors import drain_embedding_queue
 
     store = _store(args)
@@ -4242,7 +4242,7 @@ def cmd_digest(args):
         n = backfill_digests(store, cfg, ledger)
         if getattr(args, "claims", False):
             k = backfill_claims(store, cfg, ledger)
-            if k:
+            if k and profiles_enabled(cfg):
                 build_profiles(store, cfg, ledger)
             print(f"Gave {k} conversation(s) turn-level claims.")
         drain_embedding_queue(store, cfg, max_jobs=10**9, time_budget=10**9, report_coverage=False)

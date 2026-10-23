@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from .secret_mask import SecretMaskConfig
 from .secret_mask import configure as configure_secret_mask
@@ -350,11 +350,17 @@ class LLMConfig(BaseModel):
 class AskConfig(BaseModel):
     """`kin ask`: how a question is searched for and answered (see answer.py).
     These settings decide LLM spend, so only user config may set them (see
-    _PROJECT_LAYER_UNTRUSTED_KEYS), and each is bounded."""
+    _PROJECT_LAYER_UNTRUSTED_KEYS), and each is bounded.
+
+    The defaults are for agents asking about their own graph. `preset:
+    benchmark` restores the configuration the published LoCoMo, LongMemEval-S
+    and BEAM scores were measured with (ask_presets.BENCHMARK_ASK); any option
+    set explicitly still wins over the preset."""
+    preset: Literal["agent", "benchmark"] = "agent"  # the defaults: for agents, or as benchmarked
     plan: bool = False               # an LLM planner writes the searches (one more call); else the wording decides
     top_k: int = Field(default=60, ge=1, le=200)               # nodes retrieved per search
     context_tokens: int = Field(default=5000, ge=1000, le=400000)  # evidence budget for a single-answer question
-    wide_context_tokens: int = Field(default=16000, ge=1000, le=400000)  # counts, lists, orderings, summaries, advice
+    wide_context_tokens: int = Field(default=8000, ge=1000, le=400000)  # counts, lists, orderings, summaries, advice
     excerpt: bool = True             # show only the messages of an excerpt that bear on the question
     profiles: bool = True            # show the profiles of the people a question is about (`kin digest` writes them)
     rules: Literal["intent", "all"] = "intent"  # answering rules: those for the kind of question, or all
@@ -362,31 +368,31 @@ class AskConfig(BaseModel):
     readings: bool = False           # answer each plausible reading when the answer depends on it
     effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = "medium"  # reasoning effort, for providers that take one
     plan_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = "low"
-    hard_effort: Literal["", "none", "medium", "high", "xhigh"] = "high"  # effort for counts, dates, orderings, updates, summaries ("" = effort)
+    hard_effort: Literal["", "none", "medium", "high", "xhigh"] = ""  # effort for counts, dates, orderings, updates, summaries ("" = effort)
     denials: bool = True             # "have I ever ...": also search for the user saying they never did it
     timeline: bool = True            # an ordering question reads conversation summaries first, as a summary does
-    reread: bool = True             # a draft that says the evidence lacks the answer is redrafted from whole excerpts
+    reread: bool = False             # a draft that says the evidence lacks the answer is redrafted from whole excerpts
     reread_tokens: int = Field(default=12000, ge=1000, le=400000)  # evidence budget of that second reading
     vote: bool = False               # with several samples, keep the answer most agree on instead of adjudicating
     all_facts_tokens: int = Field(default=0, ge=0, le=100000)  # show every fact when they fit in this many tokens (0: off)
     interleave: bool = False         # a count reads two facts, then one original source, instead of every fact first
-    dialogue_focus: bool = True    # prefer the matching exchange and keep named speakers distinct
-    episode_scope: bool = True     # resolve the episode before selecting values or date endpoints
+    dialogue_focus: bool = False    # prefer the matching exchange and keep named speakers distinct
+    episode_scope: bool = False     # resolve the episode before selecting values or date endpoints
     timeline_facets: bool = True   # order distinct requests, decisions and solutions rather than status snapshots
     history_coverage: bool = False  # give retrieved sessions a first turn before repeating one session
-    recall_only: bool = True       # missing recalled details stop at the missing field, without suggested substitutes
-    inference_candidates: bool = True  # answer inference questions with concrete, qualified candidates
+    recall_only: bool = False       # missing recalled details stop at the missing field, without suggested substitutes
+    inference_candidates: bool = False  # answer inference questions with concrete, qualified candidates
     date_anchors: bool = True      # preserve ambiguous week phrases; handle compound day expressions first
     directive_check: bool = False  # check required response fields without inventing missing metrics
-    count_scope: bool = True       # counting rules: exchanges, kept possessions, own totals; "just done" dates
-    count_readings: bool = True    # a count with uncertain items gives the certain count and the count with them
-    predicate_counts: bool = True  # count the requested action and unit; match repeated event identities
-    quantity_readings: bool = True  # compute supported numeric alternatives when scope or dates are ambiguous
-    window_readings: bool = True   # distinguish rolling and calendar readings of an unspecified last month
-    relative_focus: bool = True    # select a relative recall's mention/event anchor before similar episodes
-    event_reference: bool = True   # "ago when X" ends at X, rather than at today's date
-    subject_scope: bool = True     # require matching entities and user-attributed operands for recalled facts
-    approximate_state: bool = True  # a later approximate current value can update an earlier exact value
+    count_scope: bool = False       # counting rules: exchanges, kept possessions, own totals; "just done" dates
+    count_readings: bool = False    # a count with uncertain items gives the certain count and the count with them
+    predicate_counts: bool = False  # count the requested action and unit; match repeated event identities
+    quantity_readings: bool = False  # compute supported numeric alternatives when scope or dates are ambiguous
+    window_readings: bool = False   # distinguish rolling and calendar readings of an unspecified last month
+    relative_focus: bool = False    # select a relative recall's mention/event anchor before similar episodes
+    event_reference: bool = False   # "ago when X" ends at X, rather than at today's date
+    subject_scope: bool = False     # require matching entities and user-attributed operands for recalled facts
+    approximate_state: bool = False  # a later approximate current value can update an earlier exact value
     exchange_context: bool = True  # keep a short user turn preceding a matched assistant passage
     window_search: bool = True     # a question pointing at a span of time also searches deep inside that span
     window_tokens: int = Field(default=10000, ge=1000, le=400000)  # evidence budget for one recalled episode in such a span
@@ -396,35 +402,35 @@ class AskConfig(BaseModel):
     list_position: bool = True     # a question after the Nth item of a list reads conversation text whole, not excerpted
     # A memory of conversations between named people (not a user and an assistant)
     # reads more inference into casual talk: its own effort and the planner.
-    dialogue_effort: Literal["", "medium", "high", "xhigh"] = "xhigh"  # effort for every answer there ("" = effort/hard_effort)
-    dialogue_plan: bool = True     # the planner there only
+    dialogue_effort: Literal["", "medium", "high", "xhigh"] = ""  # effort for every answer there ("" = effort/hard_effort)
+    dialogue_plan: bool = False     # the planner there only
     dialogue_archive: bool = False  # read all live named-dialogue originals when the whole archive fits
     dialogue_sessions: bool = False  # index existing digests, then reserve space for intact source sessions
     dialogue_relation_plan: bool = False  # plan separate entity/attribute and surrounding-episode searches there
-    dialogue_context_tokens: int = Field(default=14000, ge=0, le=400000)  # single-answer evidence budget there (0: context_tokens)
-    large_effort: Literal["", "medium", "high", "xhigh"] = "xhigh"  # effort for every answer when the memory has over 1,000 nodes
-    fixed_clock: bool = True       # search recency is measured from the question's date (else the memory's latest conversation), not the wall clock
+    dialogue_context_tokens: int = Field(default=0, ge=0, le=400000)  # single-answer evidence budget there (0: context_tokens)
+    large_effort: Literal["", "medium", "high", "xhigh"] = ""  # effort for every answer when the memory has over 1,000 nodes
+    fixed_clock: bool = False       # search recency is measured from the question's date (else the memory's latest conversation), not the wall clock
     count_inventory: bool = False   # one quoted inventory; count distinct accepted rows locally (samples=1, no verify)
     plan_route: bool = False        # when plan is on, plan single dialogue recalls and inference/advice, not enumeration
     effort_route: bool = False      # effort for dialogue/large graphs; hard_effort (or high) for compact personal logs
     recall_relation: bool = False   # in named dialogues, answer the requested relation/category before related history
-    archive_clock: bool = True     # absent as_of, a named dialogue uses the latest live imported source date
-    component_updates: bool = True  # recurring schedules and since-start counts reconcile updates within their scope
-    remainder_quantities: bool = True  # gaps and tenure differences read both operands, then subtract
-    recall_candidates: bool = True  # relative mention recalls retain plausible alternatives when the episode is ambiguous
-    archival_time: bool = True     # unanchored named-dialogue durations and relative recalls use archive/report clocks
-    disposition_inference: bool = True  # third-person traits, choices and prior feelings use relevant supporting clues
-    large_landmarks: bool = True    # compact summary coverage in large user-assistant memories
-    large_recall_exchange: bool = True  # intact source chunks for explicitly recalled fields and advice
+    archive_clock: bool = False     # absent as_of, a named dialogue uses the latest live imported source date
+    component_updates: bool = False  # recurring schedules and since-start counts reconcile updates within their scope
+    remainder_quantities: bool = False  # gaps and tenure differences read both operands, then subtract
+    recall_candidates: bool = False  # relative mention recalls retain plausible alternatives when the episode is ambiguous
+    archival_time: bool = False     # unanchored named-dialogue durations and relative recalls use archive/report clocks
+    disposition_inference: bool = False  # third-person traits, choices and prior feelings use relevant supporting clues
+    large_landmarks: bool = False    # compact summary coverage in large user-assistant memories
+    large_recall_exchange: bool = False  # intact source chunks for explicitly recalled fields and advice
     large_value_updates: bool = False  # reconcile scalar reports, updates, goals and implementation evidence
-    large_response_contract: bool = True  # apply recorded response fields and advice preferences
-    large_claim_witnesses: bool = True  # literal occurrence and denial witnesses in large chats
-    large_span_witnesses: bool = True  # independent endpoint retrieval in large chats
-    large_summary_coverage: bool = True  # preserve distinct summary content at the landmark cap
+    large_response_contract: bool = False  # apply recorded response fields and advice preferences
+    large_claim_witnesses: bool = False  # literal occurrence and denial witnesses in large chats
+    large_span_witnesses: bool = False  # independent endpoint retrieval in large chats
+    large_summary_coverage: bool = False  # preserve distinct summary content at the landmark cap
     large_detail_binding: bool = False  # recalled particulars require the same entity, episode and field
-    large_claim_scan: bool = True  # seed existing denial witnesses from live original user turns
-    large_summary_methods: bool = True  # retain a relevant assistant explanation at the same summary cap
-    large_evidence_pack: bool = True  # bounded originals and existing summaries from the whole large chat
+    large_claim_scan: bool = False  # seed existing denial witnesses from live original user turns
+    large_summary_methods: bool = False  # retain a relevant assistant explanation at the same summary cap
+    large_evidence_pack: bool = False  # bounded originals and existing summaries from the whole large chat
     large_topic_sequence: bool = False  # source-turn order and distinct developments in large chats
     large_gap_retry: bool = False  # reserve input for one targeted reading of a declined or hedged recall
     large_day_arithmetic: bool = False  # elapsed days from explicit endpoints in a large-chat draft
@@ -442,7 +448,7 @@ class AskConfig(BaseModel):
     count_membership: bool = False   # with count_witnesses: coordinated clauses, service pickups and two-action counts
     count_example_membership: bool = True  # route existing membership guidance to matching inline user examples
     large_supplement_reserve: int = Field(default=0, ge=0, le=6000)  # evidence tokens kept free for the large-memory supplements
-    large_evidence_pack_intents: str = "aggregation,assistant_recall"  # comma-separated intents the evidence pack applies to ("" = all)
+    large_evidence_pack_intents: str = ""  # comma-separated intents the evidence pack applies to ("" = all)
     xhigh_intents: str = ""          # comma-separated intents answered at reasoning effort xhigh ("" = none)
     ordering_occurrences: bool = True  # attendance orderings retain literal completed reports and entity types
     large_order_ledger: bool = False  # one cited development list, sorted by imported conversation parts
@@ -458,20 +464,34 @@ class AskConfig(BaseModel):
     position_labels: bool = False    # label each excerpt with its session and place in it, not only its date
     fact_sources: bool = False       # show a fact with the message it came from (where recorded)
     max_input_tokens: int = Field(default=20000, ge=0, le=400000)  # cap on estimated input over all calls for one answer (0: none)
-    details: bool = True            # a question asking for particulars is answered only from particulars stated
+    details: bool = False            # a question asking for particulars is answered only from particulars stated
     verify: bool = False             # one cited draft, then a check against original source chunks
     verify_input_tokens: int = Field(default=20000, ge=4000, le=400000)  # total estimated input over all calls
     verify_draft_tokens: int = Field(default=6000, ge=1000, le=400000)  # first reading's evidence budget
     verify_source_tokens: int = Field(default=11000, ge=1000, le=400000)  # source reading, within the total limit
-    max_output_tokens: int = Field(default=16000, ge=256, le=128000)  # includes a reasoning model's reasoning
-    timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
+    max_output_tokens: int = Field(default=4000, ge=256, le=128000)  # includes a reasoning model's reasoning
+    timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
     seed: int = Field(default=0, ge=0, le=1000)  # numbers the samples drawn, so a rerun can draw fresh ones
+    premise_corrections: bool = True  # a question that gets a detail wrong is told what the record says
+    digest_directives: bool = False  # standing directives include ones `kin digest` read from imported chats (unconfirmed)
+
+    @model_validator(mode="after")
+    def _apply_preset(self):
+        """`preset: benchmark` fills every option the user left unset with its
+        benchmarked value; options set explicitly are kept."""
+        if self.preset == "benchmark":
+            from .ask_presets import BENCHMARK_ASK
+            for name, value in BENCHMARK_ASK.items():
+                if name not in self.model_fields_set:
+                    setattr(self, name, value)
+        return self
 
 
 class ConversationsConfig(BaseModel):
     """Conversation digests (conversations.py). User config only."""
     facts: bool = True               # also record each conversation's facts as dated nodes (keeps `kin ask` small)
     claims: bool = False             # record turn-level claims, each tied to its message, instead of those facts
+    profiles: bool = False           # also write per-person profiles from the facts (one more call per changed person)
 
 
 class BudgetConfig(BaseModel):

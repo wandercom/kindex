@@ -740,7 +740,8 @@ def test_excerpts_keep_the_matching_messages_and_their_neighbours():
 
 
 def test_speaker_names_do_not_choose_the_excerpt():
-    results = [{"id": str(i), "content": f"Caroline: day {i}\nMelanie: hi Caroline"} for i in range(5)]
+    results = [{"id": str(i), "prov_activity": "conversation-ingest", "content": f"Caroline: day {i}\nMelanie: hi Caroline"}
+               for i in range(5)]
     assert answer_mod.informative_terms({"caroline", "research"}, results) == {"research"}
     # A word every result shares is still a candidate: it may hold the answer.
     kayak = [{"id": "a", "content": "user: My kayak costs $450.\nassistant: Nice.\nuser: Hi.\nassistant: Hi.\n"
@@ -927,12 +928,16 @@ def test_a_larger_memory_gets_a_larger_budget(tmp_path):
 
     s = Store(Config(data_dir=str(tmp_path)))
     assert answer_mod.memory_scale(s) == 1.0
+    for i in range(3000):
+        s.add_node(f"symbol {i}", node_id=f"code{i}", prov_activity="code-ingest")
+    assert answer_mod.memory_scale(s) == 1.0  # code, notes and sessions are not a chat memory
     for i in range(2100):
-        s.add_node(f"note {i}", node_id=f"n{i}")
+        s.add_node(f"note {i}", node_id=f"n{i}", prov_activity="conversation-ingest" if i % 2 else "conversation-digest")
     scale = answer_mod.memory_scale(s)
     assert 2.0 < scale < 2.1
-    assert answer_mod.context_budget(AskConfig(context_tokens=5000), False, scale=scale) > 10000
-    assert answer_mod.context_budget(AskConfig(context_tokens=5000), True, scale=scale) == 16000
+    wide = AskConfig(context_tokens=5000, wide_context_tokens=16000)
+    assert answer_mod.context_budget(wide, False, scale=scale) > 10000
+    assert answer_mod.context_budget(wide, True, scale=scale) == 16000
     s.close()
 
 
@@ -981,9 +986,10 @@ def test_a_provider_that_does_not_stream_is_printed_whole(store, tmp_path, monke
     cfg.ask = cfg.ask.model_copy(update=PRE_F25_ASK)
     result = answer_mod.answer_question(store, "kayak trips?", cfg, on_text=lambda t: None)
     assert result.streamed is False and result.answer
-    # By default a second reading is possible, so the final answer is shown whole once it is settled.
+    # With a second reading possible (the benchmark preset), the final answer is shown whole once settled.
     shown = []
-    default = Config(data_dir=str(tmp_path), llm=LLMConfig(enabled=True, provider="anthropic", model="m"))
+    default = Config(data_dir=str(tmp_path), llm=LLMConfig(enabled=True, provider="anthropic", model="m"),
+                     ask={"preset": "benchmark"})
     result = answer_mod.answer_question(store, "kayak trips?", default, on_text=shown.append)
     assert result.streamed is True and shown == [result.answer]
 
@@ -1210,9 +1216,18 @@ def test_checked_compound_durations_are_normalized_from_separate_quotes():
 
 
 def test_named_dialogue_tells_people_from_a_user_and_assistant():
-    assert answer_mod.named_dialogue([{"content": "Caroline: Hi Mel!\nMelanie: Hey Caroline!"}])
-    assert answer_mod.named_dialogue([{"content": "user (Ann): hi\nuser (Bo): hello"}])
-    assert not answer_mod.named_dialogue([{"content": "user: Plan my trip.\nassistant: Sure."}])
+    chunk = {"prov_activity": "conversation-ingest"}
+    assert answer_mod.named_dialogue([{**chunk, "content": "Caroline: Hi Mel!\nMelanie: Hey Caroline!"}])
+    assert answer_mod.named_dialogue([{**chunk, "content": "user (Ann): hi\nuser (Bo): hello"}])
+    assert not answer_mod.named_dialogue([{**chunk, "content": "user: Plan my trip.\nassistant: Sure."}])
+
+
+def test_labelled_notes_and_code_are_not_a_dialogue():
+    # "Key: value" lines in a code module or a decision are not two people talking.
+    notes = [{"prov_activity": "code-ingest", "content": "Language: python | Path: src/app.py\nSymbols: main"},
+             {"prov_activity": "manual-add", "content": "Decision: use Postgres\nRationale: one database"}]
+    assert not answer_mod.named_dialogue(notes)
+    assert answer_mod.informative_terms({"rationale", "postgres"}, notes) == {"rationale", "postgres"}
 
 
 def test_recall_only_applies_to_questions_asking_for_particulars(store, tmp_path, monkeypatch):
@@ -1416,7 +1431,7 @@ def test_inventory_schema_and_large_evidence_share_the_total_cap(store, tmp_path
 def test_planner_route_uses_question_and_dialogue_shape(store, tmp_path, monkeypatch, question, dialogue, planned):
     content = "Ada: I read a book.\nBo: What did you think?" if dialogue else \
         "user: I read a book.\nassistant: What did you think?"
-    nodes = [dict(id="dialogue", content=content, prov_when="2024-03-01")]
+    nodes = [dict(id="dialogue", content=content, prov_when="2024-03-01", prov_activity="conversation-ingest")]
     intent, complete = answer_mod.classify_question(question)
     fake = FakeMessages(plan=dict(intent=intent, queries=["reading"], needs_all_instances=complete))
     monkeypatch.setattr(answer_mod, "get_client", lambda *a, **kw: SimpleNamespace(messages=fake))
@@ -1443,7 +1458,8 @@ def test_effort_route_is_shared_by_facts_counts_and_timelines(tmp_path, dialogue
 def test_dialogue_routing_looks_past_facts_without_overriding_a_real_assistant(store, tmp_path, monkeypatch):
     nodes = [dict(id=f"f{i}", content="A digested fact.", extra={"kind": "conversation-fact"})
              for i in range(21)]
-    nodes.append(dict(id="dialogue", content="Ada: I researched agencies.\nBo: Good luck!", prov_when="2024-03-01"))
+    nodes.append(dict(id="dialogue", content="Ada: I researched agencies.\nBo: Good luck!", prov_when="2024-03-01",
+                      prov_activity="conversation-ingest"))
     fake = FakeMessages()
     monkeypatch.setattr(answer_mod, "get_client", lambda *a, **kw: SimpleNamespace(messages=fake))
     monkeypatch.setattr(answer_mod, "gather", lambda *a, **kw: nodes)
@@ -1453,7 +1469,8 @@ def test_dialogue_routing_looks_past_facts_without_overriding_a_real_assistant(s
     assert "exact relation requested" in fake.calls[-1]["system"]
     assert "give the requested content neutrally" in fake.calls[-1]["system"]
     assert fake.calls[-1]["reasoning_effort"] == "xhigh"
-    nodes.append(dict(id="assistant", content="user: I did research.\nassistant: Here is advice."))
+    nodes.append(dict(id="assistant", content="user: I did research.\nassistant: Here is advice.",
+                      prov_activity="conversation-ingest"))
     answer_mod.answer_question(store, "What did I research?", cfg)
     assert "exact relation requested" not in fake.calls[-1]["system"]
     assert fake.calls[-1]["reasoning_effort"] == "high"
@@ -3289,11 +3306,23 @@ def test_round14_does_not_route_inferences_or_other_count_units(question, intent
     assert not any(answer_mod.round14_scope(question, intent, named=True).values())
 
 
-def test_the_default_ask_configuration_is_f25():
+def test_the_benchmark_preset_is_f25_and_the_defaults_are_for_agents():
     from kindex.config import AskConfig
 
-    defaults = AskConfig()
-    assert {name: getattr(defaults, name) for name in F25_ASK} == F25_ASK
+    benchmark = AskConfig(preset="benchmark")
+    assert {name: getattr(benchmark, name) for name in F25_ASK} == F25_ASK
+    # An option set explicitly wins over the preset.
+    assert AskConfig(preset="benchmark", reread=False).reread is False
+    agent = AskConfig()
+    assert agent.preset == "agent"
+    assert (agent.hard_effort, agent.large_effort, agent.dialogue_effort) == ("", "", "")
+    assert not any((agent.reread, agent.fixed_clock, agent.archive_clock, agent.archival_time,
+                    agent.dialogue_plan, agent.details, agent.recall_only, agent.episode_scope,
+                    agent.dialogue_focus, agent.inference_candidates, agent.digest_directives))
+    assert not any(getattr(agent, name) for name in AskConfig.model_fields
+                   if name.startswith("large_") and isinstance(getattr(agent, name), bool))
+    assert agent.premise_corrections and agent.wide_context_tokens == 8000
+    assert (agent.max_output_tokens, agent.timeout_seconds) == (4000, 120.0)
 
 
 def test_evidence_only_skips_verification(store, tmp_path, monkeypatch):

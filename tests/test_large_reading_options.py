@@ -86,13 +86,15 @@ def test_scanned_denial_keeps_the_occurrence_from_the_same_chunk(store):
     assert "user: I have never calibrated the lidar sensor." in text
 
 
-def test_scan_expiry_uses_the_fixed_clock(store):
-    source(store, "historical", "user: I have never calibrated the lidar sensor.",
-           expires="2024-02-01")
+def test_scan_expiry_uses_real_time_not_the_archive_clock(store):
+    # Expiry is when a memory stops being true now; an archive clock fixed in
+    # the past must not bring an expired conversation back.
+    source(store, "expired", "user: I have never calibrated the lidar sensor.", expires="2024-02-01")
+    source(store, "current", "user: I have never calibrated the radar sensor.", expires="2999-01-01")
     token = a._CLOCK.set(datetime(2024, 1, 20))
     try:
-        assert [n["id"] for n in a.large_claim_denial_hits(
-            store, "Have I calibrated the lidar sensor?")] == ["historical"]
+        hits = [n["id"] for n in a.large_claim_denial_hits(store, "Have I calibrated the lidar sensor?")]
+        assert "expired" not in hits and "current" in hits
     finally:
         a._CLOCK.reset(token)
 
