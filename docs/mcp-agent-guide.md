@@ -286,9 +286,12 @@ Do not treat reminders as reentrant interrupts for an idle interactive thread.
 `remind_create` stores the reminder; it fires only when `kin remind check`,
 `kin remind exec`, `kin cron`, or an installed `kin setup-cron` schedule runs.
 Codex wakeups launch `codex exec` (or `codex exec resume ...`) from that
-daemon/cron context. OpenCode wakeups launch `opencode run` with `--session` or
-`--continue` when requested. If the host has no same-thread wake server,
-Kindex starts a headless follow-up turn instead of prodding the original TUI.
+daemon/cron context. If Codex reports that the target session already has an
+active writer, Kindex queues the prompt to that session. A successful queue
+response confirms acceptance only, not consumption or execution; if the session
+exits or no consumer drains its queue, the prompt can remain pending until the
+session resumes. OpenCode wakeups launch `opencode run` with `--session` or
+`--continue` when requested, in a headless follow-up turn.
 
 ## What Not To Capture
 
