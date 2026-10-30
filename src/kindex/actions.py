@@ -5,7 +5,8 @@ instructions.  When due, the daemon (or manual ``kin remind exec``) runs:
 
 * **shell** — ``subprocess.run(command, shell=True)``
 * **claude** — ``claude -p <prompt>`` with assembled context
-* **codex** — ``codex exec`` (optionally ``resume``) with assembled context
+* **codex** — ``codex exec`` (optionally ``resume``), queued on active-writer
+  conflicts, with assembled context
 * **opencode** — ``opencode run`` (optionally resuming a session) with context
 * **auto** (default) — shell if only command, claude if instructions present
 
@@ -498,7 +499,7 @@ def _run_codex(
     *,
     timeout: int = 300,
 ) -> dict:
-    """Launch a headless Codex wake via ``codex exec``."""
+    """Resume a Codex session, queueing the prompt if it has an active writer."""
     problem = _wake_argv_problem(fields)
     if problem:
         return {"ok": False, "terminal": True, "output": f"Refused: {problem}"}
@@ -514,9 +515,10 @@ def _run_codex(
         cmd.extend(["--model", fields["wake_model"]])
 
     session_id = str(fields.get("wake_session_id") or "").strip()
+    is_last = session_id.lower() in {"last", "--last"}
     if session_id:
         cmd.append("resume")
-        if session_id.lower() in {"last", "--last"}:
+        if is_last:
             cmd.append("--last")
         else:
             cmd.append(session_id)
@@ -527,6 +529,27 @@ def _run_codex(
     returncode, stdout, stderr = _run_process(cmd, input_text=prompt, timeout=timeout)
     if returncode is None:
         return {"ok": False, "output": f"codex exec timed out after {timeout}s"}
+    if (returncode != 0 and session_id and not is_last
+            and any(
+                marker in stderr
+                for marker in (
+                    f"thread-store conflict: thread {session_id} already has an active writer",
+                    f"thread/resume failed: thread {session_id} already has an active writer",
+                )
+            )):
+        queue_cmd = [codex, "queue", "--thread", session_id, "--message", prompt]
+        queue_code, queue_stdout, queue_stderr = _run_process(
+            queue_cmd, input_text=None, timeout=timeout
+        )
+        if queue_code is None:
+            return {"ok": False, "output": f"codex queue timed out after {timeout}s"}
+        output = _combined_output(queue_stdout, queue_stderr)
+        if queue_code == 0:
+            output = (
+                f"Queued to Codex session {session_id}; execution has not been confirmed.\n"
+                f"{output}"
+            ).rstrip()
+        return {"ok": queue_code == 0, "output": output}
     return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}
 
 

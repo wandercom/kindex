@@ -418,9 +418,13 @@ kin remind create "Continue OpenCode build" --at "in 10 minutes" \
   --instructions "Continue the build triage."
 ```
 
-Boundary: these wakeups run `codex exec` or `opencode run` from the
-daemon/cron context. They do not interrupt an idle terminal UI unless that host
-adds a same-thread wake API.
+These wakeups run `codex exec` or `opencode run` from the daemon/cron context.
+When Codex reports that the target session already has an active writer, Kindex
+queues the prompt to that session. A successful queue response confirms
+acceptance only, not consumption or execution. If the session exits or no
+consumer drains its queue, the prompt can remain pending until the session
+resumes. OpenCode wakeups still run in their own headless turn; neither path
+interrupts an idle terminal UI through a host wake API.
 
 ## Keep Project Context Portable
 
