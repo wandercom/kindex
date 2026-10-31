@@ -20,6 +20,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import platform_io
 from .config import Config, activate_secret_mask, user_secret_mask
 from . import mcp_server
 from .privacy import redact, redact_serialized, safe_error
@@ -84,7 +85,7 @@ def _check_tree(path: Path) -> None:
 
 class _RepoScope:
     def __init__(self, repo: str | Path):
-        self.requested = Path(repo).expanduser().absolute()
+        self.requested = platform_io.expanduser(Path(repo)).absolute()
         self.repo = self.requested.resolve(strict=True)
         if not self.repo.is_dir():
             raise ScopeRefused("--repo must name an existing repository directory")
@@ -117,7 +118,7 @@ class _RepoScope:
             _check_tree(self.repo / ".kin")
 
     def path(self, value: str, *, root_only: bool = False) -> str:
-        candidate = Path(value).expanduser()
+        candidate = platform_io.expanduser(Path(value))
         resolved = (candidate if candidate.is_absolute() else self.repo / candidate).resolve()
         if not resolved.is_relative_to(self.repo) or (root_only and resolved != self.repo):
             raise ScopeRefused("Path is outside the bound repository scope")

@@ -4,6 +4,29 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+- Windows support for the repo-local store, `kindex-lite --repo`, the CLI,
+  the scheduler and the supervisor. Platform differences live in
+  `kindex.platform_io`: no-follow opens that refuse symlinks and junctions,
+  `msvcrt` advisory locks, `HOME`-first home resolution (as in git, MSYS
+  `/c/...` included), `/dev/null` as `nul`, process-tree kills with
+  `taskkill`, and Git for Windows' `sh` for configured shell command lines
+  (`sim.command`, the advocate command, reminder actions). The degraded-event
+  ledger cap moves the ledger aside instead of replacing an open file, and
+  puts the entries back if it cannot finish. macOS-only features (launchd,
+  desktop notifications) are unchanged.
+
+### Fixed
+- The registered `.kin` merge driver quotes the `kin` program, so a path with
+  spaces works on every platform (git runs the driver through `sh`).
+- CLI stdout/stderr use `errors="replace"`: output to a stream whose encoding
+  cannot represent a character (a Windows code page, or any non-UTF-8 locale)
+  no longer crashes the command. The encoding itself is unchanged.
+- Code-map module keys use the POSIX relative path, so a map built on Windows
+  matches one built on Linux or macOS.
+- A missing `crontab` binary reads as a failed crontab run instead of a
+  traceback.
+
 ## [0.50.0] - 2026-10-30
 
 ### Changed

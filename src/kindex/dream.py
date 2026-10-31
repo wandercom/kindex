@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import datetime
 import difflib
-import fcntl
 import logging
 import os
 import subprocess
@@ -29,6 +28,7 @@ if TYPE_CHECKING:
     from .config import Config
     from .store import Store
 
+from . import platform_io
 from .schema import EDIT_POLICY
 
 from .privacy import protect_logger
@@ -94,7 +94,11 @@ def _acquire_lock(config: Config) -> int | None:
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            platform_io.lock(fd, blocking=False)
+        except OSError:
+            os.close(fd)
+            raise
         return fd
     except OSError:
         return None
@@ -103,7 +107,7 @@ def _acquire_lock(config: Config) -> int | None:
 def _release_lock(fd: int, config: Config) -> None:
     """Release dream lock."""
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        platform_io.unlock(fd)
         os.close(fd)
     except OSError:
         pass

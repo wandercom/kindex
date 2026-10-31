@@ -4,6 +4,7 @@ threshold gating, staleness drops, and the runtime kill switch)."""
 from __future__ import annotations
 
 import json
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -769,7 +770,7 @@ def _sim_command_config(tmp_path, **sim):
     script = tmp_path / "simulacrum"
     script.write_text("#!/bin/sh\ncat\n")
     script.chmod(0o755)
-    return Config(data_dir=str(tmp_path / "data"), sim=SimConfig(command=str(script), **sim))
+    return Config(data_dir=str(tmp_path / "data"), sim=SimConfig(command=shlex.quote(str(script)), **sim))
 
 
 def test_simulacrum_command_checks_standard_key_name_by_default(tmp_path, monkeypatch):

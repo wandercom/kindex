@@ -10,6 +10,7 @@ import pytest
 
 from kindex.config import Config
 from kindex.schema import SCHEMA_VERSION
+from kindex.sessions import normalize_project_path
 from kindex.store import Store
 
 
@@ -604,6 +605,10 @@ class TestStoreSessionMethods:
         assert [row["id"] for row in rows] == [first]
 
 
+# The identity the v12 migration stores: /project on POSIX, c:\project on Windows.
+PROJECT = normalize_project_path("/project")
+
+
 def test_session_uniqueness_migration_pauses_older_duplicates(tmp_path):
     cfg = Config(data_dir=str(tmp_path))
     store = Store(cfg)
@@ -613,7 +618,7 @@ def test_session_uniqueness_migration_pauses_older_duplicates(tmp_path):
     store.conn.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
     extra = {
         "tag": "duplicate",
-        "project_path": "/project",
+        "project_path": PROJECT,
         "session_status": "active",
     }
     first = store.add_node("duplicate", node_type="session", extra=extra)
@@ -661,7 +666,7 @@ def test_session_uniqueness_migration_has_total_tiebreak(tmp_path):
     store.conn.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
     extra = {
         "tag": "tie",
-        "project_path": "/project",
+        "project_path": PROJECT,
         "session_status": "active",
     }
     for index in range(11):
@@ -682,10 +687,10 @@ def test_session_uniqueness_migration_has_total_tiebreak(tmp_path):
 
     migrated = Store(cfg)
     active = migrated.get_session_tags(
-        status="active", project_path="/project", limit=20
+        status="active", project_path=PROJECT, limit=20
     )
     paused = migrated.get_session_tags(
-        status="paused", project_path="/project", limit=20
+        status="paused", project_path=PROJECT, limit=20
     )
 
     assert [row["id"] for row in active] == ["duplicate-10"]

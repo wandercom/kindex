@@ -34,7 +34,8 @@ def test_load_config_from_explicit_project_path(tmp_path):
 
     cfg = load_config(project_path=project)
 
-    assert cfg.data_dir == "/tmp/kindex-project"
+    # Absolute on POSIX; on Windows /tmp has no drive, so it is the project drive's \tmp.
+    assert cfg.data_dir == str(project / "/tmp/kindex-project")
     assert cfg.work_policy.require_active_tag is True
     assert cfg.work_policy.linear.enabled is True
     assert cfg.work_policy.linear.require_issue is True

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date
-import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
@@ -27,7 +26,7 @@ import yaml
 from kindex.agent_settings import apply_agent_overrides, agent_settings_summary
 from kindex.budget import BudgetLedger
 from kindex.config import Config, SimConfig
-from kindex import ollama_review, sim, subscription_review, supervisor, vectors
+from kindex import ollama_review, platform_io, sim, subscription_review, supervisor, vectors
 from kindex.store import Store
 
 
@@ -596,7 +595,7 @@ def test_o3_allowance_lock_contention_is_bounded_without_http_or_false_reservati
     lock_path = cfg.data_path / "subscription-review" / "allowances.lock"
     lock_path.parent.mkdir(parents=True, mode=0o700)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    platform_io.lock(fd, blocking=False)  # the product's own lock primitive
     fd_box = [fd]
     released = threading.Event()
     release_guard = threading.Lock()
@@ -606,7 +605,7 @@ def test_o3_allowance_lock_contention_is_bounded_without_http_or_false_reservati
             if fd_box[0] is None:
                 return
             try:
-                fcntl.flock(fd_box[0], fcntl.LOCK_UN)
+                platform_io.unlock(fd_box[0])
             finally:
                 os.close(fd_box[0])
                 fd_box[0] = None
@@ -632,6 +631,7 @@ def test_o3_allowance_lock_contention_is_bounded_without_http_or_false_reservati
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        **platform_io.essential_environment(),  # SYSTEMROOT: Windows sockets
     }
     process = subprocess.Popen(
         [sys.executable, "-c", LOCK_CONTENTION_PROBE], cwd=project, env=env,
@@ -719,6 +719,7 @@ def test_o3_cli_drain_works_with_corrupt_api_ledger(tmp_path, loopback_servers):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        **platform_io.essential_environment(),  # SYSTEMROOT: Windows sockets
     }
     completed = subprocess.run([
         sys.executable, "-m", "kindex.cli", "sim", "drain",
@@ -759,6 +760,7 @@ def test_o3_cli_check_works_with_corrupt_api_ledger(tmp_path, loopback_servers):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        **platform_io.essential_environment(),  # SYSTEMROOT: Windows sockets
     }
     completed = subprocess.run([
         sys.executable, "-m", "kindex.cli", "sim", "check", "--text", WORK,

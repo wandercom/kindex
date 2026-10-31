@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import platform_io
+
 if TYPE_CHECKING:
     from .store import Store
 
@@ -44,7 +46,7 @@ RESTORE_HINT = (
 
 def _default_state_root() -> Path:
     base = os.environ.get("XDG_STATE_HOME", "").strip()
-    root = Path(base) if base else Path.home() / ".local" / "state"
+    root = Path(base) if base else platform_io.home() / ".local" / "state"
     return root / "kindex" / "snapshots"
 
 

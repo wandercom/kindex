@@ -13,6 +13,7 @@ import re
 import sqlite3
 from typing import TYPE_CHECKING, Callable
 
+from . import platform_io
 from .schema import SESSION_PAUSE_REASON_USER
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ def normalize_project_path(project_path: str | None) -> str:
     """Return the stable filesystem identity used by session-tag lookups."""
     if not project_path:
         return ""
-    expanded = os.path.expanduser(project_path)
+    expanded = platform_io.expanduser(project_path)
     return os.path.normcase(os.path.realpath(os.path.abspath(expanded)))
 
 

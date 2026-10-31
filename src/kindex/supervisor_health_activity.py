@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import sqlite3
 
+from . import platform_io
+
 MAX_FILES = 64
 SUBAGENTS_PER_SESSION = 16
 MAX_DIRS = 512
@@ -114,7 +116,7 @@ def _subagent_file(path):
 
 
 def _files(agent, now):
-    home = Path.home()
+    home = platform_io.home()
     if agent == "claude":
         root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude"))) / "projects"
         candidates = []
@@ -155,7 +157,7 @@ def _files(agent, now):
 
 def _ag_projects():
     from .supervisor_health import _db
-    path = Path.home() / ".gemini/antigravity-cli/history.jsonl"
+    path = platform_io.home() / ".gemini/antigravity-cli/history.jsonl"
     mappings = {}
     def remember(sid, project):
         if isinstance(sid, str) and isinstance(project, str) and Path(project).is_absolute():
@@ -164,7 +166,7 @@ def _ag_projects():
         for row in _rows(path):
             if isinstance(row.get("conversationId"), str) and isinstance(row.get("workspace"), str):
                 remember(row["conversationId"], row["workspace"])
-    cache = Path.home() / ".gemini/antigravity-cli/cache/conversation_metadata.json"
+    cache = platform_io.home() / ".gemini/antigravity-cli/cache/conversation_metadata.json"
     if cache.is_file() and not cache.is_symlink():
         # Never read an unbounded native cache or arbitrary prose for identity.
         with cache.open("rb") as stream:
@@ -369,7 +371,7 @@ def _jsonl(agent, path, now, projects):
 
 def _opencode(now):
     from .supervisor_health import is_reviewer_session, record
-    path = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "opencode/opencode.db"
+    path = Path(os.environ.get("XDG_DATA_HOME", str(platform_io.home() / ".local/share"))) / "opencode/opencode.db"
     if not path.is_file():
         return {"state": "not_observed", "sessions": 0}
     conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
@@ -413,7 +415,7 @@ def _cursor(now):
     from .supervisor_health import is_reviewer_session, record
     config = os.environ.get("CURSOR_CONFIG_DIR")
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(config) if config and config.strip() else Path(xdg) / "cursor" if xdg and xdg.strip() else Path.home() / ".cursor"
+    root = Path(config) if config and config.strip() else Path(xdg) / "cursor" if xdg and xdg.strip() else platform_io.home() / ".cursor"
     chats = root / "chats"
     result = {"state": "not_observed", "sessions": 0, "unidentified": 0,
               "errors": 0, "source_present": chats.is_dir(),

@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from . import platform_io
 from .privacy import redact_text, safe_error
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -558,9 +559,8 @@ def call_sim(
     if sc.command:
         import os
         import shlex
-        import shutil
-        first = os.path.expanduser(shlex.split(sc.command)[0])
-        if not shutil.which(first):
+        first = platform_io.expanduser(shlex.split(sc.command)[0])
+        if not platform_io.shell_can_run(first):
             return None, {"status": "command_unavailable"}
         if "simulacrum" in first and not any(os.environ.get(name) for name in
                 sc.api_key_env):
@@ -584,7 +584,7 @@ def call_sim(
             from .actions import _run_process
 
             code, stdout, stderr = _run_process(
-                os.path.expanduser(sc.command), shell=True,
+                platform_io.expanduser(sc.command), shell=True,
                 input_text=redact_text(prompt), timeout=sc.command_timeout,
                 max_bytes=COMMAND_OUTPUT_LIMIT,
             )
@@ -1295,11 +1295,9 @@ def maybe_escalate_to_advocate(
     if config.sim.backend != "api" or not ac.command or not ac.enabled:
         write_state(store, conversation_id, None, advocate_state="disabled", advocate_reason="recommend_only")
         return False, []
-    import os
     import shlex
-    import shutil
     try:
-        available = bool(shutil.which(os.path.expanduser(shlex.split(ac.command)[0])))
+        available = platform_io.shell_can_run(platform_io.expanduser(shlex.split(ac.command)[0]))
     except (ValueError, IndexError):
         available = False
     if not available:
@@ -1328,12 +1326,10 @@ def maybe_escalate_to_advocate(
     write_state(store, conversation_id, None, advocate_state="reviewing", advocate_reason="reserved")
     prompt = build_advocate_prompt(window, grounding, intent, result)
     try:
-        import os
-
         from .actions import _run_process
 
         code, stdout, _stderr = _run_process(
-            os.path.expanduser(ac.command), shell=True,
+            platform_io.expanduser(ac.command), shell=True,
             input_text=redact_text(prompt), timeout=ac.timeout,
             max_bytes=COMMAND_OUTPUT_LIMIT,
         )

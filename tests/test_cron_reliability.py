@@ -12,6 +12,7 @@ import datetime
 
 import pytest
 
+from kindex import platform_io
 from kindex.config import Config, ProfileEntry
 from kindex.store import Store
 
@@ -992,7 +993,7 @@ class TestSchedulerCommandShape:
     def _install_home(self, tmp_path, monkeypatch):
         from pathlib import Path
 
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(platform_io, "home", lambda: tmp_path)
         calls = []
         monkeypatch.setattr(
             "kindex.setup.subprocess.run",
@@ -1441,7 +1442,7 @@ class TestSchedulerLogLocation:
         from kindex import setup as ksetup
 
         cfg, base, prof = _profile_config(tmp_path)
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(platform_io, "home", lambda: tmp_path)
         monkeypatch.setattr(
             "kindex.setup.subprocess.run",
             lambda *a, **kw: type("P", (), {"returncode": 0, "stdout": ""})(),

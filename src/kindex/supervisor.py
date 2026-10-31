@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +11,8 @@ import sys
 import threading
 import time
 
+from . import platform_io
+from .platform_io import open_nofollow
 from .privacy import redact, redact_text, safe_error
 
 
@@ -68,15 +69,15 @@ def store_lock(store, name: str, *, blocking: bool = True, timeout: float | None
     if held is not None and key in held:
         yield
         return
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = open_nofollow(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         if timeout is None or not blocking:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            platform_io.lock(fd, blocking=blocking)
         else:
             deadline = time.monotonic() + max(0, timeout)
             while True:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    platform_io.lock(fd, blocking=False)
                     break
                 except BlockingIOError as error:
                     remaining = deadline - time.monotonic()
@@ -159,7 +160,7 @@ def write_state(store, conversation_id: str, state: str | None, **fields):
 
 def _transcript(path: str, limit: int) -> tuple[str, str]:
     """Bounded head goal plus recent transcript, supporting Claude/Codex JSONL."""
-    target = Path(path).expanduser()
+    target = platform_io.expanduser(Path(path))
     if not target.is_file():
         raise ValueError("Supervisor transcript is unavailable")
     with target.open("rb") as stream:
@@ -230,12 +231,11 @@ def preflight(config, conversation: str) -> tuple[str, str] | None:
         return "budget_exhausted", "budget_unavailable"
     if config.sim.command:
         import shlex
-        import shutil
         try:
-            command = os.path.expanduser(shlex.split(config.sim.command)[0])
+            command = platform_io.expanduser(shlex.split(config.sim.command)[0])
         except (ValueError, IndexError):
             return "unavailable", "command_unavailable"
-        if not shutil.which(command):
+        if not platform_io.shell_can_run(command):
             return "unavailable", "command_unavailable"
         if "simulacrum" in command and not any(os.environ.get(name) for name in
                 config.sim.api_key_env):

@@ -14,12 +14,12 @@ import os
 import re
 import threading
 import time
-import fcntl
 from pathlib import Path
 
 import pytest
 
 import kindex.config as config_mod
+from kindex import platform_io
 
 
 def _touches_ledger(src, dst, ledger: Path) -> bool:
@@ -253,7 +253,7 @@ def test_r4_1_record_degraded_is_lossless_while_lock_is_held(tmp_path):
     data_dir.mkdir()
     lock_path = data_dir / "degraded.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    platform_io.lock(fd, blocking=False)  # the product's own lock primitive
     try:
         started = time.monotonic()
         _returns_within(
@@ -262,7 +262,7 @@ def test_r4_1_record_degraded_is_lossless_while_lock_is_held(tmp_path):
         )
         assert time.monotonic() - started < 2.0, "degraded recording blocked on its lock"
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        platform_io.unlock(fd)
         os.close(fd)
     events = _events(data_dir)
     assert any(event.get("cmd") == "v8-lock-held" for event in events), (

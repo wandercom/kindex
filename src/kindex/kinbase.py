@@ -21,6 +21,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import platform_io
 from .privacy import redact, safe_error
 from .schema import ALL_NODE_TYPES, STANDINGS
 from .trust import parse_rfc3339
@@ -359,14 +360,14 @@ def read_status(repo: str | Path, *, binary="kinbase") -> dict:
     that client with no cancellation path. A recoverable failure that is already
     possible beats an unrecoverable one that is not.
     """
-    root = Path(repo).expanduser().resolve(strict=True)
+    root = platform_io.expanduser(Path(repo)).resolve(strict=True)
     return _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
 
 
 def read_explain(repo: str | Path, logical_key: str, decision: str, *,
                  binary="kinbase") -> dict:
     """Why one logical key reads as it does, and what evidence would change it."""
-    root = Path(repo).expanduser().resolve(strict=True)
+    root = platform_io.expanduser(Path(repo)).resolve(strict=True)
     return _query(
         ["explain", logical_key, "--repo", str(root), "--decision", decision],
         binary, EXPLAIN_TIMEOUT_S)
@@ -457,7 +458,7 @@ def submit_observation(repo: str | Path, text: str, node_type: str = "concept", 
         raise ValueError("Submission text exceeds the 16 KiB limit")
     if redact(text) != text:
         raise ValueError("Submission contains recognized credentials; remove them before submitting")
-    root = Path(repo).expanduser().resolve(strict=True)
+    root = platform_io.expanduser(Path(repo)).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("Submission repository must be an existing directory")
     executable = shutil.which(str(binary))
@@ -515,7 +516,7 @@ def sync_kinbase(store, repo: str | Path, *, mode="auto", binary="kinbase",
     """
     if mode not in ("auto", "raw", "reduced"):
         raise ValueError("Kinbase mode must be auto, raw, or reduced")
-    root = Path(repo).expanduser().resolve(strict=True)
+    root = platform_io.expanduser(Path(repo)).resolve(strict=True)
     executable = shutil.which(str(binary))
     if mode == "auto":
         mode = "reduced" if executable else "raw"

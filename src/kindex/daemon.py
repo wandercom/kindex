@@ -6,6 +6,7 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import platform_io
 from .privacy import safe_error
 from .privacy import redacting_print as print
 
@@ -327,7 +328,7 @@ def _project_config(base_config: "Config", root: str, directory: str) -> "Config
     reminder_nudge = cfg.reminders.remind_kindex_usage
     cfg.reminders = trusted.reminders
     cfg.reminders.remind_kindex_usage = reminder_nudge
-    cfg.data_dir = str(Path(directory).expanduser().resolve())
+    cfg.data_dir = str(platform_io.expanduser(Path(directory)).resolve())
     cfg._project_path = Path(root).resolve()
     cfg.active_profile = None
     cfg.profile_source = "project"
@@ -387,7 +388,7 @@ def remind_check_all(base_config: "Config", verbose: bool = False) -> list[dict]
     else:
         for name, entry in profiles.items():
             cfg = base_config.model_copy(deep=True)
-            cfg.data_dir = str(Path(entry.data_dir).expanduser())
+            cfg.data_dir = str(platform_io.expanduser(Path(entry.data_dir)))
             cfg._legacy_data_dir = base_config._legacy_data_dir or base_config.data_dir
             cfg.active_profile = name
             cfg.profile_source = "cron"
@@ -497,15 +498,11 @@ def _cron_lock_path(base_config: "Config"):
 
 
 def _try_cron_lock(base_config: "Config"):
-    """A non-blocking whole-run lock, None when the platform has no flock,
-    or False when another run holds it. Overlapping crontab runs raced on
+    """A non-blocking whole-run lock, None when the lock file cannot be
+    opened, or False when another run holds it. Overlapping crontab runs raced on
     session ingest and every unlocked queue."""
     import os
 
-    try:
-        import fcntl
-    except ImportError:
-        return None
     try:
         path = _cron_lock_path(base_config)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -513,7 +510,7 @@ def _try_cron_lock(base_config: "Config"):
     except OSError:
         return None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        platform_io.lock(fd, blocking=False)
     except OSError:
         os.close(fd)
         return False
@@ -610,7 +607,7 @@ def _cron_run_all(base_config: "Config", verbose: bool = False) -> list[dict]:
     else:
         for name, entry in profiles.items():
             cfg = base_config.model_copy(deep=True)
-            cfg.data_dir = str(Path(entry.data_dir).expanduser())
+            cfg.data_dir = str(platform_io.expanduser(Path(entry.data_dir)))
             cfg._legacy_data_dir = base_config._legacy_data_dir or base_config.data_dir
             cfg.active_profile = name
             cfg.profile_source = "cron"

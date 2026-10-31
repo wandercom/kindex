@@ -92,8 +92,8 @@ def test_cli_import_accepts_jsonl_with_unicode_line_separator_in_content(tmp_pat
     exported = cli(source_dir, "export", "--audience", "team", "--format", "jsonl")
     assert exported.returncode == 0, exported.stderr
     transfer = tmp_path / "graph.jsonl"
-    transfer.write_text(json.dumps(json.loads(exported.stdout), ensure_ascii=False) + "\n")
-    assert separator in transfer.read_text()
+    transfer.write_text(json.dumps(json.loads(exported.stdout), ensure_ascii=False) + "\n", encoding="utf-8")
+    assert separator in transfer.read_text(encoding="utf-8")
 
     imported = cli(dest_dir, "import", str(transfer))
     assert imported.returncode == 0, imported.stderr

@@ -7,6 +7,8 @@ import re
 import stat
 import unicodedata
 
+from . import platform_io
+
 
 TITLE_WINDOW_BYTES = 32 * 1024
 DESKTOP_REASONS = {
@@ -43,7 +45,7 @@ def _claude_title(project, session_id):
         return None
     descriptor = None
     try:
-        root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+        root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(platform_io.home() / ".claude")))
         if not root.is_absolute() or ".." in root.parts:
             return None
         encoded_project = re.sub(r"[^A-Za-z0-9]", "-", project)
@@ -104,7 +106,7 @@ def desktop_text(alert):
         subtitle = f"{agent}: {title}{suffix}"
     location = _single_line(project)
     if location:
-        home = str(Path.home())
+        home = str(platform_io.home())
         if location.startswith(home + "/"):
             location = "~" + location[len(home):]
         if len(location) > 64:

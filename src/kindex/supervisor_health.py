@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+from . import platform_io
+from .platform_io import open_nofollow
 from .supervisor_notifications import REASONS, SUBMISSION_TIMEOUT_SECONDS, diagnostic_command
 
 KINDS = {"hook", "use", "review", "delivery", "feedback", "activity"}
@@ -56,7 +58,7 @@ def _iso(value):
 
 
 def health_dir():
-    return Path(os.environ.get("KIN_HEALTH_DIR", str(Path.home() / ".kindex" / "health"))).expanduser()
+    return platform_io.expanduser(Path(os.environ.get("KIN_HEALTH_DIR", str(platform_io.home() / ".kindex" / "health"))))
 
 
 def settings():
@@ -90,7 +92,7 @@ def _db():
         raise ValueError("Health directory must not be a symlink")
     os.chmod(root, 0o700)
     path = root / "health.sqlite3"
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = open_nofollow(path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
     os.chmod(path, 0o600)
     conn = sqlite3.connect(str(path), timeout=10)
@@ -499,7 +501,7 @@ def install_monitor(*, uninstall=False, dry_run=False):
         raise ValueError("Independent launchd installation requires macOS")
     root = health_dir().resolve()
     label = "com.kindex.supervisor-health"
-    plist = Path.home() / "Library/LaunchAgents" / (label + ".plist")
+    plist = platform_io.home() / "Library/LaunchAgents" / (label + ".plist")
     command = [sys.executable, "-m", "kindex.supervisor_health", "check", "--json", "--quiet"]
     configuration = root / "config.json"
     old = json.loads(configuration.read_text(encoding="utf-8")) if configuration.exists() else {}
@@ -530,11 +532,11 @@ def install_monitor(*, uninstall=False, dry_run=False):
             plist.unlink()
         return {**plan, "enabled": False}
     for name in ("stdout.log", "stderr.log"):
-        fd = os.open(root / name, os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fd = open_nofollow(root / name, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         os.fchmod(fd, 0o600)
         os.close(fd)
     payload = {"Label": label, "ProgramArguments": command, "StartInterval": 60,
-               "RunAtLoad": True, "WorkingDirectory": str(Path.home()),
+               "RunAtLoad": True, "WorkingDirectory": str(platform_io.home()),
                "EnvironmentVariables": {"KIN_HEALTH_DIR": str(root), "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
                "StandardOutPath": str(root / "stdout.log"), "StandardErrorPath": str(root / "stderr.log")}
     previous_plist = plist.read_bytes() if plist.exists() else None

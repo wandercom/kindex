@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .. import platform_io
 from .base import AdapterMeta, AdapterOption, IngestResult
 
 
@@ -24,7 +25,7 @@ class ConversationsAdapter:
         if not directory:
             return IngestResult(created=0, errors=["--directory is required"])
         errors: list[str] = []
-        created = ingest_directory(store, Path(directory).expanduser(), verbose=verbose, limit=limit,
+        created = ingest_directory(store, platform_io.expanduser(Path(directory)), verbose=verbose, limit=limit,
                                    since=since, errors=errors)
         return IngestResult(created=created, errors=errors)
 

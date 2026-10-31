@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import platform_io
 from .privacy import redact, redact_text
 from .privacy import redacting_print as print
 
@@ -652,7 +653,7 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                 except Exception:
                     raw_dir = None
             if raw_dir:
-                resolved_dir = Path(str(raw_dir)).expanduser()
+                resolved_dir = platform_io.expanduser(Path(str(raw_dir)))
                 if not resolved_dir.is_absolute():
                     resolved_dir = project_root / resolved_dir
                 # The reminder sweep runs shell actions from every registered
@@ -895,7 +896,7 @@ def load_project_context(kin_path: Path) -> dict:
 
 def _infer_audience(project_root: Path) -> str:
     """Infer audience from directory heuristic."""
-    path_str = str(project_root).lower()
+    path_str = Path(project_root).as_posix().lower()
     if "/personal/" in path_str or "/gemweaver/" in path_str:
         return "private"
     if "/work/" in path_str:

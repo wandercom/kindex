@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .. import platform_io
 from .base import AdapterMeta, AdapterOption, IngestResult
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ class SessionsAdapter:
     def is_available(self) -> bool:
         from pathlib import Path
 
-        return Path("~/.claude").expanduser().exists()
+        return platform_io.expanduser(Path("~/.claude")).exists()
 
     def ingest(self, store, *, limit=50, since=None, verbose=False, **kwargs):
         from ..config import load_config
