@@ -4,6 +4,20 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.50.1] - 2026-11-01
+
+### Fixed
+- Node edits now commit field changes, expiry updates, and their required
+  changelog entry in one transaction. A failed write rolls back the edit;
+  lock and lifecycle checks use committed state, and concurrent appends
+  retain both additions or report an explicit SQLite conflict.
+- Node edits return the snapshot captured inside the edit transaction, so
+  post-commit access-time bookkeeping cannot report a durable append as
+  failed and cause a duplicate on retry. Deferred embedding-queue failures
+  remain observable as warnings without undoing the committed edit.
+- User-level configuration paths follow the current HOME, including isolated
+  invocations that change it after importing Kindex.
+
 ## [0.50.0] - 2026-10-30
 
 ### Changed
