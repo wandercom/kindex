@@ -2401,7 +2401,7 @@ class Store:
         aka: list[str] | None = None,
         expires: str | None = None,
     ) -> dict:
-        """Policy-aware node edit. Routes through update_node (UPDATE only).
+        """Policy-aware node edit with one transaction for changes and audit.
 
         - editable types: all fields allowed
         - additive types: only append + expires (replacement -> supersede_node)
@@ -2410,8 +2410,9 @@ class Store:
         diffs to the activity log. Reserved extra keys are never altered.
         Returns the updated node dict.
         """
-        node = self.get_node(node_id)
-        if node is None:
+        conn = self.conn
+        # Preserve unknown-id precedence without get_node's access-time commit.
+        if conn.execute("SELECT 1 FROM nodes WHERE id = ?", (node_id,)).fetchone() is None:
             raise KeyError(f"No node with id '{node_id}'")
 
         provided = {
@@ -2424,122 +2425,156 @@ class Store:
         if not provided:
             raise ValueError("edit_node requires at least one field to change")
 
-        node_type = node.get("type", "concept")
-        cls = edit_class_for(node_type, policy_overrides)
-        if cls == "managed":
-            raise EditPolicyError(
-                f"Node type '{node_type}' is managed — edit is not allowed; "
-                f"use the dedicated task/session/coordination tools"
-            )
-        if cls == "additive":
-            disallowed = sorted(set(provided) - {"append", "expires"})
-            if disallowed:
+        # Only roll back a transaction this operation successfully opened.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No node with id '{node_id}'")
+            node = self._row_to_dict(row)
+            # Match atomic_extra_update's tolerant metadata reader. Only an
+            # expiry change writes extra; unrelated metadata is preserved.
+            try:
+                extra = json.loads(row["extra"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            node["extra"] = extra
+
+            node_type = node.get("type", "concept")
+            cls = edit_class_for(node_type, policy_overrides)
+            if cls == "managed":
                 raise EditPolicyError(
-                    f"Node type '{node_type}' is additive — only append and "
-                    f"expires are allowed (got: {', '.join(disallowed)}); "
-                    f"use supersede to replace it"
+                    f"Node type '{node_type}' is managed — edit is not allowed; "
+                    f"use the dedicated task/session/coordination tools"
+                )
+            if cls == "additive":
+                disallowed = sorted(set(provided) - {"append", "expires"})
+                if disallowed:
+                    raise EditPolicyError(
+                        f"Node type '{node_type}' is additive — only append and "
+                        f"expires are allowed (got: {', '.join(disallowed)}); "
+                        f"use supersede to replace it"
+                    )
+
+            self._check_mutable_status(node, force)
+            self._check_lock(node, actor, force)
+            if expires is not None:
+                _validate_expires(expires)
+
+            updates: dict[str, Any] = {}
+            diffs: dict[str, dict] = {}
+
+            old_title = node.get("title") or ""
+            new_title = old_title
+            if title is not None and title != old_title:
+                updates["title"] = title
+                diffs["title"] = {"old": _trunc(old_title), "new": _trunc(title)}
+                new_title = title
+
+            old_content = node.get("content") or ""
+            new_content = content if content is not None else old_content
+            if append:
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                header = f"[addendum {stamp} {actor}]" if actor else f"[addendum {stamp}]"
+                prefix = f"{new_content}\n\n" if new_content else ""
+                new_content = f"{prefix}{header}\n{append}"
+            if new_content != old_content:
+                updates["content"] = new_content
+                diffs["content"] = {"old": _trunc(old_content), "new": _trunc(new_content)}
+
+            if intent is not None and intent != (node.get("intent") or ""):
+                updates["intent"] = intent
+                diffs["intent"] = {"old": _trunc(node.get("intent") or ""),
+                                   "new": _trunc(intent)}
+
+            if aka is not None:
+                old_aka = list(node.get("aka") or [])
+                if list(aka) != old_aka:
+                    updates["aka"] = list(aka)
+                    diffs["aka"] = {"old": _trunc(old_aka), "new": _trunc(list(aka))}
+
+            if "title" in updates and old_title:
+                # A rename keeps the old title reachable: preserve it as an alias
+                # so title-keyed dedup (session capture, inbox ingest, dream_deep
+                # idempotency) still matches via get_node_by_title's AKA path.
+                base_aka = list(updates.get("aka", node.get("aka") or []))
+                lowered = {a.lower() for a in base_aka}
+                if (old_title.lower() != new_title.lower()
+                        and old_title.lower() not in lowered):
+                    preserved = base_aka + [old_title]
+                    updates["aka"] = preserved
+                    diffs["aka"] = {"old": _trunc(list(node.get("aka") or [])),
+                                    "new": _trunc(preserved)}
+
+            if add_tags or remove_tags:
+                old_domains = list(node.get("domains") or [])
+                removed = set(remove_tags or [])
+                new_domains = [d for d in old_domains if d not in removed]
+                for t in add_tags or []:
+                    if t not in new_domains:
+                        new_domains.append(t)
+                if new_domains != old_domains:
+                    updates["domains"] = new_domains
+                    diffs["tags"] = {"old": _trunc(old_domains), "new": _trunc(new_domains)}
+
+            if expires is not None and expires != extra.get("expires"):
+                diffs["expires"] = {"old": extra.get("expires"), "new": expires}
+                extra["expires"] = expires
+                updates["extra"] = extra
+
+            # Direct edits count as access, as the former get_node path did.
+            # Keep that bookkeeping in the edit transaction so failure cannot
+            # commit it separately or introduce a write after the edit commits.
+            if (not self.read_only
+                    and (row["last_accessed"] or "") < _minutes_ago(_ACCESS_WRITE_MINUTES)):
+                conn.execute(
+                    "UPDATE nodes SET last_accessed = ? WHERE id = ?",
+                    (_now(), node_id),
                 )
 
-        self._check_mutable_status(node, force)
-        self._check_lock(node, actor, force)
-        if expires is not None:
-            _validate_expires(expires)
+            if updates:
+                # Same redaction/serialization as update_node, without its
+                # independent commit or best-effort activity logging.
+                values = {}
+                for key, value in updates.items():
+                    value = redact(value)
+                    if isinstance(value, (list, dict)):
+                        value = _jdumps(value)
+                    values[key] = value
+                values["updated_at"] = _now()
+                sets = ", ".join(f"{key} = ?" for key in values)
+                conn.execute(
+                    f"UPDATE nodes SET {sets} WHERE id = ?",
+                    [*values.values(), node_id],
+                )
+                self._log_in_transaction(
+                    conn, "edit_node", node_id, updates.get("title", old_title),
+                    actor or "", {"diffs": diffs, "type": node_type},
+                )
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            result = self._row_to_dict(row)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
-        updates: dict[str, Any] = {}
-        diffs: dict[str, dict] = {}
+        if "title" in updates or "content" in updates:
+            # Refresh is deferred until the edit and its required audit row
+            # commit. A queue failure degrades refresh, not the durable edit.
+            try:
+                from .vectors import enqueue_embedding
+                queued = enqueue_embedding(self, node_id)
+            except Exception:
+                logger.warning("Could not queue embedding refresh for node %s", node_id)
+            else:
+                if not queued:
+                    logger.warning("Could not queue embedding refresh for node %s", node_id)
 
-        old_title = node.get("title") or ""
-        new_title = old_title
-        if title is not None and title != old_title:
-            updates["title"] = title
-            diffs["title"] = {"old": _trunc(old_title), "new": _trunc(title)}
-            new_title = title
-
-        old_content = node.get("content") or ""
-        new_content = content if content is not None else old_content
-        if append:
-            stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-            header = f"[addendum {stamp} {actor}]" if actor else f"[addendum {stamp}]"
-            prefix = f"{new_content}\n\n" if new_content else ""
-            new_content = f"{prefix}{header}\n{append}"
-        if new_content != old_content:
-            updates["content"] = new_content
-            diffs["content"] = {"old": _trunc(old_content), "new": _trunc(new_content)}
-
-        if intent is not None and intent != (node.get("intent") or ""):
-            updates["intent"] = intent
-            diffs["intent"] = {"old": _trunc(node.get("intent") or ""),
-                               "new": _trunc(intent)}
-
-        if aka is not None:
-            old_aka = list(node.get("aka") or [])
-            if list(aka) != old_aka:
-                updates["aka"] = list(aka)
-                diffs["aka"] = {"old": _trunc(old_aka), "new": _trunc(list(aka))}
-
-        if "title" in updates and old_title:
-            # A rename keeps the old title reachable: preserve it as an alias
-            # so title-keyed dedup (session capture, inbox ingest, dream_deep
-            # idempotency) still matches via get_node_by_title's AKA path.
-            base_aka = list(updates.get("aka", node.get("aka") or []))
-            lowered = {a.lower() for a in base_aka}
-            if (old_title.lower() != new_title.lower()
-                    and old_title.lower() not in lowered):
-                preserved = base_aka + [old_title]
-                updates["aka"] = preserved
-                diffs["aka"] = {"old": _trunc(list(node.get("aka") or [])),
-                                "new": _trunc(preserved)}
-
-        if add_tags or remove_tags:
-            old_domains = list(node.get("domains") or [])
-            removed = set(remove_tags or [])
-            new_domains = [d for d in old_domains if d not in removed]
-            for t in add_tags or []:
-                if t not in new_domains:
-                    new_domains.append(t)
-            if new_domains != old_domains:
-                updates["domains"] = new_domains
-                diffs["tags"] = {"old": _trunc(old_domains), "new": _trunc(new_domains)}
-
-        exp_diff: dict[str, Any] = {}
-        if expires is not None:
-            # The expires merge must not write the extra column from the
-            # pre-check snapshot: a lock (or any extra key) committed by a
-            # concurrent agent between get_node above and the write would be
-            # silently erased. Route it through atomic_extra_update and
-            # re-check the lock against the fresh in-transaction state —
-            # LockHeldError raised here propagates and rolls back.
-            def _set_expires(fresh: dict) -> None:
-                self._check_lock({"id": node_id, "extra": fresh}, actor, force)
-                old_expires = fresh.get("expires")
-                if expires != old_expires:
-                    fresh["expires"] = expires
-                    exp_diff["old"] = old_expires
-                    exp_diff["new"] = expires
-
-            self.atomic_extra_update(node_id, _set_expires)
-            if exp_diff:
-                diffs["expires"] = {"old": exp_diff["old"],
-                                    "new": exp_diff["new"]}
-
-        if updates:
-            # _log_activity=False: edit_node writes its own (richer) entry
-            # below — without it every edit appears twice in the changelog.
-            self.update_node(node_id, _log_activity=False, **updates)
-        if updates or exp_diff:
-            self._log("edit_node", node_id, updates.get("title", old_title),
-                      actor or "", {"diffs": diffs, "type": node_type})
-            if "title" in updates or "content" in updates:
-                # Queue re-embedding — deferred to the daemon so a slow
-                # embedding provider never stalls the edit hot path
-                # (best-effort, like add_node).
-                try:
-                    from .vectors import enqueue_embedding
-                    enqueue_embedding(self, node_id)
-                except Exception:
-                    pass  # vectors not installed — edit persisted
-
-        return self.get_node(node_id)
+        return result
 
     def supersede_node(
         self,
