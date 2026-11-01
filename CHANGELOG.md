@@ -20,6 +20,10 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   including successful no-op edits, without adding a spurious changelog entry.
 - User-level configuration paths follow the current HOME, including isolated
   invocations that change it after importing Kindex.
+### Changed
+- Codex reminders queue prompts to a target session when it has an active
+  writer. A successful queue response confirms acceptance, not consumption or
+  execution; a prompt can remain pending until the session resumes.
 
 ## [0.50.0] - 2026-10-30
 
