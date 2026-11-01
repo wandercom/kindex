@@ -15,6 +15,9 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   post-commit access-time bookkeeping cannot report a durable append as
   failed and cause a duplicate on retry. Deferred embedding-queue failures
   remain observable as warnings without undoing the committed edit.
+- A refused nested edit leaves the caller's existing transaction untouched.
+  Direct edits retain access-time refresh inside the atomic transaction,
+  including successful no-op edits, without adding a spurious changelog entry.
 - User-level configuration paths follow the current HOME, including isolated
   invocations that change it after importing Kindex.
 

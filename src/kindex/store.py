@@ -2425,8 +2425,9 @@ class Store:
         if not provided:
             raise ValueError("edit_node requires at least one field to change")
 
+        # Only roll back a transaction this operation successfully opened.
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
             if row is None:
                 raise KeyError(f"No node with id '{node_id}'")
@@ -2523,6 +2524,16 @@ class Store:
                 extra["expires"] = expires
                 updates["extra"] = extra
 
+            # Direct edits count as access, as the former get_node path did.
+            # Keep that bookkeeping in the edit transaction so failure cannot
+            # commit it separately or introduce a write after the edit commits.
+            if (not self.read_only
+                    and (row["last_accessed"] or "") < _minutes_ago(_ACCESS_WRITE_MINUTES)):
+                conn.execute(
+                    "UPDATE nodes SET last_accessed = ? WHERE id = ?",
+                    (_now(), node_id),
+                )
+
             if updates:
                 # Same redaction/serialization as update_node, without its
                 # independent commit or best-effort activity logging.
@@ -2542,9 +2553,9 @@ class Store:
                     conn, "edit_node", node_id, updates.get("title", old_title),
                     actor or "", {"diffs": diffs, "type": node_type},
                 )
-                row = conn.execute(
-                    "SELECT * FROM nodes WHERE id = ?", (node_id,)
-                ).fetchone()
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
             result = self._row_to_dict(row)
             conn.commit()
         except BaseException:
