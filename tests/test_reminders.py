@@ -721,6 +721,116 @@ class TestExecuteWakeActions:
         ]
         assert "Pick up the interrupted task." in seen["kwargs"]["input_text"]
 
+    @pytest.mark.parametrize("conflict", [
+        "2026-10-30T20:32:25.081648Z ERROR codex_core::session::session: failed to initialize thread persistence: thread-store conflict: thread thread-123 already has an active writer",
+        "Error: thread/resume: thread/resume failed: thread thread-123 already has an active writer (code -32600)",
+    ])
+    @pytest.mark.parametrize("queue_result,expected_status,expected_output", [
+        ((0, "queued", ""), "completed",
+         "Queued to Codex session thread-123; execution has not been confirmed.\nqueued"),
+        ((2, "", "queue rejected"), "failed", "[stderr]\nqueue rejected"),
+        ((None, "", ""), "failed", "codex queue timed out after 300s"),
+    ])
+    def test_codex_active_writer_queues_prompt(
+        self, store, config, monkeypatch, tmp_path,
+        conflict, queue_result, expected_status, expected_output,
+    ):
+        from kindex.actions import execute_action
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return (1, "", conflict) if len(calls) == 1 else queue_result
+
+        monkeypatch.setattr("kindex.actions._run_process", fake_run)
+        monkeypatch.setattr("kindex.actions._resolve_cli", lambda name: name)
+        rid = store.add_reminder(
+            "Continue Codex", "2099-03-01T10:00:00",
+            extra={"wake_client": "codex", "wake_session_id": "thread-123",
+                   "wake_cwd": str(tmp_path), "wake_model": "gpt-5",
+                   "action_instructions": "Continue the task.",
+                   "action_mode": "codex", "action_status": "pending"},
+        )
+
+        result = execute_action(store, store.get_reminder(rid), config)
+
+        assert result["status"] == expected_status
+        assert result["output"] == expected_output
+        assert calls[0][0] == ["codex", "exec", "--cd", str(tmp_path),
+                               "--model", "gpt-5", "resume", "thread-123", "-"]
+        assert "Continue the task." in calls[0][1]["input_text"]
+        assert calls[1][0][:5] == ["codex", "queue", "--thread", "thread-123", "--message"]
+        assert "Continue the task." in calls[1][0][5]
+        assert calls[1][1]["input_text"] is None
+
+    def test_codex_closed_session_keeps_resume_execution(self, store, config, monkeypatch):
+        from kindex.actions import execute_action
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return 0, "resumed", ""
+
+        monkeypatch.setattr("kindex.actions._run_process", fake_run)
+        monkeypatch.setattr("kindex.actions._resolve_cli", lambda name: name)
+        rid = store.add_reminder(
+            "Resume Codex", "2099-03-01T10:00:00",
+            extra={"wake_client": "codex", "wake_session_id": "thread-closed",
+                   "action_instructions": "Finish the task.",
+                   "action_mode": "codex", "action_status": "pending"},
+        )
+
+        result = execute_action(store, store.get_reminder(rid), config)
+
+        assert result["status"] == "completed"
+        assert len(calls) == 1
+        assert calls[0][0] == ["codex", "exec", "resume", "thread-closed", "-"]
+        assert "Finish the task." in calls[0][1]["input_text"]
+
+    @pytest.mark.parametrize("session_id,process_result,expected_status,expected_output", [
+        ("thread-123", (1, "", "authentication failed"), "failed", "[stderr]\nauthentication failed"),
+        ("thread-123", (1, "thread-store conflict: thread thread-123 already has an active writer", ""),
+         "failed", "thread-store conflict: thread thread-123 already has an active writer"),
+        ("thread-123", (1, "", "thread-store conflict: thread other-thread already has an active writer"),
+         "failed", "[stderr]\nthread-store conflict: thread other-thread already has an active writer"),
+        ("thread-123", (None, "", ""), "failed", "codex exec timed out after 300s"),
+        ("thread-123", (0, "", "thread-store conflict: thread thread-123 already has an active writer"),
+         "completed", "[stderr]\nthread-store conflict: thread thread-123 already has an active writer"),
+        ("last", (1, "", "thread-store conflict: thread last already has an active writer"),
+         "failed", "[stderr]\nthread-store conflict: thread last already has an active writer"),
+        ("", (1, "", "thread-store conflict: thread thread-123 already has an active writer"),
+         "failed", "[stderr]\nthread-store conflict: thread thread-123 already has an active writer"),
+    ])
+    def test_codex_does_not_queue_without_matching_concrete_failure(
+        self, store, config, monkeypatch, session_id, process_result,
+        expected_status, expected_output,
+    ):
+        from kindex.actions import execute_action
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return process_result
+
+        monkeypatch.setattr("kindex.actions._run_process", fake_run)
+        monkeypatch.setattr("kindex.actions._resolve_cli", lambda name: name)
+        rid = store.add_reminder(
+            "Continue Codex", "2099-03-01T10:00:00",
+            extra={"wake_client": "codex", "wake_session_id": session_id,
+                   "action_instructions": "Continue the task.",
+                   "action_mode": "codex", "action_status": "pending"},
+        )
+
+        result = execute_action(store, store.get_reminder(rid), config)
+
+        assert result["status"] == expected_status
+        assert result["output"] == expected_output
+        assert len(calls) == 1
+        assert calls[0][:2] == ["codex", "exec"]
+
     def test_opencode_wake_uses_run_session(self, store, config, monkeypatch, tmp_path):
         from kindex.actions import execute_action
 

@@ -445,10 +445,15 @@ agent wakeup. When due, the daemon executes them automatically — simple comman
 run directly, complex Claude tasks launch `claude -p`, Codex wakeups run
 `codex exec`, and OpenCode wakeups run `opencode run`. Wakeups can resume a
 known host session id, or `last` for the latest session when the host supports
-that. This starts/resumes a headless turn from Kindex's daemon/cron context; it
-does not interrupt an idle TUI unless the host itself exposes a same-thread
-automation/server wake path. A Stop hook guard can block Claude from exiting when
-actionable reminders are pending, but it is opt-in because Claude displays
+that. This starts/resumes a headless turn from Kindex's daemon/cron context. If
+Codex reports that the target session already has an active writer, Kindex
+queues the prompt to that session. A successful queue response means Codex
+accepted the prompt; it does not confirm that the session consumed or executed
+it. If the session exits or no consumer drains its queue, the prompt can remain
+pending until the session resumes. Other idle TUIs are not interrupted unless
+their host exposes a same-thread automation/server wake path. A Stop hook guard
+can block Claude from exiting when actionable reminders are pending, but it is
+opt-in because Claude displays
 visible "Blocked by hook" output when a Stop hook blocks.
 
 Important boundary: `remind_create` records the reminder. Something must later
