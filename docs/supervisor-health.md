@@ -91,9 +91,10 @@ kin setup-cursor-hooks
 Antigravity must supply a workspace. For an unregistered directory, launch
 `agy --add-dir "$PWD"`; an empty workspace is diagnosed rather than replaced with
 the hook process's configuration directory. When a session has several workspaces
-(`agy --add-dir`), it belongs to the first one Antigravity reports, its launch
-directory. A workspace outside any Git worktree has no codebase store, so no review
-runs there; the hook still leaves its health receipt.
+(`agy --add-dir`), it belongs to the first one in a Git worktree, in the order
+Antigravity reports them, launch directory first. A session with no workspace in a
+Git worktree has no codebase store, so no review runs; the hook still leaves its
+health receipt.
 
 Cursor observes prompt/response events and delivers through supported
 `additional_context` events or one bounded completed-stop `followup_message`.

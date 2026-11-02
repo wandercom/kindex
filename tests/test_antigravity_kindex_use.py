@@ -74,6 +74,20 @@ def test_first_workspace_is_the_session_project(tmp_path):
     assert hook_project_path({"workspacePaths": [launch, added]}) == str(Path(launch).resolve())
 
 
+def test_a_run_directory_outside_git_yields_to_its_added_repository(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    repo = git_repo(tmp_path / "repo")
+    assert hook_project_path({"workspacePaths": [str(run), repo]}) == str(Path(repo).resolve())
+
+
+def test_no_workspace_in_git_stays_with_the_launch_directory(tmp_path):
+    run, added = tmp_path / "run", tmp_path / "added"
+    run.mkdir()
+    added.mkdir()
+    assert hook_project_path({"workspacePaths": [str(run), str(added)]}) == str(run.resolve())
+
+
 def test_other_hosts_multiple_roots_stay_a_refusal(tmp_path):
     roots = [git_repo(tmp_path / "a"), git_repo(tmp_path / "b")]
     with pytest.raises(ValueError, match="multiple workspaces"):

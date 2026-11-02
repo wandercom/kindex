@@ -8,7 +8,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Antigravity sessions launched with `agy --add-dir` (every Factory seat) got no
   Kindex context, no supervisor reviews and no health receipts, because each hook
   refused a session with several workspaces. A session now belongs to the first
-  workspace Antigravity reports, its launch directory.
+  workspace in a Git worktree, in the order Antigravity reports them (launch
+  directory first).
 - Antigravity priming chose its topic from the directory holding `hooks.json`, so
   every session got notes about Kindex's own configuration. It now uses the workspace.
 - Health counted no Antigravity Kindex use: agy reports MCP calls as one generic
