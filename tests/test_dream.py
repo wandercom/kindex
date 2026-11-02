@@ -211,6 +211,20 @@ class TestAutoApplySuggestions:
         assert auto_apply_suggestions(store) == 0
         assert len(store.pending_suggestions(limit=10)) == 1
 
+    def test_reports_ambiguous_suggestions_once_per_run(self, store, caplog):
+        from kindex.dream import auto_apply_suggestions
+        store.add_node("Shared project conventions")
+        store.add_node("Shared project conventions")
+        for other in ("Another concept", "Second concept", "Third concept"):
+            store.add_node(other)
+            store.add_suggestion("Shared project conventions", other, reason="Linked")
+        with caplog.at_level("WARNING", logger="kindex.dream"):
+            assert auto_apply_suggestions(store) == 0
+        reports = [r for r in caplog.records if "not auto-applied" in r.getMessage()]
+        assert len(reports) == 1
+        assert reports[0].getMessage().startswith("3 suggestions")
+        assert len(store.pending_suggestions(limit=10)) == 3
+
     def test_skips_archived_nodes(self, store):
         from kindex.dream import auto_apply_suggestions
         store.add_node("Same title", status="archived")

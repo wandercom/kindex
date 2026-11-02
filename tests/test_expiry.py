@@ -9,7 +9,8 @@ from kindex.store import Store, node_expired
 
 PAST = "2020-01-01"
 FUTURE = "2099-01-01"
-TODAY = datetime.date.today().isoformat()
+def _today() -> str:
+    return datetime.date.today().isoformat()
 
 
 @pytest.fixture
@@ -82,7 +83,7 @@ class TestPrimeContextExpiry:
         from kindex.hooks import prime_context
 
         store.add_node("Flaky CI job", node_type="watch",
-                       extra={"expires": TODAY, "owner": "jeremy"})
+                       extra={"expires": _today(), "owner": "jeremy"})
 
         section = _section(prime_context(store, topic="anything"), "Watches")
         assert "Flaky CI job" in section  # today is not yet expired
@@ -146,7 +147,7 @@ class TestDaemonExpirySweep:
     def test_keeps_unexpired_nodes(self, store):
         from kindex.daemon import _expire_nodes
 
-        today_id = store.add_node("Expires today", extra={"expires": TODAY})
+        today_id = store.add_node("Expires today", extra={"expires": _today()})
         future_id = store.add_node("Expires later", extra={"expires": FUTURE})
 
         results = _expire_nodes(store)
@@ -204,7 +205,7 @@ class TestDaemonExpirySweep:
 
 class TestNodeExpiredSemantics:
     def test_today_is_live_past_is_dead(self):
-        assert not node_expired({"extra": {"expires": TODAY}})
+        assert not node_expired({"extra": {"expires": _today()}})
         assert node_expired({"extra": {"expires": PAST}})
         assert not node_expired({"extra": {"expires": FUTURE}})
         assert not node_expired({"extra": {}})
@@ -243,7 +244,7 @@ class TestHybridSearchExpiry:
         from kindex.retrieve import hybrid_search
 
         store.add_node("Falcon today fact", content="wifi falcon42 today",
-                       extra={"expires": TODAY})
+                       extra={"expires": _today()})
         titles = {r["title"] for r in hybrid_search(store, "falcon wifi")}
         assert "Falcon today fact" in titles
 

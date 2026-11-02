@@ -155,3 +155,27 @@ def test_antigravity_prompt_is_private_stdin_stream_message_and_never_process_ar
     assert isinstance(stdin, str) and stdin.endswith("\n")
     messages = [json.loads(line) for line in stdin.splitlines() if line]
     assert messages == [{"event": "user", "message": {"role": "user", "content": prompt}}]
+
+
+@pytest.mark.parametrize("failed", [
+    {"status": "subscription_session_mismatch"},
+    {"status": "ok", "session_id": str(uuid4()), "response": "{}", "usage": {}},
+], ids=["worker_saw_other_conversation", "result_from_other_conversation"])
+def test_conversation_the_provider_lost_is_retired_so_the_next_review_starts_fresh(wire, failed):
+    write(wire["root"] / "allowances.json", wire["ledger"])
+    write(wire["workspace"] / "session.json", wire["receipt"])
+    write(wire["workspace"] / "observed-native.json", wire["checkpoint"])
+    fresh_id = str(uuid4())
+    answer = json.dumps({"rating": 0.8, "note": "PERSISTENCE_CONTRACT_NOTE"})
+    wire["provider"].side_effect = [
+        failed, {"status": "ok", "session_id": fresh_id, "response": answer, "usage": {}}]
+
+    first = native.run_review(wire["cfg"], CONVERSATION, "Review after the provider pruned it")
+    assert first["status"] == "subscription_session_mismatch"
+    assert wire["provider"].call_args_list[0].args[1] == wire["id"]
+
+    second = native.run_review(wire["cfg"], CONVERSATION, "Review after the provider pruned it")
+    assert second["status"] == "ok"
+    assert wire["provider"].call_args_list[1].args[1] is None
+    assert json.loads((wire["workspace"] / "session.json").read_text())["session_id"] == fresh_id
+    assert json.loads((wire["workspace"] / "observed-native.json").read_text())["session_id"] == fresh_id
