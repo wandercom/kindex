@@ -1407,7 +1407,7 @@ make clean        # remove build artifacts
 
 [Business Source License 1.1](LICENSE). Copyright (c) 2026 Wander. Kindex is a Wander project.
 
-You may use Kindex in production, including at work, but not offer it to others as a hosted or managed service. Each version becomes available under the Apache License 2.0 four years after its release. Versions up to and including 0.51.0 were released under the MIT license and remain available under it.
+You may use Kindex in production, including at work, but not offer it to others as a hosted or managed service. Each version becomes available under the Apache License 2.0 four years after its release. Releases up to and including 0.51.0 were published under the MIT license and remain available under it; [LICENSE-MIT](LICENSE-MIT) keeps that notice for them and for code contributed under it.
 
 <!-- mcp-name: io.github.wandercom/kindex -->
 

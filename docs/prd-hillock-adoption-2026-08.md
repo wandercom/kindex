@@ -123,7 +123,7 @@ candidate generator belongs.
 
 Two hard blockers on the code itself:
 
-- **AGPL-3.0 vs Kindex's MIT.** Nothing may be vendored. Ideas are not copyrightable;
+- **AGPL-3.0 vs Kindex's BSL 1.1 (MIT through 0.51.0).** Nothing may be vendored. Ideas are not copyrightable;
   implementations are. Clean-room only.
 - **~2.5 GB of dependencies.** PyTorch + spaCy + GLiREL-Large + fastcoref, against Kindex's
   current pure-Python core plus optional `sqlite-vec`. This is dispositive for anything

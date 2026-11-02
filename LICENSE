@@ -3,7 +3,9 @@ Business Source License 1.1
 Parameters
 
 Licensor:             Wander
-Licensed Work:        Kindex, every version released after 0.51.0.
+Licensed Work:        Kindex, other than the releases up to and including
+                      0.51.0 (git tag v0.51.0), which remain under the MIT
+                      License in LICENSE-MIT.
                       The Licensed Work is (c) 2026 Wander.
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided your use does not include offering the

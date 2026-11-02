@@ -8,8 +8,9 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - Kindex is licensed under the Business Source License 1.1 instead of MIT.
   Production use is allowed except offering Kindex to others as a hosted or
   managed service; each version becomes available under the Apache License
-  2.0 four years after its release. Versions up to and including 0.51.0
-  remain available under MIT.
+  2.0 four years after its release. Releases up to and including 0.51.0
+  remain available under MIT, and `LICENSE-MIT` keeps the MIT notice for
+  them and for code contributed under it.
 
 ## [0.51.0] - 2026-11-02
 
