@@ -39,10 +39,12 @@ def prime_context(
     config: Config | None = None,
     conversation_id: str | None = None,
     adapter: str | None = None,
+    project_path: str | None = None,
 ) -> str:
     """Generate compact context injection (~500-750 tokens) for SessionStart hook.
 
-    - Auto-detects topic from current working directory if not provided
+    - Auto-detects topic from project_path, else the working directory (a host
+      may run its hooks somewhere unrelated to the session's workspace)
     - Uses hybrid_search to find relevant nodes
     - Formats as summarized/executive tier
     - Includes active operational nodes (constraints, watches)
@@ -67,7 +69,7 @@ def prime_context(
     # Auto-detect topic from cwd if not provided. Topic detection reads
     # the store; a failure degrades to the directory-name fallback.
     if not topic:
-        cwd = os.getcwd()
+        cwd = project_path or os.getcwd()
         try:
             domains = detect_domain_from_path(store, cwd)
         except Exception as e:

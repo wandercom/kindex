@@ -455,6 +455,9 @@ def install_antigravity_mcp(config: "Config", dry_run: bool = False) -> list[str
             actions.append(f"Would add Antigravity MCP server to {settings_path}")
             continue
         settings_path.parent.mkdir(parents=True, exist_ok=True)
+        if settings_path.is_symlink() and not settings_path.exists():
+            settings_path.unlink()  # A dangling link points at nothing worth keeping.
+            actions.append(f"Replaced dangling symlink at {settings_path}")
         settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         actions.append(f"Added {label} MCP server: kindex -> kin-mcp")
         actions.append(f"Wrote {settings_path}")

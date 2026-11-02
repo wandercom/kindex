@@ -455,6 +455,22 @@ class TestSetupAntigravity:
         assert editor["mcpServers"]["kindex"] == {"command": "kin-mcp", "args": []}
         assert cli["mcpServers"]["kindex"] == {"command": "kin-mcp", "args": []}
 
+    def test_install_antigravity_mcp_replaces_a_dangling_symlink(self, tmp_path):
+        from kindex.setup import install_antigravity_mcp
+
+        ag_dir = tmp_path / ".gemini" / "config"
+        cli_dir = tmp_path / ".gemini" / "antigravity-cli"
+        ag_dir.mkdir(parents=True)
+        cli_dir.mkdir(parents=True)
+        (cli_dir / "mcp_config.json").symlink_to(tmp_path / "deleted" / "mcp_config.json")
+
+        cfg = Config(data_dir=str(tmp_path), antigravity_dir=str(ag_dir), antigravity_cli_dir=str(cli_dir))
+        install_antigravity_mcp(cfg)
+
+        installed = cli_dir / "mcp_config.json"
+        assert not installed.is_symlink()
+        assert json.loads(installed.read_text())["mcpServers"]["kindex"] == {"command": "kin-mcp", "args": []}
+
     def test_uninstall_antigravity_mcp_preserves_other_servers(self, tmp_path):
         from kindex.setup import uninstall_antigravity_mcp
 

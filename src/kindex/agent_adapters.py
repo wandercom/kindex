@@ -28,8 +28,9 @@ def hook_project_path(payload: dict, explicit: str | None = None) -> str:
     """Resolve native workspace metadata, independent of a hook's process cwd.
 
     Antigravity runs global hook commands in its configuration directory and
-    sends the real workspace in workspacePaths. Multiple distinct worktrees
-    require an explicit project selection instead of arbitrarily taking one.
+    sends the real workspace in workspacePaths, launch directory first and each
+    --add-dir after it, so the session belongs to the first entry. Other hosts'
+    multiple distinct worktrees require an explicit project selection.
     """
     from pathlib import Path
     from .config import resolve_project_root
@@ -38,9 +39,12 @@ def hook_project_path(payload: dict, explicit: str | None = None) -> str:
         if not isinstance(selected, str) or not Path(selected).is_absolute():
             raise ValueError("Hook project path must be absolute")
         return str(resolve_project_root(selected))
-    paths = payload.get("workspacePaths") or payload.get("workspace_paths") or payload.get("workspace_roots")
+    ordered = payload.get("workspacePaths") or payload.get("workspace_paths")
+    paths = ordered or payload.get("workspace_roots")
     if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not Path(p).is_absolute() for p in paths):
         raise ValueError("Hook requires an explicit workspace path")
+    if ordered:
+        return str(resolve_project_root(ordered[0]))
     roots = {str(resolve_project_root(path)) for path in paths}
     if len(roots) != 1:
         raise ValueError("Hook has multiple workspaces; select one explicit project_path")
