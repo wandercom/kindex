@@ -4,5 +4,5 @@
   "description": "Repo-local Kindex memory and durable tasks for Claude function hooks (Claude Code mod, 2.1.287+)",
   "author": {"name": "Wander"},
   "homepage": "https://kindex.tools/",
-  "license": "MIT"
+  "license": "BUSL-1.1"
 }

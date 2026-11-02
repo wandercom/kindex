@@ -9,7 +9,7 @@
   },
   "homepage": "https://kindex.tools/",
   "repository": "https://github.com/wandercom/kindex",
-  "license": "MIT",
+  "license": "BUSL-1.1",
   "keywords": [
     "knowledge-graph",
     "memory",
