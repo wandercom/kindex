@@ -270,9 +270,11 @@ def run_review(config, conversation_id, prompt):
             session_id = receipt.session_id
             if not isinstance(result, dict):
                 result = {"status": "invalid_output"}
+            lost = result.get("status") == "subscription_session_mismatch"
             if result.get("status") == "ok":
                 returned_id = result.get("session_id")
                 if not _session_id(returned_id) or (session_id and returned_id != session_id):
+                    lost = _session_id(returned_id)  # a malformed ID proves nothing was lost
                     result = {"status": "subscription_session_mismatch"}
                 else:
                     # A valid native session remains resumable even if its advisory is malformed.
@@ -284,6 +286,13 @@ def run_review(config, conversation_id, prompt):
                         result = {**result, "usage": {}}
             receipt.status = result.get("status", "unknown")
             receipt.usage = result.get("usage", {})
+            if lost:
+                # The provider answered from another conversation, so it can no
+                # longer resume the saved one (AGY prunes old transcripts). Retire
+                # it: otherwise every later review fails here until the allowance
+                # runs out. This attempt stays failed; the next one starts fresh.
+                receipt.session_id = None
+                (workspace / "observed-native.json").unlink(missing_ok=True)
             if receipt.session_id:
                 _register_native(backend, json.dumps({"session_id": receipt.session_id}), workspace)
             _write(workspace / "session.json", receipt)

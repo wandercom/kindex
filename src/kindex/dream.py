@@ -375,6 +375,7 @@ def auto_apply_suggestions(store: Store) -> int:
     """
     suggestions = store.pending_suggestions(limit=100)
     applied = 0
+    unresolved: list[str] = []
 
     for s in suggestions:
         # Domain co-membership is a weak, derived signal, and a dedup
@@ -393,7 +394,7 @@ def auto_apply_suggestions(store: Store) -> int:
             node_a = store.resolve_suggestion_node(concept_a, identity_kind)
             node_b = store.resolve_suggestion_node(concept_b, identity_kind)
         except ValueError as exc:
-            logger.warning("suggestion %s was not auto-applied: %s", s["id"], exc)
+            unresolved.append(f"suggestion {s['id']}: {exc}")
             continue
 
         if not node_a or not node_b:
@@ -402,12 +403,9 @@ def auto_apply_suggestions(store: Store) -> int:
                 missing.append(concept_a)
             if not node_b:
                 missing.append(concept_b)
-            logger.warning(
-                "suggestion %s remains pending because endpoint(s) no longer "
-                "resolve under %s identity: %s",
-                s["id"],
-                identity_kind,
-                ", ".join(missing),
+            unresolved.append(
+                f"suggestion {s['id']} endpoint(s) no longer resolve under "
+                f"{identity_kind} identity: {', '.join(missing)}"
             )
             continue
         if node_a.get("status") != "active" or node_b.get("status") != "active":
@@ -443,6 +441,10 @@ def auto_apply_suggestions(store: Store) -> int:
         store.update_suggestion(s["id"], "accepted")
         applied += 1
 
+    # These stay pending and fail again on every cycle, so report them once a run.
+    if unresolved:
+        logger.warning("%d suggestions were not auto-applied; first: %s",
+                       len(unresolved), unresolved[0])
     return applied
 
 

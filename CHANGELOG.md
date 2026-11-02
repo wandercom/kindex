@@ -4,6 +4,14 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- A subscription review whose saved provider conversation no longer exists
+  retires it, so the next review starts fresh. AGY prunes old transcripts, and
+  these sessions previously failed every review until the allowance ran out.
+- Dream reports unresolvable pending suggestions once per run instead of one
+  line each. They are retried on every cycle, which grew the cron log without
+  bound.
+
 ## [0.50.1] - 2026-11-01
 
 ### Fixed
