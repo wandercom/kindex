@@ -9,6 +9,8 @@ from kindex.store import Store, node_expired
 
 PAST = "2020-01-01"
 FUTURE = "2099-01-01"
+
+
 def _today() -> str:
     return datetime.date.today().isoformat()
 
