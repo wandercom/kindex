@@ -32,6 +32,13 @@ class IntegrationError(ValueError):
         super().__init__(message)
 
 
+class NoWorktree(IntegrationError):
+    """The directory is outside any Git worktree, so it has no codebase store."""
+
+    def __init__(self):
+        super().__init__("invalid_scope", "No Git worktree: choose an explicit Kindex profile using the legacy CLI; Personal is not an implicit fallback")
+
+
 def _digest(value) -> str:
     # serde_json's sorted object keys and compact UTF-8 form, used by Signet-eval.
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -58,7 +65,7 @@ def project_scope(scope: dict) -> dict:
     probe = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
                            capture_output=True, text=True, timeout=3)
     if probe.returncode:
-        raise IntegrationError("invalid_scope", "No Git worktree: choose an explicit Kindex profile using the legacy CLI; Personal is not an implicit fallback")
+        raise NoWorktree()
     root = Path(probe.stdout.strip()).resolve()
     return {"project_path": str(root), "session_id": scope["session_id"],
             "agent": scope.get("agent", "claude"), **({"profile": scope["profile"]} if scope.get("profile") else {})}

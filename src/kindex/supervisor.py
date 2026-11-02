@@ -413,7 +413,7 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
     if os.environ.get("KINDEX_REVIEW_WORKER") == "1":
         return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "review_worker"}}
     from .attention import extract_conversation_text, resolve_conversation_id
-    from .integrations import open_project_store, project_scope
+    from .integrations import NoWorktree, open_project_store, project_scope
     from .agent_settings import apply_agent_overrides, resolve_agent_instance_key
     from .store import Store
     # Explicitly disabled callers do not need a Git worktree or a session.
@@ -425,7 +425,9 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
     cursor_event = str(payload.get("hook_event_name") or "") if adapter == "cursor" else ""
     # Where the host says the session runs, before any workspace choice
     # below: native activity is recorded there.
-    launch_paths = [value for value in (project_path, payload.get("cwd"), payload.get("project_path"))
+    workspaces = payload.get("workspacePaths") or payload.get("workspace_paths")
+    launch_paths = [value for value in (project_path, payload.get("cwd"), payload.get("project_path"),
+                                        workspaces[0] if isinstance(workspaces, list) and workspaces else None)
                     if isinstance(value, str) and value and os.path.isabs(value)]
     deliver = True
     if adapter == "cursor":
@@ -478,7 +480,15 @@ def hook_request(payload: dict, adapter: str, *, config=None, project_path=None)
                 record_hook_receipt(disabled_scope, launch_paths, state="disabled")
                 record_health(disabled_scope, "review", source="hook", state="disabled", reason="disabled", event_id="disabled")
             return {"ok": True, "context": "", "supervisor": {"state": "disabled"}}
-    scope = project_scope({"session_id": sid, "agent": adapter, "project_path": launch_path})
+    try:
+        scope = project_scope({"session_id": sid, "agent": adapter, "project_path": launch_path})
+    except NoWorktree:
+        # There is nothing to review against and nothing an agent could do about
+        # it, so the fact goes in the receipt and not to the model on every turn.
+        if sid:
+            record_hook_receipt({"project_path": str(root), "agent": adapter, "session_id": sid},
+                                launch_paths, state="skipped", reason="no_worktree")
+        return {"ok": True, "context": "", "supervisor": {"state": "skipped", "reason": "no_worktree"}}
     # A hook never migrates (see Store(migrate=False)); the host's timeout
     # would kill the snapshot copy.
     store = (Store(config, migrate=False) if config is not None

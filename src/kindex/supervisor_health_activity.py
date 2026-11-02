@@ -15,6 +15,7 @@ import sqlite3
 MAX_FILES = 64
 SUBAGENTS_PER_SESSION = 16
 MAX_DIRS = 512
+AG_MAX_DIRS = 8192
 WINDOW = 65536
 RECENT = 1200
 
@@ -52,7 +53,7 @@ def _rows(path, head=False):
             yield row
 
 
-def _recent_dirs(root):
+def _recent_dirs(root, limit=MAX_DIRS):
     if not root.is_dir():
         return []
     # The count is capped before recursion. No walk of old transcript contents.
@@ -63,7 +64,7 @@ def _recent_dirs(root):
                 raise ObservationIncomplete("Native directory enumeration limit reached")
             if entry.is_dir(follow_symlinks=False):
                 entries.append((entry.stat().st_mtime, Path(entry.path)))
-    if len(entries) > MAX_DIRS:
+    if len(entries) > limit:
         raise ObservationIncomplete("Native project directory limit reached")
     return [p for _, p in sorted(entries, reverse=True)]
 
@@ -133,8 +134,17 @@ def _files(agent, now):
                 _extend_candidates(candidates, directory.glob("*.jsonl"))
     else:
         root = home / ".gemini" / "antigravity-cli" / "brain"
-        candidates = [p / ".system_generated/logs/transcript_full.jsonl" for p in _recent_dirs(root)]
+        # One conversation per directory, and automation leaves hundreds of them.
+        candidates = [p / ".system_generated/logs/transcript_full.jsonl" for p in _recent_dirs(root, AG_MAX_DIRS)]
     eligible = _eligible(candidates[:10000], now)
+    if agent == "antigravity" and len(eligible) > MAX_FILES:
+        # Automation a launcher registered (Kinbase's classifier runs dozens at
+        # once) must not use up the bound that the sessions it never touches need.
+        from .supervisor_health import is_reviewer_session
+        projects = _ag_projects()
+        eligible = [entry for entry in eligible
+                    if not is_reviewer_session(agent, entry[1].parents[2].name, projects.get(entry[1].parents[2].name),
+                                               allow_unknown_project=entry[1].parents[2].name not in projects)]
     if len(eligible) > MAX_FILES:
         raise ObservationIncomplete("Native recent transcript limit reached")
     if agent == "claude":
@@ -181,17 +191,26 @@ def _ag_projects():
                     uris = summary.get("WorkspaceURIs", [])
                     if not isinstance(uris, list):
                         continue
-                    for uri in uris[:16]:
+                    # The launch directory comes first; the rest are --add-dir.
+                    for uri in uris[:1]:
                         if not isinstance(uri, str):
                             continue
                         parsed = urlsplit(uri)
                         if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
                             remember(sid, unquote(parsed.path))
     # An exact prior hook receipt supplies identity, never activity. This also
-    # supports resumed AGY sessions absent from the bounded history tail.
+    # supports resumed AGY sessions absent from the bounded history tail. The
+    # host's own record outranks it, and one hook leaves a receipt under both the
+    # repository and the launch directory inside it, which is not a conflict.
     with _db() as conn:
         rows = conn.execute("SELECT DISTINCT s.session_id,s.project_path FROM scopes s JOIN events e ON e.scope_id=s.id WHERE s.agent='antigravity' AND e.kind='hook' ORDER BY s.last_seen DESC LIMIT 1000").fetchall()
-        for sid, project in rows:
+    receipts = {}
+    for sid, project in rows:
+        if sid not in mappings:
+            receipts.setdefault(sid, set()).add(project)
+    for sid, paths in receipts.items():
+        launch = max(paths, key=len)
+        for project in [launch] if all(Path(launch).is_relative_to(p) for p in paths) else paths:
             remember(sid, project)
     # Conflicting identities remain unverified; never choose a nearby session.
     return {sid: next(iter(projects)) if len(projects) == 1 else None
@@ -212,7 +231,7 @@ def _tool_name(raw):
 # optionally behind VAR=value assignments or a path to the executable.
 _KIN_CLI = re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?kin[ \t]+([a-z][a-z-]*)(?:[ \t]+([a-z][a-z-]*))?")
 _CLI_ALIASES = {"list": "list_nodes", "tag segment": "tag_update", "tag end": "tag_update"}
-_SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell"}
+_SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell", "run_command"}
 
 
 def _cli_uses(command):
@@ -235,12 +254,19 @@ def _cli_uses(command):
 
 def _call_uses(call):
     """Kindex tool names one native tool call used: MCP by name, CLI by command."""
+    if call.get("name") == "call_mcp_tool":
+        # Antigravity loads MCP tools on demand behind this one generic tool.
+        target = call.get("args")
+        if not isinstance(target, dict):
+            return []
+        name = _tool_name(f"{target.get('ServerName')}__{target.get('ToolName')}")
+        return [name] if name else []
     name = _tool_name(call.get("name"))
     if name:
         return [name]
     if call.get("name") not in _SHELL_TOOLS:
         return []
-    args = call.get("input")
+    args = call.get("input", call.get("args"))
     if args is None and isinstance(call.get("arguments"), str):
         try:
             args = json.loads(call["arguments"])
@@ -248,7 +274,7 @@ def _call_uses(call):
             return []
     if not isinstance(args, dict):
         return []
-    command = args.get("command", args.get("cmd"))
+    command = args.get("command", args.get("cmd", args.get("CommandLine")))
     if isinstance(command, list):
         parts = [part for part in command if isinstance(part, str)]
         # ["kin", "add", ...] joins to a command; ["bash", "-lc", "kin add"] holds one.

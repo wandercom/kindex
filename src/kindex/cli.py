@@ -2714,6 +2714,7 @@ def cmd_agent_prime_hook(args):
     adapter = normalize_adapter(getattr(args, "adapter", "plain"))
     client = normalize_adapter(getattr(args, "client", None) or adapter)
     payload = read_hook_payload()
+    args.hook_payload = payload
     if adapter == "antigravity" and payload.get("workspacePaths"):
         from .agent_adapters import hook_project_path
         args.project_path = hook_project_path(payload, getattr(args, "project_path", None))
@@ -2754,6 +2755,7 @@ def cmd_agent_prime_hook(args):
         config=cfg,
         conversation_id=conversation_id,
         adapter=scope_adapter(client),
+        project_path=getattr(args, "project_path", None),
     )
     store.set_meta(meta_key, datetime.datetime.now().isoformat(timespec="seconds"))
     rendered = _hook_context_output(
@@ -5397,9 +5399,12 @@ def cmd_supervisor_hook(args):
         return
     from .attention import read_hook_payload
     payload = read_hook_payload()
+    args.hook_payload = payload
     result = _supervisor_hook_result(args, payload, args.adapter)
     if args.json:
         print(json.dumps(result))
+    elif not result.get("ok") and _antigravity_repeat_invocation(args.adapter, payload):
+        return
     elif args.adapter == "cursor":
         event = str(payload.get("hook_event_name") or "")
         context = result.get("context", "")
@@ -8624,6 +8629,18 @@ def _degrade_hook_failure(args, exc: BaseException) -> None:
                   file=sys.stderr)
 
 
+def _antigravity_repeat_invocation(adapter: str, payload) -> bool:
+    """PreInvocation fires before every model call of a turn. A repeated
+    diagnostic is a new instruction each time, and agents chase it instead of
+    the user's work, so one says it only on the turn's first call."""
+    if adapter != "antigravity" or not isinstance(payload, dict):
+        return False
+    try:
+        return int(payload.get("invocationNum") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _degraded_hook_output(args, exc: BaseException) -> str:
     from .agent_adapters import normalize_adapter, render_hook_context
 
@@ -8635,6 +8652,8 @@ def _degraded_hook_output(args, exc: BaseException) -> str:
     if command == "prime":
         return line + "\n"
     adapter = normalize_adapter(getattr(args, "adapter", None) or "plain")
+    if _antigravity_repeat_invocation(adapter, getattr(args, "hook_payload", None)):
+        return ""
     if command == "agent-prime-hook":
         rendered = render_hook_context(
             line, adapter=adapter, event=getattr(args, "event", None) or "PreInvocation")
