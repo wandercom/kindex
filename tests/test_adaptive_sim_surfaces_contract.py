@@ -156,7 +156,7 @@ def test_attention_cannot_override_real_money_admission_at_dispatch(box, monkeyp
     assert box.status()["failures"] == 0
 
 
-def test_attention_cannot_override_native_counts(box, monkeypatch):
+def test_attention_cannot_override_native_counts(box, monkeypatch, utc_calendar):
     """C4: attention cannot create native provider calls past existing limits."""
     from kindex import subscription_review as native
     monkeypatch.setattr(sim, "call_sim", real_call_sim)

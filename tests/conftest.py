@@ -1,6 +1,10 @@
 """Shared test fixtures."""
 
 import re
+from datetime import date as _CalendarDate
+from datetime import datetime as _RealDateTime
+from datetime import timedelta as _DayDelta
+from datetime import timezone as _CalendarZone
 from pathlib import Path
 
 import pytest
@@ -127,3 +131,70 @@ def tmp_vault(tmp_path):
     v = Vault(cfg)
     v.ensure_dirs()
     return v.load()
+
+
+# --- UTC calendar control (run kindex-clock-test-r1) -------------------------
+# Authority: normative. Cites contracts/review-ledger-calendar-contract.md
+# @sha256:af69a4e2f1cb2280500126076612f210a9b45827d7eda70c5591fff996890003
+# sections "The calendar seam" and "The utc_calendar fixture", and Product
+# Specification R1.1-R1.4 / D-2 / D-4. TESTING.md T1, T4, T21; the single
+# attribute substitution below is the recorded exception to T16 in PS D-2.
+# Only the one module attribute named there is replaced; nothing else is.
+
+
+class _UtcCalendar:
+    """Controller handed to a check by the ``utc_calendar`` fixture.
+
+    Holds one UTC date at noon until ``advance_day()`` moves it, across any
+    number of reads (the contract states the read site runs twice per
+    successful reservation, so movement is never counted in reads).
+    ``type(utc_calendar)(some_date)`` builds an unread instance that installs
+    nothing, for checking ``assert_read()`` itself.
+    """
+
+    def __init__(self, start_date):
+        self.reads = 0
+        controller = self
+
+        class _ControlledDateTime(_RealDateTime):
+            @classmethod
+            def now(cls, tz=None):
+                controller.reads += 1
+                current = controller._current
+                if tz is None:
+                    return current.replace(tzinfo=None)
+                return current.astimezone(tz)
+
+        self._current = _ControlledDateTime(
+            start_date.year, start_date.month, start_date.day, 12, 0,
+            tzinfo=_CalendarZone.utc,
+        )
+        self.datetime_class = _ControlledDateTime
+
+    def advance_day(self):
+        """Move the controlled date forward one day; the only movement."""
+        self._current = self._current + _DayDelta(days=1)
+
+    def assert_read(self):
+        """Fail when the controlled calendar was never read (PS R1.4)."""
+        if self.reads == 0:
+            raise AssertionError(
+                "utc_calendar control was never read; the check would "
+                "silently run against the real UTC date"
+            )
+
+
+@pytest.fixture
+def utc_calendar(monkeypatch):
+    """Opt-in controlled UTC calendar, starting 2031-12-31 at noon UTC.
+
+    Never autouse (PS D-4): a check gains control by naming this fixture.
+    Teardown calls ``assert_read()`` so a dead control fails the check
+    instead of falling back to the real date (PS R1.4).
+    """
+    from kindex import subscription_review as native
+
+    calendar = _UtcCalendar(_CalendarDate(2031, 12, 31))
+    monkeypatch.setattr(native, "datetime", calendar.datetime_class)
+    yield calendar
+    calendar.assert_read()
