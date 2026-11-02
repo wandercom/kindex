@@ -8,7 +8,7 @@ Kindex is a local-first tool. Your data stays on your machine. We don't collect 
 
 ## What Kindex Is
 
-Kindex is an open-source, local-first knowledge graph that runs entirely on your computer. It stores data in a local SQLite database in your home directory. It operates as a CLI tool and MCP server — there is no cloud service, no account system, and no server infrastructure.
+Kindex is a source-available, local-first knowledge graph that runs entirely on your computer. It stores data in a local SQLite database in your home directory. It operates as a CLI tool and MCP server — there is no cloud service, no account system, and no server infrastructure.
 
 ## Data We Collect
 
