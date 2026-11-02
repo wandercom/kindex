@@ -114,7 +114,7 @@ def _subagent_file(path):
     return path.parent.name == "subagents" and path.name.startswith("agent-")
 
 
-def _files(agent, now, projects=None):
+def _files(agent, now):
     home = Path.home()
     if agent == "claude":
         root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude"))) / "projects"
@@ -137,11 +137,11 @@ def _files(agent, now, projects=None):
         # One conversation per directory, and automation leaves hundreds of them.
         candidates = [p / ".system_generated/logs/transcript_full.jsonl" for p in _recent_dirs(root, AG_MAX_DIRS)]
     eligible = _eligible(candidates[:10000], now)
-    if agent == "antigravity":
+    if agent == "antigravity" and len(eligible) > MAX_FILES:
         # Automation a launcher registered (Kinbase's classifier runs dozens at
         # once) must not use up the bound that the sessions it never touches need.
         from .supervisor_health import is_reviewer_session
-        projects = projects or {}
+        projects = _ag_projects()
         eligible = [entry for entry in eligible
                     if not is_reviewer_session(agent, entry[1].parents[2].name, projects.get(entry[1].parents[2].name),
                                                allow_unknown_project=entry[1].parents[2].name not in projects)]
@@ -506,9 +506,9 @@ def observe_activity(now):
     for agent in ("claude", "codex", "antigravity"):
         count = unidentified = errors = 0
         try:
+            root, files = _files(agent, now)
             # AGY: session -> project. Claude: session directory -> parent scope, filled as parents scan.
             projects = _ag_projects() if agent == "antigravity" else {}
-            root, files = _files(agent, now, projects)
             for path in files:
                 try:
                     observed = _jsonl(agent, path, now, projects)
