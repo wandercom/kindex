@@ -839,7 +839,9 @@ class ReminderConfig(BaseModel):
     # [reminders] to suppress the nudge for repos that don't want it.
     remind_kindex_usage: bool = True
     check_interval: int = 300
-    default_channels: list[str] = Field(default_factory=lambda: ["system"])
+    default_channels: list[str] = Field(default_factory=lambda: ["output"])
+    output_destination: str = "/dev/null"
+    output_timeout: float = Field(default=10.0, gt=0, le=60)
     snooze_duration: int = 900
     auto_snooze_timeout: int = 300
     # Each consecutive automatic snooze doubles the last, starting from

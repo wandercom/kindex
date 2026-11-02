@@ -441,27 +441,23 @@ With the directives active, the agent will:
 ### Actionable Reminders
 
 Reminders can carry shell commands, natural-language instructions, or a headless
-agent wakeup. When due, the daemon executes them automatically — simple commands
-run directly, complex Claude tasks launch `claude -p`, Codex wakeups run
-`codex exec`, and OpenCode wakeups run `opencode run`. Wakeups can resume a
-known host session id, or `last` for the latest session when the host supports
-that. This starts/resumes a headless turn from Kindex's daemon/cron context. If
-Codex reports that the target session already has an active writer, Kindex
-queues the prompt to that session. A successful queue response means Codex
-accepted the prompt; it does not confirm that the session consumed or executed
-it. If the session exits or no consumer drains its queue, the prompt can remain
-pending until the session resumes. Other idle TUIs are not interrupted unless
-their host exposes a same-thread automation/server wake path. A Stop hook guard
-can block Claude from exiting when actionable reminders are pending, but it is
-opt-in because Claude displays
-visible "Blocked by hook" output when a Stop hook blocks.
+agent wakeup. Codex, Claude, Antigravity, Cursor, OpenCode and Muse can start or
+resume a turn using their documented CLI surfaces. Explicit session IDs and the
+creation-time working directory are preserved. Codex can queue to the same
+session after a recognized active-writer conflict; queue acceptance is not
+execution confirmation. Other clients offer headless resume, not live injection.
 
-Important boundary: `remind_create` records the reminder. Something must later
-run `kin remind check`, `kin remind exec`, `kin cron`, or an installed
-`kin setup-cron` schedule for due reminders to fire. Wake reminders are a
-Kindex capability for Codex and OpenCode because those clients expose
-headless commands; they are not a reentrant scheduler for an already-idle
-interactive session.
+Notifications default to an `output` channel writing to `/dev/null`, independently
+of wakes. Set `reminders.output_destination` or `--destination` to an absolute
+file/device path, `fd:N`, or an HTTP(S) POST endpoint. Output failures never trigger
+terminal/system fallback. Existing explicit channel configurations remain valid.
+See [notification routing](docs/notification-routing.md) for supported transports,
+configuration, failure states, and migration guidance.
+
+`remind_create` stores the reminder. A later `kin remind check`, `kin remind exec`,
+`kin cron`, or installed `kin setup-cron` schedule must run it. No UI automation or
+permission bypass is used. `last` is pinned when the reminder is created, never
+resolved at firing time.
 
 Hook-time reminder injection uses a scoped reminder board. When a client supplies a chat/session id (`conversation_id`, `chat_id`, `session_id`, `CLAUDE_SESSION_ID`, `CODEX_SESSION_ID`, `OPENCODE_SESSION_ID`, `CURSOR_SESSION_ID`, etc.), Kindex injects only reminders scoped to that id plus reminders explicitly marked `--scope global`. Legacy unscoped reminders still work for manual `kin prompt-check`, daemon checks, and notifications, but they are not injected into an identified chat by default.
 
@@ -1327,7 +1323,9 @@ reminders:
   check_interval: 300            # 5 min base interval
   adaptive_scheduling: true      # adjust interval based on nearest reminder
   min_interval: 300              # floor for adaptive scheduling
-  default_channels: [system]     # system, slack, email, claude, terminal
+  default_channels: [output]     # explicit legacy channels remain supported
+  output_destination: /dev/null # absolute path, fd:N, or HTTP(S) POST URL
+  output_timeout: 10            # HTTP timeout in seconds
   snooze_duration: 900           # 15 min default snooze
   auto_snooze_timeout: 300       # auto-snooze after 5 min inaction
   auto_snooze_max: 86400         # repeated auto-snoozes double up to this cap

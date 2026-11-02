@@ -4982,21 +4982,57 @@ class Store:
 
     def update_reminder_action(
         self, reminder_id: str, *, status: str, result: str, executed_at: str,
-    ) -> None:
-        """Update action fields without losing a concurrent snooze's deadline."""
+        expected_occurrence: str | None = None,
+        expected_claim: str | None = None,
+    ) -> bool:
+        """Record a result; return whether it still belongs to the current claim."""
         conn = self.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
             r = self.get_reminder(reminder_id)
             if not r:
                 conn.rollback()
-                return
+                return False
             extra = dict(r.get("extra") or {})
+            occurrence_changed = expected_occurrence is not None and r.get("next_due") != expected_occurrence
+            claim_changed = expected_claim is not None and extra.get("action_claim_id") != expected_claim
+            if occurrence_changed or claim_changed:
+                extra["last_action_delivery"] = {
+                    "occurrence": expected_occurrence, "status": status,
+                    "result": result, "attempted_at": executed_at, "claim_id": expected_claim,
+                }
+                if (not claim_changed and extra.get("action_status") == "running"
+                        and extra.get("action_attempt_occurrence") == expected_occurrence):
+                    extra["action_status"] = "pending"
+                    extra.pop("action_attempts", None)
+                    extra.pop("action_attempt_occurrence", None)
+                self.update_reminder(reminder_id, extra=extra)
+                return False
             extra.update(action_status=status, action_result=result,
                          action_executed_at=executed_at)
             self.update_reminder(reminder_id, extra=extra)
+            return True
         except BaseException:
             conn.rollback()
+            raise
+
+    def update_reminder_notification(self, reminder_id: str, *, results: list[dict],
+                                     expected_occurrence: str | None = None) -> bool:
+        """Keep delivery evidence without overwriting concurrent action or snooze state."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            reminder = self.get_reminder(reminder_id)
+            if (reminder is None or reminder.get("status") in ("cancelled", "completed")
+                    or (expected_occurrence is not None and reminder.get("next_due") != expected_occurrence)):
+                self.conn.rollback()
+                return False
+            extra = dict(reminder.get("extra") or {})
+            extra["notification_results"] = results
+            extra["notification_attempted_at"] = _now()
+            self.update_reminder(reminder_id, extra=extra)
+            return True
+        except BaseException:
+            self.conn.rollback()
             raise
 
     def complete_reminder(self, reminder_id: str) -> None:
@@ -5004,7 +5040,8 @@ class Store:
         self.update_reminder(reminder_id, status="completed")
         self._log("complete_reminder", reminder_id)
 
-    def settle_reminder(self, reminder_id: str, status: str, **fields) -> bool:
+    def settle_reminder(self, reminder_id: str, status: str, *,
+                        expected_occurrence: str | None = None, **fields) -> bool:
         """Set a sweep outcome unless the reminder was closed meanwhile.
 
         A reminder cancelled (or completed) while its action ran stays that
@@ -5019,9 +5056,13 @@ class Store:
                 columns.append(f"{key} = ?")
                 values.append(value)
         values.append(reminder_id)
+        occurrence_filter = ""
+        if expected_occurrence is not None:
+            occurrence_filter = " AND next_due = ?"
+            values.append(expected_occurrence)
         cursor = self.conn.execute(
             f"UPDATE reminders SET {', '.join(columns)} "
-            "WHERE id = ? AND status NOT IN ('cancelled', 'completed')",
+            "WHERE id = ? AND status NOT IN ('cancelled', 'completed')" + occurrence_filter,
             values,
         )
         self.conn.commit()

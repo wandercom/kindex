@@ -276,22 +276,18 @@ Use `watch_resolve` once the risk is fixed or irrelevant.
 
 ### Use Reminders
 
-Use `remind_create` for time-based follow-up. A reminder may include a shell
-action, natural-language instructions, or a headless Codex/OpenCode wakeup. Use
-`wake=codex` or `wake=opencode` with optional `wake_session`, `wake_cwd`,
-`wake_model`, and `wake_agent` fields to start or resume a noninteractive turn
-when the reminder fires.
+Use `remind_create` for time-based follow-up. `wake` accepts `codex`, `claude`,
+`antigravity`, `cursor`, `opencode`, or `muse`; `wake_session` preserves an explicit
+session, and `wake_cwd` pins the working directory at creation. `wake_agent` is
+OpenCode-only. `destination` selects an independent notification sink: `/dev/null`
+(the default), an absolute file/device path, `fd:N`, or an HTTP(S) JSON POST URL.
 
-Do not treat reminders as reentrant interrupts for an idle interactive thread.
-`remind_create` stores the reminder; it fires only when `kin remind check`,
-`kin remind exec`, `kin cron`, or an installed `kin setup-cron` schedule runs.
-Codex wakeups launch `codex exec` (or `codex exec resume ...`) from that
-daemon/cron context. If Codex reports that the target session already has an
-active writer, Kindex queues the prompt to that session. A successful queue
-response confirms acceptance only, not consumption or execution; if the session
-exits or no consumer drains its queue, the prompt can remain pending until the
-session resumes. OpenCode wakeups launch `opencode run` with `--session` or
-`--continue` when requested, in a headless follow-up turn.
+Creation stores the reminder; a checker or manual execution must later run it.
+Headless resume is not live injection. Only Codex has a same-session queue fallback
+for recognized active-writer conflicts. `queued` means accepted, not executed;
+`submission_unknown` requires inspection. Neither state is automatically resent.
+See [notification routing](notification-routing.md) for exact transport and
+acknowledgment semantics. Never claim execution from queue acceptance.
 
 ## What Not To Capture
 

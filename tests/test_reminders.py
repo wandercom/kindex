@@ -687,7 +687,7 @@ class TestExecuteShellAction:
 
 
 class TestExecuteWakeActions:
-    def test_codex_wake_uses_exec_resume_last(self, store, config, monkeypatch, tmp_path):
+    def test_codex_legacy_unpinned_last_is_refused(self, store, config, monkeypatch, tmp_path):
         from kindex.actions import execute_action
 
         seen = {}
@@ -714,22 +714,22 @@ class TestExecuteWakeActions:
         r = store.get_reminder(rid)
         result = execute_action(store, r, config)
 
-        assert result["status"] == "completed"
-        assert seen["cmd"] == [
-            "codex", "exec", "--cd", str(tmp_path), "--model", "gpt-5",
-            "resume", "--last", "-",
-        ]
-        assert "Pick up the interrupted task." in seen["kwargs"]["input_text"]
+        assert result["status"] == "exhausted"
+        assert "pinned at creation" in result["output"]
+        assert seen == {}
 
     @pytest.mark.parametrize("conflict", [
         "2026-10-30T20:32:25.081648Z ERROR codex_core::session::session: failed to initialize thread persistence: thread-store conflict: thread thread-123 already has an active writer",
         "Error: thread/resume: thread/resume failed: thread thread-123 already has an active writer (code -32600)",
     ])
     @pytest.mark.parametrize("queue_result,expected_status,expected_output", [
-        ((0, "queued", ""), "completed",
-         "Queued to Codex session thread-123; execution has not been confirmed.\nqueued"),
-        ((2, "", "queue rejected"), "failed", "[stderr]\nqueue rejected"),
-        ((None, "", ""), "failed", "codex queue timed out after 300s"),
+        ((0, "queued", ""), "queued",
+         "Queued to Codex session thread-123; execution is unconfirmed.\nqueued"),
+        ((2, "", "queue rejected"), "submission_unknown",
+         "Codex queue failed without an acceptance receipt; inspect the target before retrying.\n"
+         "[stderr]\nqueue rejected"),
+        ((None, "", ""), "submission_unknown",
+         "Codex queue timed out; acceptance is unknown. Inspect the target before retrying."),
     ])
     def test_codex_active_writer_queues_prompt(
         self, store, config, monkeypatch, tmp_path,
@@ -795,11 +795,10 @@ class TestExecuteWakeActions:
          "failed", "thread-store conflict: thread thread-123 already has an active writer"),
         ("thread-123", (1, "", "thread-store conflict: thread other-thread already has an active writer"),
          "failed", "[stderr]\nthread-store conflict: thread other-thread already has an active writer"),
-        ("thread-123", (None, "", ""), "failed", "codex exec timed out after 300s"),
+        ("thread-123", (None, "", ""), "submission_unknown",
+         "Codex run timed out after 300s; execution is unconfirmed"),
         ("thread-123", (0, "", "thread-store conflict: thread thread-123 already has an active writer"),
          "completed", "[stderr]\nthread-store conflict: thread thread-123 already has an active writer"),
-        ("last", (1, "", "thread-store conflict: thread last already has an active writer"),
-         "failed", "[stderr]\nthread-store conflict: thread last already has an active writer"),
         ("", (1, "", "thread-store conflict: thread thread-123 already has an active writer"),
          "failed", "[stderr]\nthread-store conflict: thread thread-123 already has an active writer"),
     ])
@@ -934,7 +933,7 @@ class TestCreateReminderWithAction:
     def test_create_rejects_unknown_wake_client(self, store):
         from kindex.reminders import create_reminder
         with pytest.raises(ValueError, match="Invalid wake client"):
-            create_reminder(store, "Bad wake", "in 1 hour", wake_client="cursor")
+            create_reminder(store, "Bad wake", "in 1 hour", wake_client="unknown-client")
 
     def test_wake_options_need_a_wake_client(self, store):
         from kindex.reminders import create_reminder

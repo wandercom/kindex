@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
@@ -70,15 +71,49 @@ class TestSystemChannel:
 
         import shutil
         monkeypatch.setattr(shutil, "which", lambda x: None)
-        # Also block the direct path check so terminal-notifier isn't found
-        real_isfile = os.path.isfile
+        # Also block direct path discovery so alerter is not found.
         monkeypatch.setattr("kindex.notify.os.path.isfile", lambda p: False)
         monkeypatch.setattr("kindex.notify.subprocess.run", mock_run)
         monkeypatch.setattr("kindex.notify.subprocess.Popen", MockPopen)
 
         result = ch.send(reminder, config)
         # Should have attempted osascript fallback via subprocess.run
-        assert call_count["run"] >= 1
+        assert call_count["run"] == 1
+        assert call_count["popen"] == 0
+        assert result.success
+        assert "display unconfirmed" in result.message
+
+    @pytest.mark.parametrize("returncode", [1, -9])
+    def test_osascript_nonzero_is_failure(self, config, reminder, monkeypatch, returncode):
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("kindex.notify.os.path.isfile", lambda path: False)
+        calls = []
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(command, returncode, stdout=b"", stderr=b"private script body")
+        monkeypatch.setattr("kindex.notify.subprocess.run", run)
+        result = SystemChannel().send(reminder, config)
+        assert not result.success
+        assert result.channel == "system"
+        assert str(returncode) in result.message
+        assert "unconfirmed" in result.message
+        assert "private script body" not in result.message
+        assert calls[0][0][:2] == ["osascript", "-e"]
+        assert calls[0][1]["timeout"] == 5
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize("error", [FileNotFoundError("private script body"),
+        subprocess.TimeoutExpired(["osascript", "private script body"], 5)])
+    def test_osascript_unavailable_or_timed_out_is_failure(self, config, reminder, monkeypatch, error):
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("kindex.notify.os.path.isfile", lambda path: False)
+        def run(*args, **kwargs):
+            raise error
+        monkeypatch.setattr("kindex.notify.subprocess.run", run)
+        result = SystemChannel().send(reminder, config)
+        assert not result.success
+        assert "unconfirmed" in result.message
+        assert "private script body" not in result.message
 
 
 class TestSlackChannel:
@@ -157,7 +192,7 @@ class TestDispatch:
         monkeypatch.setattr(SystemChannel, "send", mock_send)
 
         results = dispatch(reminder, config)
-        # Default channel is "system"
+        # Default output discards quietly; explicit legacy channels remain supported.
         assert any(r.success for r in results)
 
     def test_fallback_to_terminal(self, config, reminder, monkeypatch):
