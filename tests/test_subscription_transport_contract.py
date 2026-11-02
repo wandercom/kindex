@@ -125,7 +125,7 @@ def process_running(pid):
     return bool(state and not state.startswith("Z"))
 
 
-def test_a3_a4_timeout_retains_reservation_and_terminates_provider_children(tmp_path, monkeypatch):
+def test_a3_a4_timeout_retains_reservation_and_terminates_provider_children(tmp_path, monkeypatch, utc_calendar):
     cfg, receipts, _, marker = install_fake(tmp_path, monkeypatch, block=True)
     try:
         start = time.monotonic()
@@ -159,7 +159,7 @@ def test_a3_a4_timeout_retains_reservation_and_terminates_provider_children(tmp_
                     pass
 
 
-def test_r2_native_session_id_emitted_before_timeout_is_used_for_next_fresh_review(tmp_path, monkeypatch, isolated_health_registry):
+def test_r2_native_session_id_emitted_before_timeout_is_used_for_next_fresh_review(tmp_path, monkeypatch, isolated_health_registry, utc_calendar):
     cfg, receipts, expected_id, _ = install_fake(tmp_path, monkeypatch, first_timeout=True)
     try:
         first = native.run_review(cfg, "first-turn-timeout", "First review which deliberately times out")
@@ -199,7 +199,7 @@ def test_r2_native_session_id_emitted_before_timeout_is_used_for_next_fresh_revi
 
 @pytest.mark.parametrize("error", [sqlite3.OperationalError("synthetic health database failure"),
                                   OSError("synthetic health storage failure")])
-def test_health_registration_failure_preserves_valid_review_and_native_checkpoint(tmp_path, monkeypatch, error):
+def test_health_registration_failure_preserves_valid_review_and_native_checkpoint(tmp_path, monkeypatch, error, utc_calendar):
     """PR30: optional health storage cannot invalidate completed native work."""
     from kindex import supervisor_health
     cfg, receipts, expected_id, _ = install_fake(tmp_path, monkeypatch)
@@ -325,7 +325,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                     pass
 
 
-def test_claude_missing_native_conversation_preserves_checkpoint_without_new_identity_fallback(tmp_path, monkeypatch):
+def test_claude_missing_native_conversation_preserves_checkpoint_without_new_identity_fallback(tmp_path, monkeypatch, utc_calendar):
     """Native init can precede provider persistence; failed resumes stay exact."""
     binary_dir = tmp_path / "fake-claude-bin"
     receipts = tmp_path / "fake-claude-receipts"

@@ -189,7 +189,7 @@ def test_a5_malformed_or_unsuccessful_receipts_are_not_advisories(tmp_path, monk
     assert accounting["status"] != "ok"
 
 
-def test_a3_reservation_precedes_transport_and_failure_remains_counted(tmp_path, monkeypatch, transport):
+def test_a3_reservation_precedes_transport_and_failure_remains_counted(tmp_path, monkeypatch, transport, utc_calendar):
     cfg = config(tmp_path)
     assert native.run_review(cfg, "alpha", WORK)["status"] == "ok"
     assert transport.calls[0]["allowance"]["conversation"]["used"] == 1
@@ -206,7 +206,7 @@ def test_a3_reservation_precedes_transport_and_failure_remains_counted(tmp_path,
     assert observed["conversation"]["used"] == observed["day"]["used"] == 2
 
 
-def test_a3_conversation_and_project_daily_limits_span_providers(tmp_path, transport):
+def test_a3_conversation_and_project_daily_limits_span_providers(tmp_path, transport, utc_calendar):
     cfg = config(tmp_path, max_conversation_reviews=2, max_daily_reviews=3)
     assert native.run_review(cfg, "alpha", WORK)["status"] == "ok"
     cfg.sim.backend = "claude"
