@@ -190,6 +190,7 @@ class TestDispatch:
             return NotifyResult(True, "system")
 
         monkeypatch.setattr(get_channel("system"), "send", mock_send)
+        monkeypatch.setattr(get_channel("system"), "is_available", lambda c: True)
 
         results = dispatch(reminder, config)
         # Default output discards quietly; explicit legacy channels remain supported.
