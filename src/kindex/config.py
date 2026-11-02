@@ -842,6 +842,14 @@ class ReminderConfig(BaseModel):
     default_channels: list[str] = Field(default_factory=lambda: ["output"])
     output_destination: str = "/dev/null"
     output_timeout: float = Field(default=10.0, gt=0, le=60)
+
+    @field_validator("output_destination")
+    @classmethod
+    def _valid_output_destination(cls, value: str) -> str:
+        from .notify import validate_destination
+
+        return validate_destination(value)
+
     snooze_duration: int = 900
     auto_snooze_timeout: int = 300
     # Each consecutive automatic snooze doubles the last, starting from

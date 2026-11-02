@@ -421,7 +421,7 @@ kin remind create "Continue OpenCode build" --at "in 10 minutes" \
 Wakeups run from the daemon/cron context. Codex can queue to the same explicit
 session on an active-writer conflict; other clients support headless resume,
 not live injection. Notification output independently defaults to `/dev/null`.
-See [notification routing](notification-routing.md) for file/device/descriptor/HTTP
+See [notification routing](https://github.com/wandercom/kindex/blob/main/docs/notification-routing.md) for file/device/descriptor/HTTP
 destinations, session support and queued/uncertain delivery states.
 
 ## Keep Project Context Portable

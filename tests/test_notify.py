@@ -185,15 +185,20 @@ class TestDispatch:
     def test_uses_default_channels(self, config, reminder, monkeypatch):
         sent = []
 
-        def mock_send(self, r, c):
-            sent.append(self.name)
-            return NotifyResult(True, self.name)
+        def mock_send(r, c):
+            sent.append("system")
+            return NotifyResult(True, "system")
 
-        monkeypatch.setattr(SystemChannel, "send", mock_send)
+        monkeypatch.setattr(get_channel("system"), "send", mock_send)
 
         results = dispatch(reminder, config)
         # Default output discards quietly; explicit legacy channels remain supported.
-        assert any(r.success for r in results)
+        assert [(r.channel, r.success) for r in results] == [("output", True)]
+        assert sent == []
+
+        config.reminders.default_channels = ["system"]
+        assert [r.channel for r in dispatch(reminder, config)] == ["system"]
+        assert sent == ["system"]
 
     def test_fallback_to_terminal(self, config, reminder, monkeypatch):
         # Set channels to only a failing one

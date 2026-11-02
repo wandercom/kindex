@@ -286,7 +286,7 @@ Creation stores the reminder; a checker or manual execution must later run it.
 Headless resume is not live injection. Only Codex has a same-session queue fallback
 for recognized active-writer conflicts. `queued` means accepted, not executed;
 `submission_unknown` requires inspection. Neither state is automatically resent.
-See [notification routing](notification-routing.md) for exact transport and
+See [notification routing](https://github.com/wandercom/kindex/blob/main/docs/notification-routing.md) for exact transport and
 acknowledgment semantics. Never claim execution from queue acceptance.
 
 ## What Not To Capture

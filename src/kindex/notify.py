@@ -161,7 +161,7 @@ class OutputChannel:
             try:
                 mode = os.fstat(fd).st_mode
                 if not (stat.S_ISREG(mode) or
-                        ((stat.S_ISCHR(mode) or stat.S_ISFIFO(mode)) and not os.get_blocking(fd))):
+                        ((stat.S_ISCHR(mode) or stat.S_ISFIFO(mode)) and not getattr(os, "get_blocking", lambda _fd: True)(fd))):
                     raise ValueError("Notification output requires a regular file or nonblocking device/pipe")
                 data = (text + "\n").encode("utf-8")
                 while data:

@@ -134,7 +134,7 @@ def execute_action(
             result = {"ok": False, "output": f"Unknown mode: {mode}", "terminal": True}
     except Exception as e:
         result = {"ok": False, "output": safe_error(e)}
-        if fields.get("wake_client"):
+        if fields.get("wake_client") and not isinstance(e, _NotLaunched):
             result["delivery"] = "submission_unknown"
 
     if result.get("delivery") in ("queued", "submission_unknown"):
@@ -294,6 +294,10 @@ def _update_action_status(
     )
 
 
+class _NotLaunched(OSError):
+    """The agent never started, so retrying cannot deliver the prompt twice."""
+
+
 def _run_process(
     cmd,
     *,
@@ -317,12 +321,15 @@ def _run_process(
     import selectors
     import signal
 
-    proc = subprocess.Popen(
-        cmd, shell=shell, start_new_session=True,
-        **({"cwd": cwd} if cwd else {}),
-        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=shell, start_new_session=True,
+            **({"cwd": cwd} if cwd else {}),
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as e:
+        raise _NotLaunched(e.errno, e.strerror, e.filename) from e
 
     def kill_group() -> None:
         try:
@@ -442,6 +449,14 @@ def _run_shell(command: str, *, timeout: int = 300) -> dict:
 
 
 def _build_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
+    """Assemble an agent's prompt; a failure here means nothing was launched."""
+    try:
+        return _compose_agent_prompt(reminder, fields, store)
+    except Exception as e:
+        raise _NotLaunched(safe_error(e)) from e
+
+
+def _compose_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
     """Assemble the prompt string for a headless agent wake/action."""
     parts = [f"# Reminder Action: {reminder['title']}"]
     if reminder.get("body"):
@@ -504,6 +519,8 @@ def _run_claude(
     returncode, stdout, stderr = _run_process(
         cmd, timeout=timeout, **({"cwd": fields["wake_cwd"]} if fields.get("wake_cwd") else {}))
     if returncode is None:
+        if not fields.get("wake_client"):
+            return {"ok": False, "output": f"claude -p timed out after {timeout}s"}
         return {"ok": False, "delivery": "submission_unknown",
                 "output": f"Claude run timed out after {timeout}s; inspect the session before retrying"}
     try:
@@ -552,16 +569,9 @@ def _run_codex(
         cmd.extend(["--model", fields["wake_model"]])
 
     session_id = str(fields.get("wake_session_id") or "").strip()
-    is_last = session_id.lower() in {"last", "--last"}
     if session_id:
-        cmd.append("resume")
-        if is_last:
-            cmd.append("--last")
-        else:
-            cmd.append(session_id)
-        cmd.append("-")
-    else:
-        cmd.append("-")
+        cmd.extend(["resume", session_id])
+    cmd.append("-")
 
     started = time.monotonic()
     returncode, stdout, stderr = _run_process(cmd, input_text=prompt, timeout=timeout)
@@ -612,10 +622,7 @@ def _run_opencode(
 
     session_id = str(fields.get("wake_session_id") or "").strip()
     if session_id:
-        if session_id.lower() in {"last", "--last", "continue", "--continue"}:
-            cmd.append("--continue")
-        else:
-            cmd.extend(["--session", session_id])
+        cmd.extend(["--session", session_id])
     if fields.get("wake_cwd"):
         cmd.extend(["--dir", fields["wake_cwd"]])
     if fields.get("wake_model"):
@@ -637,14 +644,14 @@ def _run_targeted_agent(client: str, reminder: dict, fields: dict, store: Store,
     problem = _wake_argv_problem(fields)
     if problem:
         return {"ok": False, "terminal": True, "output": f"Refused: {problem}"}
-    executable, prefix, session_flag = {
-        "antigravity": ("agy", ["-p"], "--conversation"),
-        "cursor": ("cursor-agent", ["-p"], "--resume"),
-        "muse": ("muse", ["exec"], "--session-id"),
+    executables, prefix, session_flag = {
+        "antigravity": (("agy",), ["-p"], "--conversation"),
+        "cursor": (("cursor-agent", "agent"), ["-p"], "--resume"),
+        "muse": (("muse",), ["exec"], "--session-id"),
     }[client]
-    cli = _resolve_cli(executable)
+    cli = next(filter(None, map(_resolve_cli, executables)), None)
     if cli is None:
-        return _missing_cli(executable)
+        return _missing_cli(executables[0])
     # Installed versions must advertise the documented transport. A similarly
     # named executable or older IDE launcher must not start a fresh session.
     help_cmd = [cli, "exec", "--help"] if client == "muse" else [cli, "--help"]

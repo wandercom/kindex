@@ -557,3 +557,68 @@ def test_failed_system_command_receipt_preserved_with_legacy_fallback(store, con
     results = store.get_reminder(rid)['extra']['notification_results']
     assert [(result['channel'], result['success']) for result in results] == [('system', False), ('terminal', True)]
     assert fallback_calls == [1]
+
+
+def test_cursor_falls_back_to_the_agent_executable(config, store, monkeypatch):
+    monkeypatch.setattr(actions, '_resolve_cli', lambda name: name if name == 'agent' else None)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return (0, '--resume', '') if '--help' in cmd else (0, 'done', '')
+
+    monkeypatch.setattr(actions, '_run_process', fake_run)
+    rid = store.add_reminder('Continue', '2099-03-01T10:00:00', extra={
+        'wake_client': 'cursor', 'wake_session_id': 'chat-1', 'action_mode': 'cursor',
+        'action_instructions': 'Continue.', 'action_status': 'pending'})
+    assert actions.execute_action(store, store.get_reminder(rid), config)['status'] == 'completed'
+    assert calls[-1][0] == 'agent'
+
+
+@pytest.mark.parametrize('breaks', ['spawn', 'prompt'])
+def test_wake_that_never_launched_can_retry(config, store, monkeypatch, breaks):
+    monkeypatch.setattr(actions, '_resolve_cli', lambda name: name)
+    if breaks == 'spawn':
+        def no_spawn(*a, **k):
+            raise FileNotFoundError(2, 'No such directory')
+        monkeypatch.setattr(actions.subprocess, 'Popen', no_spawn)
+    else:
+        def no_prompt(*a, **k):
+            raise RuntimeError('context unavailable')
+        monkeypatch.setattr(actions, '_compose_agent_prompt', no_prompt)
+    rid = store.add_reminder('Continue', '2099-03-01T10:00:00', extra={
+        'wake_client': 'codex', 'wake_session_id': 'thread-1', 'action_mode': 'codex',
+        'action_instructions': 'Continue.', 'action_status': 'pending'})
+    assert actions.execute_action(store, store.get_reminder(rid), config)['status'] == 'failed'
+
+
+def test_failure_after_launch_is_not_resent(config, store, monkeypatch):
+    monkeypatch.setattr(actions, '_resolve_cli', lambda name: name)
+
+    def lost(*a, **k):
+        raise RuntimeError('connection to child lost')
+
+    monkeypatch.setattr(actions, '_run_process', lost)
+    rid = store.add_reminder('Continue', '2099-03-01T10:00:00', extra={
+        'wake_client': 'codex', 'wake_session_id': 'thread-1', 'action_mode': 'codex',
+        'action_instructions': 'Continue.', 'action_status': 'pending'})
+    assert actions.execute_action(store, store.get_reminder(rid), config)['status'] == 'submission_unknown'
+
+
+@pytest.mark.parametrize('wake,expected', [(True, 'submission_unknown'), (False, 'failed')])
+def test_claude_timeout_is_held_only_for_a_wake(config, store, monkeypatch, wake, expected):
+    monkeypatch.setattr(actions, '_resolve_cli', lambda name: name)
+    monkeypatch.setattr(actions, '_run_process', lambda *a, **k: (None, '', ''))
+    extra = {'action_mode': 'claude', 'action_instructions': 'Continue.', 'action_status': 'pending'}
+    if wake:
+        extra.update(wake_client='claude', wake_session_id='session-1')
+    rid = store.add_reminder('Continue', '2099-03-01T10:00:00', extra=extra)
+    assert actions.execute_action(store, store.get_reminder(rid), config)['status'] == expected
+
+
+def test_output_destination_is_validated_when_configured():
+    from kindex.config import ReminderConfig
+
+    assert ReminderConfig(output_destination='/tmp/notices.log').output_destination == '/tmp/notices.log'
+    with pytest.raises(ValueError, match='absolute path'):
+        ReminderConfig(output_destination='notices.log')
