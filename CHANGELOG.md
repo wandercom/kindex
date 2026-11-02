@@ -4,6 +4,31 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-02
+
+### Added
+- Independent reminder notification output to HTTP(S) POST, absolute file/device
+  paths or inherited descriptors; new defaults discard via `/dev/null`. CLI
+  `--destination` and MCP `destination` override the selected notification channel.
+- Explicit headless wake/resume targets for Claude, Antigravity, Cursor and Muse,
+  alongside Codex and OpenCode, retaining the creation-time session and directory.
+
+### Changed
+- Reminders with no explicit `reminders.default_channels` no longer send desktop
+  notifications: the default is now the `output` channel writing to `/dev/null`.
+  Explicit channel settings are unaffected. To keep desktop notifications, set
+  `default_channels: [system]`.
+- Codex queue outcomes are explicit. Accepted queues remain `queued`; uncertain
+  submissions are parked separately from completed turns and are not
+  automatically resent. Recurrences retain the prior delivery receipt and advance
+  to their next distinct occurrence.
+- Notifications describe the due item and intended wake separately. Output
+  delivery failures are retained in reminder metadata without noisy fallback.
+- Legacy system notifications now treat nonzero `osascript` exits as failures,
+  retain failed-attempt receipts, and distinguish submission from confirmed display.
+- Legacy unpinned `last` wake targets are refused; recreate them with a concrete
+  session rather than risking delivery to an unrelated newer session.
+
 ### Fixed
 - A subscription review whose saved provider conversation no longer exists
   retires it, so the next review starts fresh. AGY prunes old transcripts, and

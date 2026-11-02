@@ -5040,6 +5040,7 @@ def cmd_remind(args):
                 action_instructions=getattr(args, "action_instructions", "") or "",
                 action_mode=getattr(args, "action_mode", "auto") or "auto",
                 wake_client=getattr(args, "wake_client", "") or "",
+                notification_destination=getattr(args, "destination", "") or "",
                 wake_session_id=getattr(args, "wake_session_id", "") or "",
                 wake_cwd=getattr(args, "wake_cwd", "") or "",
                 wake_model=getattr(args, "wake_model", "") or "",
@@ -8447,6 +8448,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--at", help="Time spec: 'in 30 minutes', 'every weekday at 9am', etc.")
     s.add_argument("--priority", choices=["low", "normal", "high", "urgent"])
     s.add_argument("--channel", help="Notification channels (comma-separated)")
+    s.add_argument("--destination", help="Notification output: /dev/null, absolute file/device path, fd:N, or HTTP(S) URL")
     s.add_argument("--tag", dest="tag_str", help="Tags (comma-separated)")
     s.add_argument("--status", help="Filter (for list): active, snoozed, fired, all")
     s.add_argument("--reminder-id", help="Reminder ID (for show/snooze/done/cancel)")
@@ -8455,9 +8457,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--instructions", dest="action_instructions",
                    help="NL instructions for Claude (triggers claude -p mode)")
     s.add_argument("--action-mode", dest="action_mode",
-                   choices=["shell", "claude", "codex", "opencode", "auto"], default="auto",
+                   choices=["shell", "claude", "codex", "opencode", "cursor", "antigravity", "muse", "auto"], default="auto",
                    help="Execution mode (default: auto)")
-    s.add_argument("--wake", dest="wake_client", choices=["codex", "opencode"],
+    s.add_argument("--wake", dest="wake_client", choices=["codex", "claude", "antigravity", "cursor", "opencode", "muse"],
                    help="Wake a headless agent when due")
     s.add_argument("--wake-session", "--session", dest="wake_session_id",
                    help="Host session id to resume for --wake; 'last' is resolved to "

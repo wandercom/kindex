@@ -405,8 +405,8 @@ own schedule, so due reminders fire even when a maintenance run is slow or
 stalled. Within `kin cron` itself, reminders are checked before any ingest,
 LLM, or embedding work.
 
-Wake reminders can start headless Codex or OpenCode follow-up turns when the
-checker runs:
+Wake reminders can start headless Codex, Claude, Antigravity, Cursor, OpenCode
+or Muse follow-up turns when the checker runs:
 
 ```bash
 kin remind create "Continue rollout check" --at "in 10 minutes" \
@@ -418,13 +418,11 @@ kin remind create "Continue OpenCode build" --at "in 10 minutes" \
   --instructions "Continue the build triage."
 ```
 
-These wakeups run `codex exec` or `opencode run` from the daemon/cron context.
-When Codex reports that the target session already has an active writer, Kindex
-queues the prompt to that session. A successful queue response confirms
-acceptance only, not consumption or execution. If the session exits or no
-consumer drains its queue, the prompt can remain pending until the session
-resumes. OpenCode wakeups still run in their own headless turn; neither path
-interrupts an idle terminal UI through a host wake API.
+Wakeups run from the daemon/cron context. Codex can queue to the same explicit
+session on an active-writer conflict; other clients support headless resume,
+not live injection. Notification output independently defaults to `/dev/null`.
+See [notification routing](https://github.com/wandercom/kindex/blob/main/docs/notification-routing.md) for file/device/descriptor/HTTP
+destinations, session support and queued/uncertain delivery states.
 
 ## Keep Project Context Portable
 

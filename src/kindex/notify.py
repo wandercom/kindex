@@ -41,8 +41,144 @@ class NotificationChannel(Protocol):
 # ── Built-in channels ──────────────────────────────────────────────
 
 
+def validate_destination(destination: str) -> str:
+    """Accept explicit HTTP(S), absolute file/device paths, or inherited fd:N."""
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    if not isinstance(destination, str) or not destination or any(ord(c) < 32 for c in destination):
+        raise ValueError("Notification destination must be nonempty and contain no controls")
+    if destination in ("/dev/null", os.devnull):
+        return destination
+    if destination.startswith(("http://", "https://")):
+        url = urlsplit(destination)
+        if not url.hostname or url.username or url.password or url.fragment:
+            raise ValueError("Notification URL needs a host, without credentials or fragment")
+        _ = url.port  # validate malformed ports
+    elif destination.startswith("fd:"):
+        if not destination[3:].isascii() or not destination[3:].isdigit() or int(destination[3:]) > 2147483647:
+            raise ValueError("Descriptor destination must be fd:N")
+    elif not Path(destination).is_absolute():
+        raise ValueError("Notification destination must be HTTP(S), an absolute path, or fd:N")
+    return destination
+
+
+def notification_text(reminder: dict) -> str:
+    """A notification describes the due item, never claims its action ran."""
+    title = str(reminder.get("title") or "Untitled reminder").strip()
+    body = str(reminder.get("body") or "").strip()
+    lines = [f"Reminder due: {title}"]
+    if body and body != title:
+        lines.append(body)
+    extra = reminder.get("extra") or {}
+    if extra.get("wake_client"):
+        target = str(extra["wake_client"])
+        if extra.get("wake_session_id"):
+            target += f" session {extra['wake_session_id']}"
+        lines.append(f"Wake target: {target}. Delivery and execution are tracked separately.")
+    elif extra.get("action_command") or extra.get("action_instructions"):
+        lines.append("An action is scheduled; this notice does not confirm execution.")
+    if reminder.get("id"):
+        lines.append(f"Reminder ID: {reminder['id']}")
+    return redact_text("\n".join(lines))
+
+
+# Keep DNS, TLS and slow response headers inside a killable process. A socket
+# inactivity timeout alone can be extended forever by a trickling endpoint.
+_HTTP_POST_SCRIPT = r"""
+import json
+import sys
+import urllib.error
+import urllib.request
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+job = json.load(sys.stdin)
+request = urllib.request.Request(job["destination"],
+    data=json.dumps(job["payload"]).encode("utf-8"),
+    headers={"Content-Type": "application/json"}, method="POST")
+try:
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=job["timeout"]) as response:
+        print(response.status)
+except urllib.error.HTTPError as error:
+    print(error.code)
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _post_notification(destination: str, payload: dict, timeout: float) -> NotifyResult:
+    import json
+    import sys
+    from .actions import _run_process
+
+    try:
+        code, stdout, _ = _run_process([sys.executable, "-I", "-S", "-c", _HTTP_POST_SCRIPT],
+            input_text=json.dumps({"destination": destination, "payload": redact(payload),
+                                   "timeout": timeout}), timeout=timeout, max_bytes=128)
+        if code == 0 and stdout.strip().isdigit():
+            status = int(stdout.strip())
+            if 200 <= status < 300:
+                return NotifyResult(True, "output", "Notification accepted by HTTP endpoint")
+            return NotifyResult(False, "output", f"HTTP status {status}; delivery unconfirmed")
+    except OSError:
+        pass
+    return NotifyResult(False, "output", "Notification output failed or timed out; delivery unconfirmed")
+
+
+class OutputChannel:
+    """Write one redacted notification to the selected sink, without fallback."""
+
+    name = "output"
+
+    def is_available(self, config: Config) -> bool:
+        return True
+
+    def supports_actions(self) -> bool:
+        return False
+
+    def send(self, reminder: dict, config: Config) -> NotifyResult:
+        import stat
+
+        destination = (reminder.get("extra") or {}).get(
+            "notification_destination", config.reminders.output_destination)
+        try:
+            validate_destination(destination)
+            if destination == "/dev/null" or destination == os.devnull:
+                return NotifyResult(True, self.name, "Notification discarded by null destination")
+            text = notification_text(reminder)
+            if destination.startswith(("http://", "https://")):
+                payload = {"id": reminder.get("id", ""), "text": text,
+                           "priority": reminder.get("priority", "normal"),
+                           "due": reminder.get("next_due", "")}
+                return _post_notification(destination, payload, config.reminders.output_timeout)
+            # Duplicate caller-owned descriptors; never close or alter their flags.
+            descriptor = destination[3:] if destination.startswith("fd:") else None
+            fd = (os.dup(int(descriptor)) if descriptor is not None else
+                  os.open(destination, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0), 0o600))
+            try:
+                mode = os.fstat(fd).st_mode
+                if not (stat.S_ISREG(mode) or
+                        ((stat.S_ISCHR(mode) or stat.S_ISFIFO(mode)) and not getattr(os, "get_blocking", lambda _fd: True)(fd))):
+                    raise ValueError("Notification output requires a regular file or nonblocking device/pipe")
+                data = (text + "\n").encode("utf-8")
+                while data:
+                    written = os.write(fd, data)
+                    if not written:
+                        raise OSError("No output progress")
+                    data = data[written:]
+            finally:
+                os.close(fd)
+            return NotifyResult(True, self.name, "Notification written")
+        except (OSError, ValueError):
+            # URLs and OS errors can contain credentials or private path/query data.
+            return NotifyResult(False, self.name, "Notification output failed; delivery unconfirmed")
+
+
 class SystemChannel:
-    """macOS system notifications via terminal-notifier or osascript."""
+    """macOS notification submission via alerter or osascript, not display receipts."""
 
     name = "system"
 
@@ -89,7 +225,7 @@ class SystemChannel:
                     alerter_cmd,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                return NotifyResult(True, "system", "alerter")
+                return NotifyResult(True, "system", "alerter submitted; display unconfirmed")
         except (FileNotFoundError, OSError):
             pass
 
@@ -102,10 +238,16 @@ class SystemChannel:
             script = f'display notification "{full_msg}" with title "Kindex: {ttl}"'
             if sound and sound != "none":
                 script += f' sound name "{sound}"'
-            subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
-            return NotifyResult(True, "system", "osascript")
-        except Exception as e:
-            return NotifyResult(False, "system", str(e))
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+            if result.returncode != 0:
+                return NotifyResult(False, "system",
+                    f"osascript exited with status {result.returncode}; delivery unconfirmed")
+            return NotifyResult(True, "system", "osascript accepted notification; display unconfirmed")
+        except subprocess.TimeoutExpired:
+            return NotifyResult(False, "system", "osascript timed out; delivery unconfirmed")
+        except Exception:
+            # Exceptions and stderr may contain the full private notification script.
+            return NotifyResult(False, "system", "osascript failed; delivery unconfirmed")
 
     def supports_actions(self) -> bool:
         return True
@@ -301,7 +443,7 @@ _CHANNELS: dict[str, NotificationChannel] = {}
 
 
 def _register_builtins() -> None:
-    for cls in (SystemChannel, SlackChannel, EmailChannel, ClaudeChannel,
+    for cls in (OutputChannel, SystemChannel, SlackChannel, EmailChannel, ClaudeChannel,
                 TelegramChannel, TerminalChannel):
         ch = cls()
         _CHANNELS[ch.name] = ch
@@ -322,10 +464,13 @@ def dispatch(
     """Dispatch a reminder notification to configured channels.
 
     Tries each channel in order. Stops at first success.
-    Falls back to terminal if all others fail.
+    Legacy-only channel lists fall back to terminal; output never falls back.
     """
+    original = reminder
     reminder = redact(reminder)
     names = channel_names or config.reminders.default_channels
+    if (reminder.get("extra") or {}).get("notification_destination") is not None:
+        names = ["output"]
 
     results = []
     any_success = False
@@ -337,14 +482,16 @@ def dispatch(
         if not ch.is_available(config):
             results.append(NotifyResult(False, name, "Not available/configured"))
             continue
-        result = ch.send(reminder, config)
+        result = ch.send(original if name == "output" else reminder, config)
         results.append(result)
         if result.success:
             any_success = True
             break
+        if name == "output":
+            break  # An output failure never changes the destination.
 
     # Fallback to terminal if all channels failed
-    if not any_success and "terminal" not in names:
+    if not any_success and "terminal" not in names and "output" not in names:
         terminal = get_channel("terminal")
         if terminal:
             results.append(terminal.send(reminder, config))

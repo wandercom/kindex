@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -109,7 +110,8 @@ def execute_action(
     """
     if not has_action(reminder):
         return {"status": "skipped", "reason": "no action defined"}
-    claimed = _claim_action(store, reminder["id"], manual=manual, timeout=timeout)
+    claimed = _claim_action(store, reminder["id"], manual=manual, timeout=timeout,
+                            expected_occurrence=reminder.get("next_due"))
     if "skipped" in claimed:
         return {"status": "skipped", "reason": claimed["skipped"]}
     reminder = claimed["reminder"]
@@ -124,14 +126,20 @@ def execute_action(
             result = _run_claude(reminder, fields, config, store, timeout=timeout)
         elif mode == "codex":
             result = _run_codex(reminder, fields, store, timeout=timeout)
+        elif mode in ("antigravity", "cursor", "muse"):
+            result = _run_targeted_agent(mode, reminder, fields, store, timeout=timeout)
         elif mode == "opencode":
             result = _run_opencode(reminder, fields, store, timeout=timeout)
         else:
             result = {"ok": False, "output": f"Unknown mode: {mode}", "terminal": True}
     except Exception as e:
         result = {"ok": False, "output": safe_error(e)}
+        if fields.get("wake_client") and not isinstance(e, _NotLaunched):
+            result["delivery"] = "submission_unknown"
 
-    if result["ok"]:
+    if result.get("delivery") in ("queued", "submission_unknown"):
+        status = result["delivery"]
+    elif result["ok"]:
         status = "completed"
     elif result.get("terminal") or claimed["attempts"] >= MAX_ACTION_ATTEMPTS:
         # Retrying cannot help (a spend or turn limit, an unknown mode) or
@@ -140,13 +148,15 @@ def execute_action(
     else:
         status = "failed"
     try:
-        _update_action_status(store, rid, reminder, status, result["output"])
+        if not _update_action_status(store, rid, reminder, status, result["output"]):
+            return {"status": "skipped", "reason": "action claim superseded"}
     except Exception as e:
         return {"status": "failed", "output": safe_error(e)}
     return {"status": status, "output": result["output"]}
 
 
-def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int) -> dict:
+def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int,
+                  expected_occurrence: str | None = None) -> dict:
     """Mark the stored action running if it may run now, in one write.
 
     Returns ``{"reminder": fresh_row, "attempts": n}`` when claimed, or
@@ -160,13 +170,20 @@ def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int)
             conn.rollback()
             return {"skipped": "reminder no longer exists"}
         fresh = store._reminder_to_dict(row)
+        if expected_occurrence is not None and fresh.get("next_due") != expected_occurrence:
+            conn.rollback()
+            return {"skipped": "reminder occurrence changed"}
         if fresh.get("status") in ("cancelled", "completed"):
             conn.rollback()
             return {"skipped": f"reminder is {fresh['status']}"}
-        status = get_action_fields(fresh)["action_status"]
-        if status == "completed":
+        if (not manual and fresh.get("status") == "snoozed"
+                and (fresh.get("snooze_until") or "") > datetime.datetime.now().isoformat(timespec="seconds")):
             conn.rollback()
-            return {"skipped": "already completed"}
+            return {"skipped": "snoozed"}
+        status = get_action_fields(fresh)["action_status"]
+        if status in ("completed", "queued", "submission_unknown"):
+            conn.rollback()
+            return {"skipped": f"already {status}; reconcile before sending again"}
         if status in ("paused", "exhausted") and not manual:
             conn.rollback()
             if status == "paused":
@@ -175,6 +192,12 @@ def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int)
         if status == "running" and not _running_is_stale(fresh, timeout):
             conn.rollback()
             return {"skipped": "already running"}
+        if status == "running" and get_action_fields(fresh)["wake_client"]:
+            extra = dict(fresh.get("extra") or {})
+            extra["action_status"] = "submission_unknown"
+            extra["action_result"] = "Wake worker exited without a receipt; inspect the target before sending again"
+            store.update_reminder(reminder_id, extra=extra)
+            return {"skipped": "wake submission unknown; automatic resend refused"}
         extra = dict(fresh.get("extra") or {})
         occurrence = fresh.get("next_due") or ""
         if extra.get("action_attempt_occurrence") != occurrence or manual:
@@ -189,6 +212,7 @@ def _claim_action(store: Store, reminder_id: str, *, manual: bool, timeout: int)
                                "run kin remind exec to retry"}
         extra["action_attempts"] = int(extra.get("action_attempts") or 0) + 1
         extra["action_status"] = "running"
+        extra["action_claim_id"] = uuid.uuid4().hex
         extra["action_executed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
         store.update_reminder(reminder_id, extra=extra)  # commits the claim
     except BaseException:
@@ -244,7 +268,9 @@ def _wake_argv_problem(fields: dict) -> str:
     from .reminders import LAST_SESSION, WAKE_TOKEN
 
     session = str(fields.get("wake_session_id") or "").strip()
-    if session and session.lower() not in LAST_SESSION and not WAKE_TOKEN.fullmatch(session):
+    if session.lower() in LAST_SESSION:
+        return "wake session must be pinned at creation; recreate this legacy reminder with an explicit id"
+    if session and not WAKE_TOKEN.fullmatch(session):
         return f"invalid wake session id {session!r}"
     for name in ("wake_model", "wake_agent"):
         value = str(fields.get(name) or "").strip()
@@ -258,12 +284,18 @@ def _wake_argv_problem(fields: dict) -> str:
 
 def _update_action_status(
     store: Store, rid: str, reminder: dict, status: str, result: str,
-) -> None:
+) -> bool:
     """Write ``action_status`` and ``action_result`` into the reminder's extra."""
-    store.update_reminder_action(
+    return store.update_reminder_action(
         rid, status=status, result=_clip(redact_text(result)),
         executed_at=datetime.datetime.now().isoformat(timespec="seconds"),
+        expected_occurrence=reminder.get("next_due"),
+        expected_claim=(reminder.get("extra") or {}).get("action_claim_id"),
     )
+
+
+class _NotLaunched(OSError):
+    """The agent never started, so retrying cannot deliver the prompt twice."""
 
 
 def _run_process(
@@ -274,6 +306,7 @@ def _run_process(
     timeout: int = 300,
     grace: float = 2.0,
     max_bytes: int | None = None,
+    cwd: str | None = None,
 ) -> tuple[int | None, str, str]:
     """Run ``cmd`` and return ``(returncode, stdout, stderr)``; the return
     code is None when the run timed out and its process group was killed.
@@ -288,11 +321,15 @@ def _run_process(
     import selectors
     import signal
 
-    proc = subprocess.Popen(
-        cmd, shell=shell, start_new_session=True,
-        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=shell, start_new_session=True,
+            **({"cwd": cwd} if cwd else {}),
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as e:
+        raise _NotLaunched(e.errno, e.strerror, e.filename) from e
 
     def kill_group() -> None:
         try:
@@ -412,6 +449,14 @@ def _run_shell(command: str, *, timeout: int = 300) -> dict:
 
 
 def _build_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
+    """Assemble an agent's prompt; a failure here means nothing was launched."""
+    try:
+        return _compose_agent_prompt(reminder, fields, store)
+    except Exception as e:
+        raise _NotLaunched(safe_error(e)) from e
+
+
+def _compose_agent_prompt(reminder: dict, fields: dict, store: Store) -> str:
     """Assemble the prompt string for a headless agent wake/action."""
     parts = [f"# Reminder Action: {reminder['title']}"]
     if reminder.get("body"):
@@ -449,6 +494,9 @@ def _run_claude(
     timeout: int = 300,
 ) -> dict:
     """Launch ``claude -p`` with assembled context.  Returns ``{"ok": bool, "output": str}``."""
+    problem = _wake_argv_problem(fields)
+    if problem:
+        return {"ok": False, "terminal": True, "output": f"Refused: {problem}"}
     prompt = _build_claude_prompt(reminder, fields, store)
 
     claude = _resolve_cli("claude")
@@ -456,7 +504,9 @@ def _run_claude(
         return _missing_cli("claude")
     cmd = [claude, "-p", prompt, "--output-format", "json"]
 
-    model = config.reminders.channels.claude.headless_model
+    if fields.get("wake_session_id"):
+        cmd.extend(["--resume", fields["wake_session_id"]])
+    model = fields.get("wake_model") or config.reminders.channels.claude.headless_model
     if model:
         cmd.extend(["--model", model])
 
@@ -466,9 +516,13 @@ def _run_claude(
     if budget:
         cmd.extend(["--max-budget-usd", str(budget)])
 
-    returncode, stdout, stderr = _run_process(cmd, timeout=timeout)
+    returncode, stdout, stderr = _run_process(
+        cmd, timeout=timeout, **({"cwd": fields["wake_cwd"]} if fields.get("wake_cwd") else {}))
     if returncode is None:
-        return {"ok": False, "output": f"claude -p timed out after {timeout}s"}
+        if not fields.get("wake_client"):
+            return {"ok": False, "output": f"claude -p timed out after {timeout}s"}
+        return {"ok": False, "delivery": "submission_unknown",
+                "output": f"Claude run timed out after {timeout}s; inspect the session before retrying"}
     try:
         report = json.loads(stdout)
     except ValueError:
@@ -515,41 +569,37 @@ def _run_codex(
         cmd.extend(["--model", fields["wake_model"]])
 
     session_id = str(fields.get("wake_session_id") or "").strip()
-    is_last = session_id.lower() in {"last", "--last"}
     if session_id:
-        cmd.append("resume")
-        if is_last:
-            cmd.append("--last")
-        else:
-            cmd.append(session_id)
-        cmd.append("-")
-    else:
-        cmd.append("-")
+        cmd.extend(["resume", session_id])
+    cmd.append("-")
 
+    started = time.monotonic()
     returncode, stdout, stderr = _run_process(cmd, input_text=prompt, timeout=timeout)
     if returncode is None:
-        return {"ok": False, "output": f"codex exec timed out after {timeout}s"}
-    if (returncode != 0 and session_id and not is_last
-            and any(
-                marker in stderr
-                for marker in (
-                    f"thread-store conflict: thread {session_id} already has an active writer",
-                    f"thread/resume failed: thread {session_id} already has an active writer",
-                )
-            )):
+        return {"ok": False, "delivery": "submission_unknown", "output": f"Codex run timed out after {timeout}s; execution is unconfirmed"}
+    if returncode != 0 and session_id and any(marker in stderr for marker in (
+        f"thread-store conflict: thread {session_id} already has an active writer",
+        f"thread/resume failed: thread {session_id} already has an active writer",
+    )):
         queue_cmd = [codex, "queue", "--thread", session_id, "--message", prompt]
+        if fields.get("wake_cwd"):
+            queue_cmd.extend(["--cd", fields["wake_cwd"]])
+        if fields.get("wake_model"):
+            queue_cmd.extend(["--model", fields["wake_model"]])
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            return {"ok": False, "output": "Codex session busy; action budget expired before queue submission"}
         queue_code, queue_stdout, queue_stderr = _run_process(
-            queue_cmd, input_text=None, timeout=timeout
-        )
+            queue_cmd, input_text=None, timeout=remaining)
         if queue_code is None:
-            return {"ok": False, "output": f"codex queue timed out after {timeout}s"}
+            return {"ok": False, "delivery": "submission_unknown",
+                    "output": "Codex queue timed out; acceptance is unknown. Inspect the target before retrying."}
         output = _combined_output(queue_stdout, queue_stderr)
         if queue_code == 0:
-            output = (
-                f"Queued to Codex session {session_id}; execution has not been confirmed.\n"
-                f"{output}"
-            ).rstrip()
-        return {"ok": queue_code == 0, "output": output}
+            return {"ok": True, "delivery": "queued",
+                    "output": f"Queued to Codex session {session_id}; execution is unconfirmed.\n{output}"}
+        return {"ok": False, "delivery": "submission_unknown",
+                "output": f"Codex queue failed without an acceptance receipt; inspect the target before retrying.\n{output}"}
     return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}
 
 
@@ -572,10 +622,7 @@ def _run_opencode(
 
     session_id = str(fields.get("wake_session_id") or "").strip()
     if session_id:
-        if session_id.lower() in {"last", "--last", "continue", "--continue"}:
-            cmd.append("--continue")
-        else:
-            cmd.extend(["--session", session_id])
+        cmd.extend(["--session", session_id])
     if fields.get("wake_cwd"):
         cmd.extend(["--dir", fields["wake_cwd"]])
     if fields.get("wake_model"):
@@ -587,5 +634,39 @@ def _run_opencode(
 
     returncode, stdout, stderr = _run_process(cmd, timeout=timeout)
     if returncode is None:
-        return {"ok": False, "output": f"opencode run timed out after {timeout}s"}
+        return {"ok": False, "delivery": "submission_unknown", "output": f"OpenCode run timed out after {timeout}s; execution is unconfirmed"}
     return {"ok": returncode == 0, "output": _combined_output(stdout, stderr)}
+
+
+def _run_targeted_agent(client: str, reminder: dict, fields: dict, store: Store,
+                        *, timeout: int = 300) -> dict:
+    """Documented headless resume surfaces, never an active-session injection."""
+    problem = _wake_argv_problem(fields)
+    if problem:
+        return {"ok": False, "terminal": True, "output": f"Refused: {problem}"}
+    executables, prefix, session_flag = {
+        "antigravity": (("agy",), ["-p"], "--conversation"),
+        "cursor": (("cursor-agent", "agent"), ["-p"], "--resume"),
+        "muse": (("muse",), ["exec"], "--session-id"),
+    }[client]
+    cli = next(filter(None, map(_resolve_cli, executables)), None)
+    if cli is None:
+        return _missing_cli(executables[0])
+    # Installed versions must advertise the documented transport. A similarly
+    # named executable or older IDE launcher must not start a fresh session.
+    help_cmd = [cli, "exec", "--help"] if client == "muse" else [cli, "--help"]
+    code, help_out, help_err = _run_process(help_cmd, timeout=min(timeout, 10))
+    help_text = help_out + help_err
+    if code != 0 or session_flag not in help_text:
+        return {"ok": False, "terminal": True,
+                "output": f"Installed {client} CLI does not advertise supported session resume"}
+    cmd = [cli, *prefix, _build_agent_prompt(reminder, fields, store)]
+    if fields.get("wake_session_id"):
+        cmd.extend([session_flag, fields["wake_session_id"]])
+    if fields.get("wake_model"):
+        cmd.extend(["--model", fields["wake_model"]])
+    code, stdout, stderr = _run_process(cmd, timeout=timeout, cwd=fields.get("wake_cwd") or None)
+    if code is None:
+        return {"ok": False, "delivery": "submission_unknown",
+                "output": f"{client} run timed out; inspect the target before retrying"}
+    return {"ok": code == 0, "output": _combined_output(stdout, stderr)}

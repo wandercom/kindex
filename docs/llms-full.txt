@@ -153,11 +153,11 @@ agent wakeups:
 kin setup-cron
 
 kin remind create "Continue rollout check" --at "in 10 minutes" \
-  --wake codex --session last --cwd "$PWD" \
+  --wake codex --session YOUR_SESSION_ID --cwd "$PWD" \
   --instructions "Check the rollout and fix any new failures."
 
 kin remind create "Continue OpenCode build" --at "in 10 minutes" \
-  --wake opencode --session last --cwd "$PWD" --wake-agent build \
+  --wake opencode --session YOUR_SESSION_ID --cwd "$PWD" --wake-agent build \
   --instructions "Continue the build triage."
 ```
 
@@ -167,8 +167,12 @@ Important boundary:
 - Due reminders fire only when `kin remind check`, `kin remind exec`,
   `kin cron`, or an installed `kin setup-cron` schedule runs.
 - Codex wakeups run `codex exec` or `codex exec resume ...`.
-- OpenCode wakeups run `opencode run`, optionally with `--session`,
-  `--continue`, `--dir`, `--model`, and `--agent`.
+- OpenCode wakeups run `opencode run`, optionally with `--session`, `--dir`,
+  `--model`, and `--agent`.
+- Claude, Antigravity, Cursor and Muse wakeups use their documented headless
+  resume commands. `--session last` is resolved when the reminder is created.
+- Notification output is separate from wakes and defaults to `/dev/null`; set
+  `reminders.output_destination` or `--destination` to route it.
 - Kindex does not reenter or interrupt an idle terminal UI unless that host
   provides a same-thread wake API.
 

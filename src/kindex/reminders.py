@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 _VALID_PRIORITIES = ("low", "normal", "high", "urgent")
-_VALID_WAKE_CLIENTS = ("codex", "opencode")
+_VALID_WAKE_CLIENTS = ("codex", "claude", "antigravity", "cursor", "opencode", "muse")
 
 #: A session id, model or agent name as it may appear in an agent's argv: it
 #: cannot start with "-" (it would be read as an option) or hold whitespace.
@@ -106,7 +106,7 @@ def _checked_wake(
         if session_id or cwd or model or agent:
             raise ValueError(
                 "wake session, cwd, model and agent options need a wake client "
-                "(--wake codex|opencode)")
+                "(--wake CLIENT)")
         return {}
     if agent and client != "opencode":
         raise ValueError("A wake agent applies only to OpenCode wakes")
@@ -115,7 +115,7 @@ def _checked_wake(
             raise ValueError(f"Invalid wake {name} {value!r}")
 
     if session_id.lower() in LAST_SESSION:
-        current = next((os.environ[key].strip() for key in _HOST_SESSION_ENV[client]
+        current = next((os.environ[key].strip() for key in _HOST_SESSION_ENV.get(client, ())
                         if os.environ.get(key, "").strip()), "")
         if not current and client == "codex":
             home = os.environ.get("CODEX_HOME") or str(store.config.codex_path)
@@ -406,6 +406,7 @@ def create_reminder(
     wake_cwd: str = "",
     wake_model: str = "",
     wake_agent: str = "",
+    notification_destination: str = "",
     attention_triggers: list[str] | None = None,
     conversation_id: str = "",
     scope: str = "",
@@ -430,6 +431,12 @@ def create_reminder(
 
     wake = _checked_wake(store, wake_client, wake_session_id, wake_cwd,
                          wake_model, wake_agent)
+    if notification_destination:
+        from .notify import validate_destination
+        validate_destination(notification_destination)
+        from .privacy import redact_text
+        if redact_text(notification_destination) != notification_destination:
+            raise ValueError("Notification destination would be redacted in storage; use a nonsecret URL or configure reminders.output_destination locally")
     next_due, schedule, reminder_type = parse_time_spec(time_spec)
 
     extra: dict | None = None
@@ -437,11 +444,14 @@ def create_reminder(
         action_command
         or action_instructions
         or wake_client
+        or notification_destination
         or attention_triggers
         or conversation_id
         or scope
     ):
         extra = {}
+        if notification_destination:
+            extra["notification_destination"] = notification_destination
         if action_command or action_instructions or wake_client:
             extra.update({
                 "action_command": action_command,
@@ -580,7 +590,8 @@ def cancel_reminder(store: Store, reminder_id: str) -> None:
     _try_repack(store)
 
 
-def advance_recurring(store: Store, reminder_id: str) -> str | None:
+def advance_recurring(store: Store, reminder_id: str, *,
+                      expected_occurrence: str | None = None) -> str | None:
     """For recurring reminders: compute and set the next_due from the schedule.
 
     Returns the new next_due ISO string, or None if no more occurrences.
@@ -590,17 +601,21 @@ def advance_recurring(store: Store, reminder_id: str) -> str | None:
     # metadata when we remove the previous occurrence's snooze deadline.
     store.conn.execute("BEGIN IMMEDIATE")
     try:
-        return _advance_recurring_locked(store, reminder_id)
+        return _advance_recurring_locked(store, reminder_id, expected_occurrence=expected_occurrence)
     except BaseException:
         store.conn.rollback()
         raise
 
 
-def _advance_recurring_locked(store: Store, reminder_id: str) -> str | None:
+def _advance_recurring_locked(store: Store, reminder_id: str, *,
+                              expected_occurrence: str | None = None) -> str | None:
     """Advance under the write lock; the store update commits the transaction."""
     r = store.get_reminder(reminder_id)
     if r is None:
         raise ValueError(f"Reminder not found: {reminder_id}")
+    if expected_occurrence is not None and r.get("next_due") != expected_occurrence:
+        store.conn.rollback()
+        return None
     if r.get("status") in ("cancelled", "completed"):
         # Closed while its action ran: stays closed.
         store.conn.rollback()
@@ -655,10 +670,16 @@ def _advance_recurring_locked(store: Store, reminder_id: str) -> str | None:
         # Each occurrence starts its notification backoff over.
         del extra["auto_snooze_streak"]
         updates["extra"] = extra
+    if extra.get("action_status") in ("queued", "submission_unknown"):
+        extra["last_action_delivery"] = {
+            "occurrence": r["next_due"], "status": extra["action_status"],
+            "result": extra.get("action_result", ""),
+            "attempted_at": extra.get("action_executed_at", ""),
+        }
     if extra.get("action_status") and extra["action_status"] not in ("running", "paused"):
         extra["action_status"] = "pending"
         updates["extra"] = extra
-    if "action_attempts" in extra:
+    if "action_attempts" in extra and extra.get("action_status") != "running":
         # Each occurrence gets its own attempts.
         extra.pop("action_attempts", None)
         extra.pop("action_attempt_occurrence", None)
@@ -849,13 +870,33 @@ def _fire_one(store: Store, config: Config, r: dict) -> bool:
     """Dispatch one due reminder and run its action. Returns whether it fired."""
     from .notify import dispatch
 
+    current = store.get_reminder(r["id"])
+    if (current is None or current.get("status") in ("cancelled", "completed")
+            or current.get("next_due") != r.get("next_due")):
+        return False
+    r = current
+    if r.get("status") == "snoozed" and (r.get("snooze_until") or "") > _now():
+        return False
+
+    # Do not resend this occurrence. Later recurring occurrences are distinct
+    # requests; retain the prior delivery receipt when advancing their schedule.
+    if (r.get("extra") or {}).get("action_status") in ("queued", "submission_unknown"):
+        if r["reminder_type"] == "recurring":
+            advance_recurring(store, r["id"], expected_occurrence=r["next_due"])
+            return True
+        return False
+
     # Determine channels for this reminder
     channels = r.get("channels") or []
     if not channels:
         channels = None  # will use defaults
 
     # Dispatch notification
-    dispatch(r, config, channel_names=channels)
+    results = dispatch(r, config, channel_names=channels)
+    from dataclasses import asdict
+    if not store.update_reminder_notification(r["id"],
+            results=[asdict(result) for result in results], expected_occurrence=r["next_due"]):
+        return False
 
     # Execute action if present, enabled, and not stale. The staleness
     # guard is a hard safety line: a wake reminder minutes overdue is a
@@ -871,23 +912,44 @@ def _fire_one(store: Store, config: Config, r: dict) -> bool:
     if config.reminders.action_enabled and not stale:
         if has_action(r):
             result = execute_action(store, r, config, timeout=_ACTION_TIMEOUT)
+            if result.get("status") == "skipped":
+                if result.get("reason") in ("snoozed", "action claim superseded"):
+                    return False
+                latest = store.get_reminder(r["id"])
+                if (latest is None or latest.get("next_due") != r["next_due"]
+                        or (latest.get("extra") or {}).get("action_status") == "running"):
+                    return False
             if result.get("status") == "completed":
                 if r["reminder_type"] == "recurring":
-                    advance_recurring(store, r["id"])
+                    advance_recurring(store, r["id"], expected_occurrence=r["next_due"])
                 else:
-                    store.settle_reminder(r["id"], "completed")
+                    store.settle_reminder(r["id"], "completed", expected_occurrence=r["next_due"])
+                return True
+            if result.get("status") in ("queued", "submission_unknown"):
+                if r["reminder_type"] == "recurring":
+                    advance_recurring(store, r["id"], expected_occurrence=r["next_due"])
+                else:
+                    store.settle_reminder(r["id"], "fired", last_fired=_now(), expected_occurrence=r["next_due"])
                 return True
             if result.get("status") == "failed":
                 # Retried on this occurrence, after the automatic snooze,
                 # until it succeeds or its attempts run out; advancing a
                 # recurring reminder here started a new occurrence (and a
                 # fresh attempt count) on every failure.
-                store.settle_reminder(r["id"], "fired", last_fired=_now())
+                store.settle_reminder(r["id"], "fired", last_fired=_now(), expected_occurrence=r["next_due"])
                 return True
+
+    fresh = store.get_reminder(r["id"])
+    if fresh and (fresh.get("extra") or {}).get("action_status") in ("queued", "submission_unknown"):
+        if r["reminder_type"] == "recurring":
+            advance_recurring(store, r["id"], expected_occurrence=r["next_due"])
+        else:
+            store.settle_reminder(r["id"], "fired", last_fired=_now(), expected_occurrence=r["next_due"])
+        return True
 
     if r["reminder_type"] == "recurring":
         # Advance to next occurrence
-        advanced = advance_recurring(store, r["id"])
+        advanced = advance_recurring(store, r["id"], expected_occurrence=r["next_due"])
         if stale and has_action(r) and advanced is not None:
             # Advancing re-arms the action for an occurrence one period
             # away — which would resurrect a stale poller swarm, merely
@@ -896,7 +958,7 @@ def _fire_one(store: Store, config: Config, r: dict) -> bool:
             _pause_action(store, r["id"])
     else:
         # Mark as fired (pending user action), unless closed meanwhile.
-        store.settle_reminder(r["id"], "fired", last_fired=_now())
+        store.settle_reminder(r["id"], "fired", last_fired=_now(), expected_occurrence=r["next_due"])
 
     return True
 
@@ -1005,7 +1067,7 @@ def format_reminder(reminder: dict) -> str:
             lines.append(f"      Command: {extra['action_command']}")
         if extra.get("action_instructions"):
             lines.append(f"      Instructions: {extra['action_instructions'][:80]}")
-        if extra.get("action_result") and a_status in ("completed", "failed"):
+        if extra.get("action_result") and a_status in ("completed", "failed", "queued", "submission_unknown", "exhausted"):
             lines.append(f"      Result: {extra['action_result'][:120]}")
 
     return "\n".join(lines)

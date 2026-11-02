@@ -4425,19 +4425,22 @@ def remind_create(text: str, when: str, priority: str = "normal",
                   instructions: str = "", conversation_id: str = "",
                   scope: str = "chat", wake: str = "",
                   wake_session: str = "", wake_cwd: str = "",
-                  wake_model: str = "", wake_agent: str = "") -> str:
+                  wake_model: str = "", wake_agent: str = "",
+                  destination: str = "") -> str:
     """Create a reminder with natural language time parsing.
 
     Args:
         text: What to be reminded about.
         when: When to fire: 'in 30 minutes', 'tomorrow at 3pm', 'every weekday at 9am'.
         priority: Priority level (low, normal, high, urgent).
-        channels: Comma-separated notification channels (system, slack, email, claude).
+        channels: Comma-separated notification channels (output, system, slack, email, claude, telegram, terminal).
         action: Shell command to execute when the reminder fires (optional).
         instructions: Natural language instructions for Claude to follow when due (optional).
         conversation_id: Optional chat/session id for scoped hook injection.
         scope: Reminder visibility for hook injection: chat or global.
-        wake: Wake an agent when due: codex or opencode.
+        destination: Notification output: /dev/null, absolute file/device path, fd:N, or HTTP(S) URL.
+        wake: Headless agent: codex, claude, antigravity, cursor, opencode, or muse.
+            Resume is not active-session injection; only Codex has an active-writer queue fallback.
         wake_session: Optional host session id to resume; 'last' is resolved to the
             current (or newest Codex) session now, not when the reminder fires.
         wake_cwd: Working directory for the wake run (default: this project).
@@ -4461,6 +4464,7 @@ def remind_create(text: str, when: str, priority: str = "normal",
             action_command=action,
             action_instructions=instructions,
             wake_client=wake,
+            notification_destination=destination,
             wake_session_id=wake_session,
             # The server's own directory is not necessarily the project's.
             wake_cwd=wake_cwd or (_mcp_project_path() if wake else ""),

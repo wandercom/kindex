@@ -36,14 +36,14 @@ Reminder wakeups:
 ```bash
 kin setup-cron
 kin remind create "Continue rollout check" --at "in 10 minutes" \
-  --wake codex --session last --cwd "$PWD" \
+  --wake codex --session YOUR_SESSION_ID --cwd "$PWD" \
   --instructions "Check the rollout and fix any new failures."
 kin remind create "Continue OpenCode build" --at "in 10 minutes" \
-  --wake opencode --session last --cwd "$PWD" --wake-agent build \
+  --wake opencode --session YOUR_SESSION_ID --cwd "$PWD" --wake-agent build \
   --instructions "Continue the build triage."
 ```
 
-Boundary: `remind_create` records a reminder. Due reminders fire only when `kin remind check`, `kin remind exec`, `kin cron`, or an installed `kin setup-cron` schedule runs. Codex/OpenCode wakeups start headless turns from that checker context; Kindex does not interrupt an idle interactive TUI by itself.
+Boundary: `remind_create` records a reminder. Due reminders fire only when `kin remind check`, `kin remind exec`, `kin cron`, or an installed `kin setup-cron` schedule runs. Codex, Claude, Antigravity, Cursor, OpenCode and Muse wakeups start or resume headless turns from that checker context; Kindex does not interrupt an idle interactive TUI by itself. Notification output is separate from wakes and defaults to `/dev/null`; set `reminders.output_destination` or `--destination` to route it.
 
 Reviewed memory:
 
