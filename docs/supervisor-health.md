@@ -290,9 +290,12 @@ Native resume IDs are stored separately for each resolved project data directory
 conversation, and backend, and reused explicitly across tmux process restarts.
 Review prompts travel through stdin, including Antigravity's streaming input.
 Claude emits streaming initialization so its native ID can be checkpointed before
-a turn completes. A native client can emit an ID before saving its conversation;
-if interrupted in that window, an exact resume can still fail. Kindex retains the
-ID and reports the failure without silently creating a replacement session.
+a turn completes. A native client can emit an ID before saving its conversation,
+and Antigravity prunes old conversations, so an exact resume can still fail. A
+failed resume that keeps the same ID is reported and the ID is retained. A provider
+that answers from another valid conversation fails that review with
+`subscription_session_mismatch`, and Kindex retires the stored ID so the next
+admitted review starts a new session instead of failing until the allowance is spent.
 Persisted records are schema-validated, and optional health
 registration failures do not discard a valid review or its native checkpoint.
 Review scratch files are private; each native process has a closed environment
@@ -307,7 +310,7 @@ The tmux process exists only during an active review; Kindex does not keep an id
 reviewer running. Its private `subscription-review/<conversation-hash>-<backend>/active.json`
 under the project data directory contains the exact tmux socket, session name,
 and attach argument list while running. Native conversation state persists after
-that process exits, and the next review resumes its stored native ID.
+that process exits, and the next review resumes its stored native ID if it has one.
 
 Native session identity is checkpointed when the CLI emits its initial session
 ID, before the review finishes. A timeout or interrupted first turn retains that

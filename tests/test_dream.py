@@ -225,6 +225,19 @@ class TestAutoApplySuggestions:
         assert reports[0].getMessage().startswith("3 suggestions")
         assert len(store.pending_suggestions(limit=10)) == 3
 
+    def test_reports_missing_endpoints_once_per_run(self, store, caplog):
+        from kindex.dream import auto_apply_suggestions
+        for other in ("First concept", "Second concept"):
+            store.add_node(other)
+            store.add_suggestion("Concept that was never added", other, reason="Linked")
+        with caplog.at_level("WARNING", logger="kindex.dream"):
+            assert auto_apply_suggestions(store) == 0
+        reports = [r for r in caplog.records if "not auto-applied" in r.getMessage()]
+        assert len(reports) == 1
+        assert reports[0].getMessage().startswith("2 suggestions")
+        assert "no longer resolve" in reports[0].getMessage()
+        assert len(store.pending_suggestions(limit=10)) == 2
+
     def test_skips_archived_nodes(self, store):
         from kindex.dream import auto_apply_suggestions
         store.add_node("Same title", status="archived")

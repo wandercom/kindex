@@ -403,12 +403,9 @@ def auto_apply_suggestions(store: Store) -> int:
                 missing.append(concept_a)
             if not node_b:
                 missing.append(concept_b)
-            logger.warning(
-                "suggestion %s remains pending because endpoint(s) no longer "
-                "resolve under %s identity: %s",
-                s["id"],
-                identity_kind,
-                ", ".join(missing),
+            unresolved.append(
+                f"suggestion {s['id']} endpoint(s) no longer resolve under "
+                f"{identity_kind} identity: {', '.join(missing)}"
             )
             continue
         if node_a.get("status") != "active" or node_b.get("status") != "active":
