@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-02
+
 ### Added
 - Independent reminder notification output to HTTP(S) POST, absolute file/device
   paths or inherited descriptors; new defaults discard via `/dev/null`. CLI

@@ -1,3 +1,3 @@
 """Kindex — Knowledge graph that learns from your conversations."""
 
-__version__ = "0.50.1"
+__version__ = "0.51.0"
