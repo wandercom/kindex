@@ -10,7 +10,7 @@
     "repository": "https://github.com/wandercom/kindex",
     "documentation": "https://kindex.tools/mcp-agent-guide.md",
     "humanGuide": "https://kindex.tools/human-guide.md",
-    "license": "MIT",
+    "license": "BUSL-1.1",
     "vendor": {
       "name": "Wander",
       "url": "https://github.com/wandercom"

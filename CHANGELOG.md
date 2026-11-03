@@ -4,6 +4,14 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- Kindex is licensed under the Business Source License 1.1 instead of MIT.
+  Production use is allowed except offering Kindex to others as a hosted or
+  managed service; each version becomes available under the Apache License
+  2.0 four years after its release. Releases up to and including 0.51.0
+  remain available under MIT, and `LICENSE-MIT` keeps the MIT notice for
+  them and for code contributed under it.
+
 ### Fixed
 - Antigravity sessions launched with `agy --add-dir` (every Factory seat) got no
   Kindex context, no supervisor reviews and no health receipts, because each hook

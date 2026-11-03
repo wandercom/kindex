@@ -22,7 +22,7 @@ and Kindex's whole premise is that it stays nimble. When the extra is absent,
 selecting it degrades to the keyword engine with a warning — never a crash.
 
 Nothing here is derived from Hillock's implementation, which is AGPL-3.0 and
-incompatible with this project's MIT licence. The ideas are not copyrightable;
+incompatible with this project's licence. The ideas are not copyrightable;
 the code is, and none of it was copied.
 """
 
