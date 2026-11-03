@@ -206,7 +206,7 @@ def _details(kind, raw):
     reasons = {"llm_unavailable", "worker_unavailable", "transcript_unavailable", "review_failed",
                "budget_exhausted", "timeout", "invalid_response", "no_findings", "advisory",
                "missing_credentials", "disabled", "provider_error", "stale", "superseded", "evicted",
-               "invalid_scope"}
+               "invalid_scope", "no_worktree"}
     if raw.get("reason") in reasons:
         clean["reason"] = raw["reason"]
     return clean

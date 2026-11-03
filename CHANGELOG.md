@@ -12,6 +12,29 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   remain available under MIT, and `LICENSE-MIT` keeps the MIT notice for
   them and for code contributed under it.
 
+### Fixed
+- Antigravity sessions launched with `agy --add-dir` (every Factory seat) got no
+  Kindex context, no supervisor reviews and no health receipts, because each hook
+  refused a session with several workspaces. A session now belongs to the first
+  workspace in a Git worktree, in the order Antigravity reports them (launch
+  directory first).
+- Antigravity priming chose its topic from the directory holding `hooks.json`, so
+  every session got notes about Kindex's own configuration. It now uses the workspace.
+- Health counted no Antigravity Kindex use: agy reports MCP calls as one generic
+  `call_mcp_tool`, and shell calls as `run_command` with `CommandLine`. Sessions that
+  called Kindex hundreds of times raised `missing_use`.
+- Registered automation (Kinbase's classifier) no longer exhausts the Antigravity
+  health scan's bound, which left live sessions unobserved. More than 512 stored
+  conversations no longer does either.
+- Health no longer calls a session's identity conflicting because its receipts sit
+  under both the repository and its launch directory, or because it has `--add-dir`
+  workspaces. Antigravity's own record of the workspace outranks a hook receipt.
+- A hook diagnostic is sent to an Antigravity model once per turn, not before every
+  model call, where agents chased it instead of the user's work.
+- The supervisor hook no longer tells the model to pick a profile in a workspace
+  outside Git. It stays quiet and leaves a `no_worktree` health receipt.
+- `kin setup-antigravity-mcp` replaces a dangling `mcp_config.json` symlink.
+
 ## [0.51.0] - 2026-11-02
 
 ### Added
