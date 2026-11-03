@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-02
+
 ### Changed
 - Kindex is licensed under the Business Source License 1.1 instead of MIT.
   Production use is allowed except offering Kindex to others as a hosted or
