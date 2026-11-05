@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import shlex
 import shutil
@@ -80,7 +81,7 @@ def legacy_manifest(config, kin_path: str) -> dict:
         return {"type": "command", "command": build(kin_path, args), "timeout": seconds}
     # The hook must outlive the extraction request (llm.timeout) plus margin,
     # floor 10s.
-    compact_timeout = int(max(10, config.llm.timeout + 4))
+    compact_timeout = max(10, math.ceil(config.llm.timeout + 4))
     stop = [command(["compact-hook"], compact_timeout, True),
             command(["attention", "reinforce", "--enqueue"], 3, True)]
     if config.reminders.stop_guard_enabled:
