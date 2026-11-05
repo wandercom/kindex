@@ -617,6 +617,19 @@ def test_read_only_tools_never_invoke_project(store, repo, monkeypatch, tmp_path
     assert all(line.split()[-1] == "--json" for line in invocations)
 
 
+def test_read_status_reports_bulk_lists_as_counts(store, repo, monkeypatch, tmp_path):
+    """A company store's facts and query log reach tens of megabytes, which an
+    MCP client drops the connection on; status keeps Unknowns and counts."""
+    from kindex import kinbase as kb
+
+    payload = {"status": "unverified", "facts": [{"k": i} for i in range(3)],
+               "events": [{}], "query_log": [{}, {}], "unknowns": [{"id": "u1"}]}
+    stub = read_stub(tmp_path, "bulk", payload)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    assert kb.read_status(repo) == {"status": "unverified", "unknowns": [{"id": "u1"}],
+                                    "facts_count": 3, "events_count": 1, "query_log_count": 2}
+
+
 def test_read_only_tools_return_a_refusal_document_rather_than_raising(
         store, repo, monkeypatch, tmp_path):
     """Kinbase writes refusals as typed documents on stdout. Raising would drop
