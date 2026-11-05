@@ -296,6 +296,7 @@ def _node(repo, identity, doc, mode, receipt):
 #: query shape failing loudly rather than this bound being wrong, and the
 #: extrapolation is one measured point, not a second measurement.
 STATUS_TIMEOUT_S = 30
+STATUS_BULK_KEYS = ("facts", "events", "query_log")
 SUBMIT_TIMEOUT_S = 30
 MAX_SUBMISSION_BYTES = 16 * 1024
 MAX_SUBMISSION_RECEIPT_BYTES = 64 * 1024
@@ -360,7 +361,13 @@ def read_status(repo: str | Path, *, binary="kinbase") -> dict:
     possible beats an unrecoverable one that is not.
     """
     root = Path(repo).expanduser().resolve(strict=True)
-    return _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
+    status = _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
+    # A company store's full fact list and query log run to tens of megabytes,
+    # which an MCP client drops the connection on. The counts carry the answer.
+    for key in STATUS_BULK_KEYS:
+        if isinstance(status.get(key), list):
+            status[f"{key}_count"] = len(status.pop(key))
+    return status
 
 
 def read_explain(repo: str | Path, logical_key: str, decision: str, *,
