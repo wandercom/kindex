@@ -2462,9 +2462,10 @@ def cmd_compact_hook(args):
 
     existing = [n["title"] for n in store.all_nodes(limit=200)]
     try:
-        # The host allows this hook ten seconds; the request gets six, so it
-        # ends (and records its spend) before the host would kill it.
-        extraction = extract(text, existing, cfg, ledger, timeout=6.0)
+        # The default (6s) assumes a caller that kills this hook around ten
+        # seconds; keep llm.timeout under the caller's kill timeout so the
+        # request ends (and records its spend) before it would be killed.
+        extraction = extract(text, existing, cfg, ledger, timeout=cfg.llm.timeout)
     except Exception as exc:
         try:
             from .config import record_degraded

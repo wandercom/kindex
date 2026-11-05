@@ -349,6 +349,7 @@ class LLMConfig(BaseModel):
     cache_control: bool = True
     codebook_min_weight: float = 0.5
     tier2_max_tokens: int = 4000
+    timeout: float = Field(6.0, gt=0)
 
 
 class AskConfig(BaseModel):
