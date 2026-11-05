@@ -6,6 +6,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from kindex.budget import BudgetLedger
 from kindex.config import BudgetConfig, Config, LLMConfig
@@ -431,6 +432,24 @@ class TestLLMConfig:
     def test_tier2_max_tokens_default(self):
         cfg = LLMConfig()
         assert cfg.tier2_max_tokens == 4000
+
+    def test_timeout_default(self):
+        cfg = LLMConfig()
+        assert cfg.timeout == 6.0
+
+    def test_timeout_parses_value(self):
+        cfg = LLMConfig(timeout=30)
+        assert cfg.timeout == 30.0
+
+    def test_timeout_rejects_non_positive(self):
+        with pytest.raises(ValidationError):
+            LLMConfig(timeout=0)
+        with pytest.raises(ValidationError):
+            LLMConfig(timeout=-1)
+        with pytest.raises(ValidationError):
+            LLMConfig(timeout=4000)
+        with pytest.raises(ValidationError):
+            LLMConfig(timeout=float("inf"))
 
 
 # ── Response text (thinking blocks before the reply) ──────────────────

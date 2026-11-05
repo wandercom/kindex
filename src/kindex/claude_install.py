@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import shlex
 import shutil
@@ -78,7 +79,10 @@ def legacy_manifest(config, kin_path: str) -> dict:
     def command(args, seconds, stop=False):
         build = _kin_stop_hook_command if stop else _kin_hook_command
         return {"type": "command", "command": build(kin_path, args), "timeout": seconds}
-    stop = [command(["compact-hook"], 10, True),
+    # The hook must outlive the extraction request (llm.timeout) plus margin,
+    # floor 10s.
+    compact_timeout = max(10, math.ceil(config.llm.timeout + 4))
+    stop = [command(["compact-hook"], compact_timeout, True),
             command(["attention", "reinforce", "--enqueue"], 3, True)]
     if config.reminders.stop_guard_enabled:
         stop.insert(0, command(["stop-guard"], 5, True))
@@ -88,7 +92,7 @@ def legacy_manifest(config, kin_path: str) -> dict:
         "SessionStart": [command(["prime", "--for", "hook"], 5)],
         # Claude adds no PreCompact output to the context; the SessionStart
         # it fires after compacting (source "compact") re-primes instead.
-        "PreCompact": [command(["compact-hook"], 10)],
+        "PreCompact": [command(["compact-hook"], compact_timeout)],
         "UserPromptSubmit": [command(["prompt-check"], 2)],
         "PreToolUse": [command(["attention-hook", "--adapter", "claude", "--event",
                                 "PreToolUse", "--deadline-ms", "3500"], 5)],
