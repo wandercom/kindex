@@ -1280,7 +1280,7 @@ llm:
   cache_control: true              # Prompt caching (90% savings on repeated prefixes)
   codebook_min_weight: 0.5         # Min node weight for codebook inclusion
   tier2_max_tokens: 4000           # Token budget for query-relevant context
-  timeout: 6.0                     # Per-request LLM timeout in seconds (keep under the caller's hook kill timeout)
+  timeout: 6.0                     # Compact-hook extraction timeout in seconds (kindex installs its hook at llm.timeout + 4s)
 
 embedding:
   provider: voyage                 # voyage, openai, gemini, or local

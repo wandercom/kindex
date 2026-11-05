@@ -61,6 +61,19 @@ def run_compact_hook(monkeypatch, tmp_path, transcript: Path, calls: list[str]):
     cmd_compact_hook(args)
 
 
+def test_compact_hook_passes_configured_llm_timeout_to_extract(monkeypatch, tmp_path):
+    isolate_global_config(monkeypatch, tmp_path)
+    import kindex.cli as cli
+    monkeypatch.setattr(cli, "_config",
+                        lambda args: Config(llm={"enabled": True, "timeout": 8.0}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(assistant_line(turn(0)) + "\n")
+    calls: list = []
+    run_compact_hook(monkeypatch, tmp_path, transcript, calls)
+    assert len(calls) == 1
+    assert calls[0][1] == 8.0
+
+
 def test_each_turn_is_extracted_once(monkeypatch, tmp_path):
     isolate_global_config(monkeypatch, tmp_path)
     transcript = tmp_path / "t.jsonl"

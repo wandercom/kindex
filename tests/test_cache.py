@@ -446,6 +446,10 @@ class TestLLMConfig:
             LLMConfig(timeout=0)
         with pytest.raises(ValidationError):
             LLMConfig(timeout=-1)
+        with pytest.raises(ValidationError):
+            LLMConfig(timeout=4000)
+        with pytest.raises(ValidationError):
+            LLMConfig(timeout=float("inf"))
 
 
 # ── Response text (thinking blocks before the reply) ──────────────────

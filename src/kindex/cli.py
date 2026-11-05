@@ -2462,9 +2462,9 @@ def cmd_compact_hook(args):
 
     existing = [n["title"] for n in store.all_nodes(limit=200)]
     try:
-        # The default (6s) assumes a caller that kills this hook around ten
-        # seconds; keep llm.timeout under the caller's kill timeout so the
-        # request ends (and records its spend) before it would be killed.
+        # The request must end (and record its spend) before the caller kills
+        # this hook; kindex's own installer derives that kill timeout from
+        # llm.timeout plus margin, floor ten seconds. Keep llm.timeout modest.
         extraction = extract(text, existing, cfg, ledger, timeout=cfg.llm.timeout)
     except Exception as exc:
         try:
