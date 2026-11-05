@@ -4,6 +4,14 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- The `kinbase_status` MCP tool passed Kinbase's whole `status` document through,
+  including every fact and the full query log. Against the company store that is
+  about 190 MB of JSON, and MCP clients dropped the kindex connection on it, taking
+  every kindex tool down for the session. `facts`, `events` and `query_log` are now
+  reported as `facts_count`, `events_count` and `query_log_count`; certification,
+  counts and Unknowns are unchanged (about 210 KB for the same repository).
+
 ## [0.52.0] - 2026-11-02
 
 ### Changed
