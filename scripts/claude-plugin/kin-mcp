@@ -11,7 +11,7 @@ if command -v kin-mcp >/dev/null 2>&1; then
     exec kin-mcp "$@"
 fi
 if command -v uvx >/dev/null 2>&1; then
-    exec uvx --from 'kindex[mcp]==0.52.0' kin-mcp "$@"
+    exec uvx --from 'kindex[mcp]==0.53.0' kin-mcp "$@"
 fi
 echo "kindex: install uv (https://docs.astral.sh/uv/) or kindex itself (pip install 'kindex[mcp]')" >&2
 exit 1
