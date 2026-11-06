@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-11-05
+
 ### Changed
 - `llm.timeout` configures the compact-hook extraction timeout. Kindex now derives
   the installed Claude hook's kill timeout from it (`llm.timeout` + 4s, floor 10s).
