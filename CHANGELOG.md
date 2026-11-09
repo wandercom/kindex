@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-11-09
+
 ### Changed
 - Linked Git worktrees and Factory clones marked with
   `.kindex-no-index` are excluded from automatic project/session
