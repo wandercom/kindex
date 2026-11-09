@@ -97,11 +97,12 @@ def open_project_store(scope: dict, *, migrate: bool = True):
     data_dir = project_data_path(root)
     config = trusted_supervisor_config(root, str(data_dir))
     config._project_path = root
-    # Scheduled maintenance finds a repo-local graph only through a registry;
-    # one opened here (no data_dir in any .kin/config) was never swept, so its
-    # due tasks and reminders never fired.
+    config._project_input_path = Path(scope["project_path"]).expanduser().absolute()
+    # Discovery is separate from knowledge eligibility. Transient workspaces
+    # are not newly registered; old registrations remain harmless because
+    # maintenance rechecks the workspace policy before draining paid queues.
     from .project_store import register_project_graph
-    register_project_graph(root, data_dir)
+    register_project_graph(config._project_input_path, data_dir)
     # The modern codebase lane is separate from legacy profile selection.
     return Store(config, migrate=migrate)
 

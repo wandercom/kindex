@@ -1,12 +1,25 @@
 """Tests for ingestion — project scanning, .conv files, session learning."""
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from kindex.config import Config
 from kindex.store import Store
+
+
+def _canonical_checkout(path):
+    """Positive ingestion fixtures represent real primary checkouts.
+
+    Canonical/WIP contract: unclassified ordinary folders are no longer
+    implicitly indexable. Keep the original ingestion outcomes and supply
+    their canonical Git identity explicitly, without committing any content.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    return path
 
 
 @pytest.fixture
@@ -35,6 +48,8 @@ def store_with_projects(tmp_path):
     proj_c = projects_dir / "project-gamma"
     proj_c.mkdir(parents=True)
     (proj_c / "README.md").write_text("# Gamma\n")
+    for project in (proj_a, proj_b, proj_c):
+        _canonical_checkout(project)
 
     cfg = Config(data_dir=str(data_dir), project_dirs=[str(projects_dir)])
     s = Store(cfg)
@@ -128,6 +143,7 @@ class TestKinFiles:
 
         proj = projects_dir / "solo-project"
         proj.mkdir(parents=True)
+        _canonical_checkout(proj)
         kin_dir = proj / ".kin"
         kin_dir.mkdir(exist_ok=True)
         (kin_dir / "config").write_text(
@@ -152,6 +168,7 @@ class TestKinFiles:
 class TestScanSessions:
     def test_scans_jsonl_sessions(self, tmp_path):
         data_dir = tmp_path / "data"
+        project = _canonical_checkout(tmp_path / "canonical-project")
         claude_dir = tmp_path / "claude"
         projects_dir = claude_dir / "projects" / "-Users-test-Code-MyProject"
         projects_dir.mkdir(parents=True)
@@ -159,7 +176,7 @@ class TestScanSessions:
         # Create a fake session JSONL
         session_file = projects_dir / "abc123def456.jsonl"
         lines = [
-            json.dumps({"role": "user", "content": "Tell me about stigmergy"}),
+            json.dumps({"cwd": str(project), "role": "user", "content": "Tell me about stigmergy"}),
             json.dumps({"role": "assistant", "content": "Stigmergy is coordination through environmental traces. Ambient Structure Discovery uses it."}),
             json.dumps({"role": "user", "content": "How does it relate to emergence?"}),
             json.dumps({"role": "assistant", "content": "Emergence Architecture builds on stigmergic principles to create self-organizing systems."}),
@@ -179,13 +196,14 @@ class TestScanSessions:
 
     def test_idempotent_sessions(self, tmp_path):
         data_dir = tmp_path / "data"
+        project = _canonical_checkout(tmp_path / "canonical-project")
         claude_dir = tmp_path / "claude"
         projects_dir = claude_dir / "projects" / "-Users-test-Code-Proj"
         projects_dir.mkdir(parents=True)
 
         session_file = projects_dir / "session12345.jsonl"
         session_file.write_text(
-            json.dumps({"role": "assistant", "content": [{"type": "text", "text": "The Emergence Architecture pattern uses stigmergic coordination."}]})
+            json.dumps({"cwd": str(project), "role": "assistant", "content": [{"type": "text", "text": "The Emergence Architecture pattern uses stigmergic coordination."}]})
         )
 
         cfg = Config(data_dir=str(data_dir), claude_dir=str(claude_dir))
@@ -199,6 +217,7 @@ class TestScanSessions:
 
     def test_scans_codex_jsonl_sessions(self, tmp_path):
         data_dir = tmp_path / "data"
+        project = _canonical_checkout(tmp_path / "canonical-project")
         codex_dir = tmp_path / "codex"
         sessions_dir = codex_dir / "sessions" / "2026" / "05" / "03"
         sessions_dir.mkdir(parents=True)
@@ -209,7 +228,7 @@ class TestScanSessions:
                 "type": "session_meta",
                 "payload": {
                     "id": "abcdef123456",
-                    "cwd": "/Users/test/Code/MyProject",
+                    "cwd": str(project),
                     "cli_version": "0.128.0",
                     "model_provider": "openai",
                 },
@@ -251,13 +270,14 @@ class TestScanSessions:
 
     def test_codex_sessions_idempotent(self, tmp_path):
         data_dir = tmp_path / "data"
+        project = _canonical_checkout(tmp_path / "canonical-project")
         codex_dir = tmp_path / "codex"
         sessions_dir = codex_dir / "sessions" / "2026" / "05" / "03"
         sessions_dir.mkdir(parents=True)
 
         session_file = sessions_dir / "rollout-abcdef123456.jsonl"
         session_file.write_text("\n".join([
-            json.dumps({"type": "session_meta", "payload": {"id": "abcdef123456", "cwd": "/tmp/proj"}}),
+            json.dumps({"type": "session_meta", "payload": {"id": "abcdef123456", "cwd": str(project)}}),
             json.dumps({
                 "type": "response_item",
                 "payload": {

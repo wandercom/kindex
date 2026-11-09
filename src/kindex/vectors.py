@@ -19,11 +19,13 @@ import json
 import hashlib
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from .project_store import content_indexing_refusal
 from .privacy import redact, redact_serialized, redact_text, safe_error
 from .privacy import redacting_print as print
 
@@ -105,6 +108,34 @@ class _EmbeddingOutcome:
     kind: str | None = None
     http_status: int | None = None
     message: str | None = None
+
+
+class _EmbeddingProgress(BaseModel):
+    provider_attempts: int = 0
+    groups_reused: int = 0
+    groups_checkpointed: int = 0
+
+
+@dataclass
+class _EmbeddingWork:
+    store: Any
+    node_id: str
+    text_hash: str
+    fingerprint: str
+    config: Any
+    node_hash: str | None
+
+
+class _EmbeddingCheckpoint(BaseModel):
+    embeddings: list[list[float]]
+
+
+_EMBED_WORK: ContextVar[_EmbeddingWork | None] = ContextVar("embed_work", default=None)
+_EMBED_DEADLINE: ContextVar[float | None] = ContextVar("embed_deadline", default=None)
+_EMBED_POLICY_CONFIGS: ContextVar[tuple[Any, ...]] = ContextVar("embed_policy_configs", default=())
+_EMBED_CURRENT_ONLY: ContextVar[bool] = ContextVar("embed_current_only", default=False)
+_EMBED_LOCK: ContextVar[str | None] = ContextVar("embed_lock", default=None)
+_EMBED_PROGRESS: ContextVar[_EmbeddingProgress | None] = ContextVar("embed_progress", default=None)
 
 
 class _EmbeddingQuarantineRecord(BaseModel):
@@ -194,11 +225,36 @@ def _provider_http_error(error: urllib.error.HTTPError) -> _EmbeddingProviderErr
         or "input_too_large" in normalized
         or "token_limit_exceeded" in normalized
     )
+    limit_match = re.search(r"maximum context length (?:is |of )?(\d{1,8})", normalized)
+    limit_note = f" (maximum {limit_match.group(1)} tokens)" if limit_match else ""
     return _EmbeddingProviderError(
-        kind="input_too_large" if input_too_large else "provider_http_error",
+        kind=("authentication_error" if error.code in {401, 403} else
+              "input_too_large" if input_too_large else "provider_http_error"),
         http_status=error.code,
-        message=message,
+        # Provider bodies can echo arbitrary private input or credentials. Only
+        # locally authored diagnostics cross the logging/persistence boundary.
+        message=(f"Embedding provider rejected authentication (HTTP {error.code}); check credentials and access"
+                 if error.code in {401, 403} else
+                 f"Embedding input exceeds provider limit{limit_note} (HTTP {error.code})" if input_too_large else
+                 f"Embedding provider request failed (HTTP {error.code})"),
     )
+
+
+def _embedding_policy_refusal(config: Config | None, *, source_paths=()) -> str | None:
+    """Keep every selected workspace in scope throughout a paid drain.
+
+    The positional drain config may select another workspace with identical
+    model settings. Both its original and current selection remain constraints;
+    changing that object cannot erase the workspace that authorized the pass.
+    """
+    reason = content_indexing_refusal(config, source_paths=source_paths)
+    if reason:
+        return reason
+    for selected in _EMBED_POLICY_CONFIGS.get():
+        reason = content_indexing_refusal(selected)
+        if reason:
+            return reason
+    return None
 
 
 def _resolve_embedding_config(config: Config | None) -> tuple[str, str, int, str]:
@@ -341,7 +397,7 @@ def _embed_openai(text: str, model: str, dimensions: int, api_key_env: str) -> l
     except urllib.error.HTTPError as e:
         raise _provider_http_error(e) from e
     except Exception as e:
-        print(f"OpenAI embedding error: {safe_error(e)}", file=sys.stderr)
+        print("OpenAI embedding request failed [REDACTED provider detail]", file=sys.stderr)
         return None
 
 
@@ -376,7 +432,7 @@ def _embed_gemini(text: str, model: str, dimensions: int, api_key_env: str) -> l
     except urllib.error.HTTPError as e:
         raise _provider_http_error(e) from e
     except Exception as e:
-        print(f"Gemini embedding error: {safe_error(e)}", file=sys.stderr)
+        print("Gemini embedding request failed [REDACTED provider detail]", file=sys.stderr)
         return None
 
 
@@ -427,7 +483,7 @@ def _embed_voyage_context_chunks(
     except urllib.error.HTTPError as e:
         raise _provider_http_error(e) from e
     except Exception as e:
-        print(f"Voyage embedding error: {safe_error(e)}", file=sys.stderr)
+        print("Voyage embedding request failed [REDACTED provider detail]", file=sys.stderr)
         return None
 
 
@@ -478,7 +534,7 @@ def _embed_voyage(
     except urllib.error.HTTPError as e:
         raise _provider_http_error(e) from e
     except Exception as e:
-        print(f"Voyage embedding error: {safe_error(e)}", file=sys.stderr)
+        print("Voyage embedding request failed [REDACTED provider detail]", file=sys.stderr)
         return None
 
 
@@ -502,6 +558,10 @@ def _embed_text_or_raise(
     input_type: str = "document",
 ) -> list[float] | None:
     """Call a provider while retaining its typed failure for queue handling."""
+    if input_type != "query":
+        reason = _embedding_policy_refusal(config)
+        if reason:
+            raise _EmbeddingProviderError(kind="indexing_refused", http_status=None, message=reason)
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
     fn = _EMBED_DISPATCH.get(provider)
     if fn is None:
@@ -719,12 +779,17 @@ def _embed_document_chunks(
     embed_one: _EmbedOne,
 ) -> list[dict] | None:
     """Embed document text using an explicitly selected provider-call boundary."""
+    reason = _embedding_policy_refusal(config)
+    if reason:
+        raise _EmbeddingProviderError(kind="indexing_refused", http_status=None, message=reason)
     if not text:
         return []
     strategy = embedding_strategy(config)
     text_hash = _hash_text(text)
     if strategy != "contextual":
-        embedding = embed_one(text, config, input_type="document")
+        embedding_group = _embed_group([text], config, 0,
+                                      lambda: [embed_one(text, config, input_type="document")])
+        embedding = embedding_group[0] if embedding_group else None
         if embedding is None:
             return None
         return [{
@@ -737,7 +802,9 @@ def _embed_document_chunks(
 
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
     if provider != "voyage" or not _is_voyage_context_model(model):
-        embedding = embed_one(text, config, input_type="document")
+        embedding_group = _embed_group([text], config, 0,
+                                      lambda: [embed_one(text, config, input_type="document")])
+        embedding = embedding_group[0] if embedding_group else None
         if embedding is None:
             return None
         return [{
@@ -757,9 +824,9 @@ def _embed_document_chunks(
     records: list[dict] = []
     for offset in range(0, len(chunks), opts["max_group_chunks"]):
         group = chunks[offset:offset + opts["max_group_chunks"]]
-        embeddings = _embed_voyage_context_chunks(
+        embeddings = _embed_group(group, config, offset, lambda: _embed_voyage_context_chunks(
             group, model, dims, api_key_env, input_type="document"
-        )
+        ))
         if embeddings is None or len(embeddings) != len(group):
             return None
         for i, (chunk_text, embedding) in enumerate(zip(group, embeddings)):
@@ -781,7 +848,214 @@ def embed_document_chunks(text: str, config: Config | None = None) -> list[dict]
         return None
 
 
+@contextmanager
+def _embedding_writer_lock(store: Store):
+    """Serialize paid writers per graph without holding a SQLite transaction.
+
+    flock is released by the OS on process death. Do not unlink the lock file:
+    doing so would let another process lock a different inode concurrently.
+    Unsupported platforms fail closed rather than duplicate paid work.
+    """
+    import fcntl
+
+    path = store.db_path.resolve().with_suffix(".embedding.lock")
+    if _EMBED_LOCK.get() == str(path):
+        yield True
+        return
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        token = _EMBED_LOCK.set(str(path))
+        try:
+            yield True
+        finally:
+            _EMBED_LOCK.reset(token)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _ensure_embedding_checkpoints(store: Store) -> None:
+    # Additive, optional vector state, like node_vector_meta. No changes to
+    # canonical graph schema or old vectors are needed before provider I/O.
+    with _embedding_savepoint(store):
+        store.conn.execute("""CREATE TABLE IF NOT EXISTS embedding_checkpoints (
+            node_id TEXT NOT NULL, fingerprint TEXT NOT NULL, text_hash TEXT NOT NULL,
+            group_index INTEGER NOT NULL, group_hash TEXT NOT NULL, result TEXT NOT NULL,
+            PRIMARY KEY (node_id, group_index)
+        )""")
+        store.conn.execute("""CREATE INDEX IF NOT EXISTS idx_embedding_checkpoint_input
+                              ON embedding_checkpoints(fingerprint, text_hash, group_index, group_hash)""")
+
+
+def _embed_group(group: list[str], config: Config | None, offset: int, call):
+    """Checkpoint a complete contextual request, never individual chunks.
+
+    Conservative reuse requires the entire document generation AND the exact
+    ordered group and configuration. Checkpoints are not searchable vectors.
+    """
+    reason = _embedding_policy_refusal(config)
+    if reason:
+        raise _EmbeddingProviderError(kind="indexing_refused", http_status=None, message=reason)
+    deadline = _EMBED_DEADLINE.get()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _EmbeddingProviderError(kind="time_budget", http_status=None,
+                                      message="Embedding time budget exhausted between groups")
+    work = _EMBED_WORK.get()
+    progress = _EMBED_PROGRESS.get()
+    if work:
+        reason = _embedding_policy_refusal(work.store.config)
+        if reason:
+            raise _EmbeddingProviderError(kind="indexing_refused", http_status=None, message=reason)
+    if work and work.node_hash is not None:
+        # Do not reload/hash a potentially enormous document for every group.
+        # Its full input version is checked under the publication write lock.
+        node = work.store.conn.execute("SELECT status FROM nodes WHERE id = ?", (work.node_id,)).fetchone()
+        if (not node or node["status"] in {"archived", "superseded"}
+                or embedding_fingerprint(work.store.config) != work.fingerprint):
+            raise _EmbeddingProviderError(kind="input_changed", http_status=None,
+                                          message="Node or embedding configuration changed")
+    group_hash = _hash_text(json.dumps(redact(group), separators=(",", ":")))
+    dim = _get_embedding_dim(config)
+    if work:
+        row = work.store.conn.execute(
+            """SELECT result FROM embedding_checkpoints
+               WHERE fingerprint = ? AND text_hash = ? AND group_index = ? AND group_hash = ?
+               ORDER BY node_id = ? DESC LIMIT 1""",
+            (work.fingerprint, work.text_hash, offset, group_hash, work.node_id),
+        ).fetchone()
+        if row:
+            saved = _EmbeddingCheckpoint.model_validate_json(row["result"]).embeddings
+            if len(saved) != len(group) or any(
+                    len(v) != dim or not all(math.isfinite(x) for x in v) for v in saved):
+                raise ValueError("Invalid embedding checkpoint")
+            if progress:
+                progress.groups_reused += 1
+            return saved
+    if progress:
+        progress.provider_attempts += 1
+    try:
+        result = call()
+    except _EmbeddingProviderError as error:
+        print(f"Embedding request at chunk {offset} failed: {error.kind} "
+              f"(HTTP {error.http_status or 'n/a'})", file=sys.stderr)
+        raise
+    if result is None or any(v is None for v in result):
+        return None
+    # Standalone embed_document_chunks retains its historical output contract;
+    # durable paid work is validated before checkpointing.
+    if work:
+        if len(result) != len(group) or any(
+                len(v) != dim or not all(math.isfinite(x) for x in v) for v in result):
+            raise ValueError("Invalid provider embedding response")
+        saved = _EmbeddingCheckpoint(embeddings=result)
+        try:
+            with _embedding_savepoint(work.store):
+                work.store.conn.execute(
+                    "INSERT OR REPLACE INTO embedding_checkpoints VALUES (?, ?, ?, ?, ?, ?)",
+                    (work.node_id, work.fingerprint, work.text_hash, offset,
+                     group_hash, saved.model_dump_json()),
+                )
+        except Exception:
+            raise _EmbeddingProviderError(kind="storage_error", http_status=None,
+                                          message="Paid embedding response could not be checkpointed") from None
+        if progress:
+            progress.groups_checkpointed += 1
+    return result
+
+
 def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _EmbeddingOutcome:
+    """Arbitrate writers, reuse fresh vectors, and durably stage paid groups."""
+    reason = _embedding_policy_refusal(store.config)
+    if reason:
+        return _EmbeddingOutcome(False, kind="indexing_refused", message=reason)
+    if not _check_vec():
+        return _EmbeddingOutcome(False, kind="backend_unavailable")
+    try:
+        # Initialize the connection before choosing its on-disk lock path.
+        conn = store.conn
+        with _embedding_writer_lock(store) as acquired:
+            if not acquired:
+                return _EmbeddingOutcome(False, kind="busy", message="Another embedding writer is active")
+            node = _read_node_for_embedding(store, node_id)
+            fingerprint = embedding_fingerprint(store.config)
+            if _EMBED_CURRENT_ONLY.get() and (not node or _embedding_text_for_node(node) != text):
+                return _EmbeddingOutcome(False, kind="input_changed", message="Node changed before embedding")
+            if node and node.get("status") in {"archived", "superseded"}:
+                return _EmbeddingOutcome(False, kind="ineligible", message="Node is no longer eligible")
+            if node and _embedding_text_for_node(node) == text and _node_embedding_fresh(store, node, fingerprint):
+                return _EmbeddingOutcome(True, kind="fresh")
+            _ensure_embedding_checkpoints(store)
+            text = redact_text(text)
+            work = _EmbeddingWork(store, node_id, _hash_text(text), fingerprint,
+                                  store.config.model_copy(deep=True),
+                                  _hash_text(_embedding_text_for_node(node)) if node else None)
+            with _embedding_savepoint(store):
+                store.conn.execute(
+                    "DELETE FROM embedding_checkpoints WHERE node_id = ? AND (fingerprint != ? OR text_hash != ?)",
+                    (node_id, fingerprint, work.text_hash),
+                )
+            token = _EMBED_WORK.set(work)
+            try:
+                return _write_embedding_generation(store, node_id, text)
+            finally:
+                _EMBED_WORK.reset(token)
+    except Exception:
+        return _EmbeddingOutcome(False, kind="storage_error", message="Embedding checkpoint or writer lock failed")
+
+
+def _cached_document_records(store: Store, text: str, config: Config | None) -> list[dict] | None:
+    """Reuse identical complete inputs within this graph, irrespective of provenance.
+
+    Missing/legacy identity never matches. No content is shared across graphs.
+    """
+    import struct
+
+    fingerprint = embedding_fingerprint(config)
+    text_hash = _hash_text(text)
+    try:
+        ids = store.conn.execute(
+            "SELECT DISTINCT node_id FROM node_vector_meta WHERE text_hash = ? AND fingerprint = ?",
+            (text_hash, fingerprint),
+        ).fetchall()
+        opts = _embedding_options(config)
+        if not ids:
+            return None
+        texts = (_chunk_text(text, chunk_chars=opts["chunk_chars"],
+                             overlap_chars=opts["chunk_overlap_chars"])
+                 if embedding_strategy(config) == "contextual" else [text])
+        for row in ids:
+            if not _node_embedding_fresh(store, {"id": row[0], "content": text}, fingerprint):
+                continue
+            rows = store.conn.execute(
+                """SELECT m.chunk_index, v.embedding FROM node_vector_meta m
+                   JOIN node_vectors v ON v.node_id = m.vector_id
+                   WHERE m.node_id = ? ORDER BY m.chunk_index""", (row[0],),
+            ).fetchall()
+            if len(rows) != len(texts):
+                continue
+            dim = _get_embedding_dim(config)
+            embeddings = [list(struct.unpack(f"{dim}f", record["embedding"])) for record in rows]
+            if not all(math.isfinite(x) for vector in embeddings for x in vector):
+                continue
+            progress = _EMBED_PROGRESS.get()
+            if progress:
+                progress.groups_reused += (math.ceil(len(rows) / opts["max_group_chunks"])
+                                           if embedding_strategy(config) == "contextual" else 1)
+            return [{"index": i, "text": chunk, "embedding": embeddings[i],
+                     "text_hash": text_hash, "token_estimate": _estimate_tokens(chunk)}
+                    for i, chunk in enumerate(texts)]
+    except Exception:
+        # Missing or incompatible legacy vector state provides no reuse proof.
+        return None
+    return None
+
+
+def _write_embedding_generation(store: Store, node_id: str, text: str) -> _EmbeddingOutcome:
     """Compute a generation before atomically replacing its stored chunks."""
     if not _check_vec():
         return _EmbeddingOutcome(False, kind="backend_unavailable",
@@ -789,24 +1063,28 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
 
     # No write transaction is acquired around provider I/O. In particular,
     # provider/model changes must not discard the old index before this succeeds.
+    work = _EMBED_WORK.get()
+    config = work.config if work else store.config
     try:
-        chunks = _embed_document_chunks(text, store.config, embed_one=_embed_text_or_raise)
+        chunks = _cached_document_records(store, text, config)
+        if chunks is None:
+            chunks = _embed_document_chunks(text, config, embed_one=_embed_text_or_raise)
     except _EmbeddingProviderError as e:
         return _EmbeddingOutcome(False, terminal=e.kind == "input_too_large",
                                  kind=e.kind, http_status=e.http_status,
                                  message=safe_error(e))
     except Exception as e:
-        return _EmbeddingOutcome(False, kind="embedding_error", message=safe_error(e))
+        return _EmbeddingOutcome(False, kind="embedding_error", message="Embedding request or checkpoint failed")
     if not chunks:
         return _EmbeddingOutcome(False, kind="embedding_unavailable",
                                  message="Embedding provider returned no vector")
 
     try:
-        fingerprint = embedding_fingerprint(store.config)
-        strategy = embedding_strategy(store.config)
+        fingerprint = embedding_fingerprint(config)
+        strategy = embedding_strategy(config)
         now = _now_iso()
         count = len(chunks)
-        dim = _get_embedding_dim(store.config)
+        dim = _get_embedding_dim(config)
         prepared = []
         for chunk in chunks:
             embedding = chunk["embedding"]
@@ -822,6 +1100,19 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
             raise ValueError("Embedding chunk indices must be distinct")
 
         with _embedding_savepoint(store):
+            # Lock before rechecking the input version; never publish vectors
+            # for an edit/deletion that raced the network request.
+            store.conn.execute("UPDATE meta SET value = value WHERE key = ?", (EMBED_QUEUE_META,))
+            work = _EMBED_WORK.get()
+            current = _read_node_for_embedding(store, node_id)
+            reason = _embedding_policy_refusal(store.config) or _embedding_policy_refusal(config)
+            if reason:
+                return _EmbeddingOutcome(False, kind="indexing_refused", message=reason)
+            if work and (embedding_fingerprint(store.config) != work.fingerprint
+                         or (work.node_hash is not None and
+                             (not current or current.get("status") in {"archived", "superseded"}
+                              or _hash_text(_embedding_text_for_node(current)) != work.node_hash))):
+                return _EmbeddingOutcome(False, kind="input_changed", message="Node changed during embedding")
             if not ensure_vec_table(store):
                 raise RuntimeError("Vector backend unavailable")
             old_ids = [node_id, *(row["vector_id"] for row in store.conn.execute(
@@ -847,9 +1138,10 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
             if node_id in quarantine:
                 quarantine.pop(node_id)
                 _write_embedding_quarantine(store, quarantine, commit=False)
+            store.conn.execute("DELETE FROM embedding_checkpoints WHERE node_id = ?", (node_id,))
         return _EmbeddingOutcome(True)
-    except Exception as e:
-        return _EmbeddingOutcome(False, kind="storage_error", message=safe_error(e))
+    except Exception:
+        return _EmbeddingOutcome(False, kind="storage_error", message="Embedding publication failed; checkpoints retained")
 
 
 def upsert_embedding(store: Store, node_id: str, text: str) -> bool:
@@ -939,8 +1231,8 @@ def _read_node_for_embedding(store: Store, node_id: str) -> dict | None:
 def _node_matches_embedding_text(store: Store, node_id: str, text_hash: str) -> bool:
     node = _read_node_for_embedding(store, node_id)
     if not text_hash:
-        return not node or node.get("status") == "superseded" or not _embedding_text_for_node(node)
-    return bool(node and node.get("status") != "superseded"
+        return not node or node.get("status") in {"superseded", "archived"} or not _embedding_text_for_node(node)
+    return bool(node and node.get("status") not in {"superseded", "archived"}
                 and _embedding_text_for_node(node)
                 and _hash_text(_embedding_text_for_node(node)) == text_hash)
 
@@ -1091,7 +1383,7 @@ def embedding_queue_diagnosis(
     if token_limit is not None:
         for node_id in dict.fromkeys(node_id for node_id in queue if node_id):
             node = _read_node_for_embedding(store, node_id)
-            if not node or node.get("status") == "superseded":
+            if not node or node.get("status") in {"superseded", "archived"}:
                 continue
             text = _embedding_text_for_node(node)
             token_estimate = _estimate_tokens(text)
@@ -1161,7 +1453,76 @@ def quarantine_oversized_queue_items(
     return _EmbeddingQueueRemediation(**diagnosis, quarantined_now=quarantined_now)
 
 
+def _upsert_current_node(store: Store, node_id: str, text: str) -> _EmbeddingOutcome:
+    token = _EMBED_CURRENT_ONLY.set(True)
+    try:
+        return _upsert_embedding_outcome(store, node_id, text)
+    finally:
+        _EMBED_CURRENT_ONLY.reset(token)
+
+
+def _indexing_refusal_result(store: Store, reason: str) -> dict:
+    """An intentional indexing boundary leaves all local work queued."""
+    pending = _embedding_queue_len(store)
+    return {"status": "refused", "reason": "transient_workspace", "message": reason,
+            "embedded": 0, "enqueued": 0, "failed": 0,
+            "pending": pending, "queue_pending": pending,
+            "drain_complete": False, "coverage_complete": False,
+            **_EmbeddingProgress().model_dump()}
+
+
 def drain_embedding_queue(store: Store, config: Config | None = None, *,
+                          max_jobs: int | None = None,
+                          time_budget: float | None = None,
+                          report_coverage: bool = True) -> dict:
+    reason = (_embedding_policy_refusal(store.config)
+              or (_embedding_policy_refusal(config) if config is not None else None))
+    if reason:
+        return _indexing_refusal_result(store, reason)
+    budget = _embedding_options(config or store.config)["drain_time_budget"] if time_budget is None else time_budget
+    deadline_token = _EMBED_DEADLINE.set(time.monotonic() + float(budget))
+    progress = _EmbeddingProgress()
+    progress_token = _EMBED_PROGRESS.set(progress)
+    policy_token = _EMBED_POLICY_CONFIGS.set(
+        (config, config.model_copy(deep=True)) if config is not None else ())
+    try:
+        if store.conn.in_transaction:
+            result = {"status": "failed", "failed": 1, "embedded": 0,
+                      "pending": _embedding_queue_len(store), "drain_complete": False,
+                      "coverage_complete": False,
+                      "errors": [{"kind": "transaction_active", "http_status": None,
+                                  "message": "Commit or roll back caller transaction before draining"}]}
+        elif config is not None and embedding_fingerprint(config) != embedding_fingerprint(store.config):
+            result = {"status": "failed", "failed": 1, "embedded": 0,
+                      "pending": _embedding_queue_len(store), "drain_complete": False,
+                      "coverage_complete": False,
+                      "errors": [{"kind": "config_mismatch", "http_status": None,
+                                  "message": "Drain configuration must match the store"}]}
+        else:
+            with _embedding_writer_lock(store) as acquired:
+                if acquired:
+                    result = _drain_embedding_queue(store, config, max_jobs=max_jobs,
+                                                    time_budget=budget, report_coverage=report_coverage)
+                else:
+                    result = {"status": "deferred", "deferred_reason": "busy", "embedded": 0,
+                              "pending": _embedding_queue_len(store), "drain_complete": False,
+                              "coverage_complete": False}
+        result.update(progress.model_dump())
+        return result
+    except Exception:
+        print("Embedding drain persistence or writer lock failed", file=sys.stderr)
+        return {"status": "persistence_error", "embedded": 0, "failed": 1,
+                "pending": None, "drain_complete": False, "coverage_complete": False,
+                "errors": [{"kind": "storage_error", "http_status": None,
+                            "message": "Embedding drain persistence or writer lock failed"}],
+                **progress.model_dump()}
+    finally:
+        _EMBED_POLICY_CONFIGS.reset(policy_token)
+        _EMBED_PROGRESS.reset(progress_token)
+        _EMBED_DEADLINE.reset(deadline_token)
+
+
+def _drain_embedding_queue(store: Store, config: Config | None = None, *,
                           max_jobs: int | None = None,
                           time_budget: float | None = None,
                           report_coverage: bool = True) -> dict:
@@ -1205,6 +1566,9 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
     terminal: dict[str, _EmbeddingQuarantineRecord] = {}
     embedded = 0
     quarantined = 0
+    skipped_fresh = 0
+    failures = []
+    deferred = None
     attempts = 0
     deadline = time.monotonic() + time_budget
     fingerprint = embedding_fingerprint(config or store.config)
@@ -1212,8 +1576,12 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
     for node_id in deduped:
         if attempts >= max_jobs or time.monotonic() >= deadline:
             break
+        eligibility = store.conn.execute("SELECT status FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if not eligibility or eligibility["status"] in {"superseded", "archived"}:
+            completed[node_id] = ""
+            continue
         node = _read_node_for_embedding(store, node_id)
-        if not node or node.get("status") == "superseded":
+        if not node or node.get("status") in {"superseded", "archived"}:
             completed[node_id] = ""
             continue  # node is gone — drop from the queue
         text = _embedding_text_for_node(node)
@@ -1235,14 +1603,19 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
         # returned as outcomes, while a genuinely unexpected failure stays
         # retryable.  Do not use exceptions as an alternate terminal channel.
         try:
-            outcome = _upsert_embedding_outcome(store, node_id, text)
+            outcome = _upsert_current_node(store, node_id, text)
         except Exception:
             outcome = _EmbeddingOutcome(False, kind="unexpected_error")
         if outcome.ok:
-            embedded += 1
+            if outcome.kind == "fresh":
+                skipped_fresh += 1
+            else:
+                embedded += 1
             quarantine.pop(node_id, None)
             completed[node_id] = text_hash
         elif outcome.terminal:
+            failures.append({"kind": outcome.kind, "http_status": outcome.http_status,
+                             "message": outcome.message})
             now = _now_iso()
             quarantine[node_id] = _EmbeddingQuarantineRecord(
                 kind=outcome.kind or "terminal_failure",
@@ -1261,19 +1634,38 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
             quarantined += 1
         else:
             retry[node_id] = text_hash  # transient; rotate behind waiting work
+            if outcome.kind in {"time_budget", "busy", "input_changed", "ineligible"}:
+                deferred = outcome.kind
+            else:
+                failures.append({"kind": outcome.kind or "embedding_error",
+                                 "http_status": outcome.http_status,
+                                 "message": outcome.message or "Embedding failed"})
+            if outcome.kind in {"authentication_error", "time_budget", "busy", "storage_error", "indexing_refused"}:
+                break
+        if not outcome.ok and outcome.kind != "time_budget":
+            print(f"Embedding attempt {attempts} failed: {outcome.kind or 'embedding_error'}"
+                  f" (HTTP {outcome.http_status or 'n/a'})", file=sys.stderr)
+    if failures:
+        last = failures[-1]
+        print(f"Embedding drain failed: {len(failures)} failed attempt(s); "
+              f"{last['kind']} (HTTP {last['http_status'] or 'n/a'})", file=sys.stderr)
     try:
         remaining, quarantine = _persist_drain_delta(store, retry, completed, terminal)
     except Exception:
         # Do not report a drained/quarantined result unless the queue state is
         # durable. The pre-drain metadata is still authoritative after rollback.
         return {"status": "persistence_error", "embedded": embedded,
+                "failed": len(failures), "errors": failures, "skipped_fresh": skipped_fresh,
                 "pending": len(queue), "quarantined": len(_load_embedding_quarantine(store)),
                 "quarantined_this_drain": 0, "drain_complete": False,
                 "coverage_complete": False}
     # Missing/superseded nodes are deliberately dropped too, so an empty
     # actionable queue is complete even when no provider attempt was needed.
     drain_complete = not remaining
-    return {"status": "ok", "embedded": embedded, "pending": len(remaining),
+    return {"status": "failed" if failures else "deferred" if deferred else "ok",
+            "embedded": embedded, "pending": len(remaining),
+            "failed": len(failures), "errors": failures, "deferred_reason": deferred,
+            "skipped_fresh": skipped_fresh, "attempted": attempts,
             "quarantined": len(quarantine), "quarantined_this_drain": quarantined,
             "drain_complete": drain_complete,
             "coverage_complete": (embedding_status(store)["coverage_complete"]
@@ -1287,18 +1679,25 @@ def _node_embedding_fresh(store: Store, node: dict, fingerprint: str) -> bool:
         return True
     text_hash = _hash_text(text)
     try:
+        import sqlite_vec
+        store.conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(store.conn)
+        finally:
+            store.conn.enable_load_extension(False)
         rows = store.conn.execute(
-            """SELECT text_hash, fingerprint
-               FROM node_vector_meta
-               WHERE node_id = ?""",
-            (node["id"],),
+            """SELECT m.text_hash, m.fingerprint, m.chunk_index, m.chunk_count,
+                      v.node_id AS stored_vector
+               FROM node_vector_meta m LEFT JOIN node_vectors v ON v.node_id = m.vector_id
+               WHERE m.node_id = ?""", (node["id"],),
         ).fetchall()
     except Exception:
-        rows = []
-    if not rows:
         return False
-    return all(row["text_hash"] == text_hash and row["fingerprint"] == fingerprint
-               for row in rows)
+    count = len(rows)
+    return bool(count and {row["chunk_index"] for row in rows} == set(range(count))
+                and all(row["chunk_count"] == count and row["stored_vector"] is not None
+                        and row["text_hash"] == text_hash and row["fingerprint"] == fingerprint
+                        for row in rows))
 
 
 def _normalize_project_path(path: str | None) -> str | None:
@@ -1327,7 +1726,7 @@ def select_reindex_nodes(
     limit: int | None = None,
 ) -> list[dict]:
     """Select nodes for embedding maintenance using operator-friendly filters."""
-    q = "SELECT * FROM nodes WHERE status != 'superseded'"
+    q = "SELECT * FROM nodes WHERE status NOT IN ('superseded', 'archived')"
     params: list = []
     if status:
         q += " AND status = ?"
@@ -1424,6 +1823,9 @@ def plan_embedding_reindex(store: Store, **filters) -> dict:
 
 
 def enqueue_reindex(store: Store, **filters) -> dict:
+    reason = _embedding_policy_refusal(store.config, source_paths=(filters.get("project_path"),))
+    if reason:
+        return _indexing_refusal_result(store, reason)
     max_queue = int(filters.pop("max_queue", 0) or _embedding_options(store.config)["reindex_max_queue"])
     nodes = select_reindex_nodes(store, **filters)
     added = enqueue_embeddings(store, [node["id"] for node in nodes], max_queue=max_queue)
@@ -1435,9 +1837,12 @@ def enqueue_reindex(store: Store, **filters) -> dict:
 
 def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
     """Synchronously reindex selected nodes."""
+    reason = _embedding_policy_refusal(store.config, source_paths=(filters.get("project_path"),))
+    if reason:
+        return _indexing_refusal_result(store, reason)
     nodes = select_reindex_nodes(store, **filters)
     plan = estimate_reindex_cost(nodes, store.config)
-    if not ensure_vec_table(store):
+    if not _check_vec():
         plan.update({"status": "unavailable", "embedded": 0})
         return plan
     embedded = 0
@@ -1446,14 +1851,19 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
         text = _embedding_text_for_node(node)
         if not text:
             continue
-        if upsert_embedding(store, node["id"], text):
+        outcome = _upsert_current_node(store, node["id"], text)
+        if outcome.ok:
             embedded += 1
             if verbose:
                 print(f"  Embedded: {node['title']}")
         else:
             failed += 1
+            print(f"Embedding failed: {outcome.kind or 'embedding_error'} "
+                  f"(HTTP {outcome.http_status or 'n/a'})", file=sys.stderr)
+            if outcome.kind in {"authentication_error", "storage_error", "indexing_refused"}:
+                break
     plan.update({
-        "status": "ok",
+        "status": "failed" if failed else "ok",
         "embedded": embedded,
         "failed": failed,
         "queue_pending": _embedding_queue_len(store),
@@ -1491,9 +1901,14 @@ def embedding_status(store: Store, *, coverage: bool = True) -> dict:
         ],
         "vector_rows": None,
         "indexed_nodes": None,
+        "checkpointed_groups": 0,
         "coverage_complete": False,
     }
     status["drain_complete"] = not status["queue_pending"]
+    try:
+        status["checkpointed_groups"] = store.conn.execute("SELECT COUNT(*) FROM embedding_checkpoints").fetchone()[0]
+    except Exception:
+        pass  # Older stores have no optional checkpoint table.
     if not coverage:
         status["coverage_complete"] = None
     try:
@@ -1579,7 +1994,20 @@ def vector_search(store: Store, query: str, top_k: int = 10,
     bounded scan can return fewer than top_k nodes if duplicate or stale chunks
     consume the ceiling; it does not establish completeness beyond that scan.
     """
-    if top_k <= 0 or not ensure_vec_table(store):
+    if top_k <= 0:
+        return []
+    try:
+        table_exists = store.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'node_vectors'").fetchone()
+        if table_exists:
+            existing = store.conn.execute("SELECT value FROM vec_meta WHERE key = 'embedding_fingerprint'").fetchone()
+            if not existing or existing[0] != embedding_fingerprint(store.config):
+                return []
+    except AttributeError:
+        # A custom store may initialize its connection in ensure_vec_table.
+        pass
+    except Exception:
+        return []
+    if not ensure_vec_table(store):
         return []
 
     embedding = embed_text(query, store.config, input_type="query")
@@ -1644,7 +2072,7 @@ def vector_search(store: Store, query: str, top_k: int = 10,
             results = []
             for node_id, match in sorted(best.items(), key=lambda item: item[1]["distance"]):
                 node = nodes.get(node_id)
-                if node is None or node.get("status") == "superseded":
+                if node is None or node.get("status") in {"superseded", "archived"}:
                     continue
                 node = dict(node)
                 node["vec_distance"] = match["distance"]
@@ -1669,7 +2097,11 @@ def _serialize_vec(embedding: list[float]) -> bytes:
 
 def index_all_nodes(store: Store, verbose: bool = False) -> int:
     """Index all active nodes for vector similarity search."""
-    if not ensure_vec_table(store):
+    reason = _embedding_policy_refusal(store.config)
+    if reason:
+        print(reason, file=sys.stderr)
+        return 0
+    if not _check_vec():
         provider = "unknown"
         try:
             provider, _, _, _ = _resolve_embedding_config(store.config)
@@ -1687,9 +2119,13 @@ def index_all_nodes(store: Store, verbose: bool = False) -> int:
     count = 0
     for node in nodes:
         text = _embedding_text_for_node(node)
-        if upsert_embedding(store, node["id"], text):
+        outcome = _upsert_current_node(store, node["id"], text)
+        if outcome.ok:
             count += 1
             if verbose:
                 print(f"  Embedded: {node['title']}")
+        elif outcome.kind in {"authentication_error", "storage_error", "indexing_refused"}:
+            print(f"Embedding failed: {outcome.kind}", file=sys.stderr)
+            break
 
     return count

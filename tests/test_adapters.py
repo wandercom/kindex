@@ -425,21 +425,35 @@ class TestFileAdapter:
 
 
 class TestIngestCLI:
-    def test_ingest_files(self, tmp_path):
-        d = str(tmp_path)
+    def test_ingest_files(self, tmp_path, monkeypatch):
+        repo = tmp_path / "canonical"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        (repo / "README.md").write_text("Synthetic canonical project source.\n")
+        monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
+        d = str(tmp_path / "data")
 
         def run(*args, data_dir=None):
             cmd = [sys.executable, "-m", "kindex.cli", *args]
             if data_dir:
                 cmd.extend(["--data-dir", data_dir])
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=30)
 
         run("init", data_dir=d)
         r = run("ingest", "files", data_dir=d)
         assert r.returncode == 0
 
-    def test_ingest_commits(self, tmp_path):
-        d = str(tmp_path)
+    def test_ingest_commits(self, tmp_path, monkeypatch):
+        repo = tmp_path / "canonical"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-q", "-m", "Synthetic canonical commit"],
+            check=True, capture_output=True,
+        )
+        monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
+        d = str(tmp_path / "data")
 
         def run(*args, data_dir=None):
             cmd = [sys.executable, "-m", "kindex.cli", *args]
@@ -448,7 +462,7 @@ class TestIngestCLI:
             # `ingest commits` loads the local embedding model and indexes every
             # commit node, which can take well over 30s on a cold/loaded machine
             # (and on CI). Give the subprocess generous headroom to avoid flakes.
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            return subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=180)
 
         run("init", data_dir=d)
         r = run("ingest", "commits", data_dir=d)
@@ -643,10 +657,15 @@ class TestRegistry:
 
 
 class TestPipeline:
-    def test_run_adapter_unavailable(self):
+    def test_run_adapter_unavailable(self, tmp_path):
         from kindex.adapters.pipeline import IngestConfig, run_adapter
 
-        result = run_adapter(_UnavailableAdapter(), None, IngestConfig())
+        # The pipeline's declared Store argument also supplies workspace policy.
+        store = Store(Config(data_dir=str(tmp_path)))
+        try:
+            result = run_adapter(_UnavailableAdapter(), store, IngestConfig())
+        finally:
+            store.close()
         assert len(result.errors) == 1
         assert "unavailable" in result.errors[0]
 

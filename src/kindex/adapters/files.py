@@ -33,6 +33,10 @@ def scan_registered_files(store: "Store", verbose: bool = False) -> int:
 
     Returns count of nodes updated.
     """
+    from ..project_store import content_indexing_refusal, is_transient_workspace
+    reason = content_indexing_refusal(store.config)
+    if reason:
+        raise ValueError(reason)
     nodes = store.all_nodes(limit=10000)
     count = 0
 
@@ -40,6 +44,10 @@ def scan_registered_files(store: "Store", verbose: bool = False) -> int:
         extra = node.get("extra") or {}
         paths = extra.get("file_paths", [])
         if not paths:
+            continue
+        if any(is_transient_workspace(Path(path)) for path in paths):
+            # One section holds all registered sources. Refreshing only the
+            # allowed subset would discard the excluded sources' old content.
             continue
 
         hashes = extra.get("file_hashes", {})
@@ -102,6 +110,10 @@ def ingest_directory(store: "Store", directory: str | Path,
 
     Returns count of nodes created.
     """
+    from ..project_store import content_indexing_refusal, is_transient_workspace
+    reason = content_indexing_refusal(store.config, source_paths=(directory,))
+    if reason:
+        raise ValueError(reason)
     directory = Path(directory).resolve()
     if not directory.is_dir():
         return 0
@@ -112,6 +124,8 @@ def ingest_directory(store: "Store", directory: str | Path,
     count = 0
 
     for path in sorted(directory.rglob("*")):
+        if is_transient_workspace(path):
+            continue
         if not path.is_file():
             continue
         if path.suffix.lower() not in extensions:

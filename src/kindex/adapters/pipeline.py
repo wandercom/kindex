@@ -59,6 +59,11 @@ def run_adapter(
         config = IngestConfig()
 
     name = adapter.meta.name
+    from ..project_store import content_indexing_refusal
+    reason = content_indexing_refusal(store.config, source_paths=(
+        kwargs.get("directory"), kwargs.get("repo_path")))
+    if reason:
+        return IngestResult(errors=[reason])
 
     # Check prerequisites
     if not adapter.is_available():

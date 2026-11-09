@@ -564,6 +564,7 @@ class TestCronRunAll:
 
     def test_per_profile_session_routing(self, tmp_path):
         from kindex.daemon import cron_run_all
+        from kindex.session_provenance import session_deferrals
 
         base = self._base_config(tmp_path)
         projects_dir = tmp_path / "claude" / "projects"
@@ -579,13 +580,17 @@ class TestCronRunAll:
         # Stray session under neither root -> default profile (personal)
         _make_session(projects_dir, _encode(tmp_path / "elsewhere" / "misc"),
                       "straycccc333")
+        original_transcripts = {path: path.read_bytes() for path in projects_dir.rglob("*.jsonl")}
 
         passes = cron_run_all(base)
         assert [p["profile"] for p in passes] == ["work", "personal"]
 
         work_store = Store(Config(data_dir=str(tmp_path / "work-data")))
         work_sessions = work_store.all_nodes(node_type="session", limit=50)
-        assert [n["id"] for n in work_sessions] == ["session-workaaaa1111"]
+        # Encoded profile routing is not proof that a historical non-Git
+        # workspace was canonical. Preserve its attribution for later recovery.
+        assert work_sessions == []
+        assert [Path(item["source"]).name for item in session_deferrals(work_store)] == ["workaaaa1111.jsonl"]
         # Stamped for the work profile
         assert work_store.get_meta("kin_profile") == "work"
         work_store.close()
@@ -593,8 +598,11 @@ class TestCronRunAll:
         personal_store = Store(Config(data_dir=str(tmp_path / "personal-data")))
         ids = sorted(n["id"] for n in
                      personal_store.all_nodes(node_type="session", limit=50))
-        assert ids == ["session-persbbbb2222", "session-straycccc333"]
+        assert ids == []
+        assert sorted(Path(item["source"]).name for item in session_deferrals(personal_store)) == [
+            "persbbbb2222.jsonl", "straycccc333.jsonl"]
         personal_store.close()
+        assert {path: path.read_bytes() for path in original_transcripts} == original_transcripts
 
         # The legacy data_dir is never touched when profiles exist
         assert not (tmp_path / "legacy-data").exists()
@@ -605,8 +613,11 @@ class TestCronRunAll:
         base = self._base_config(tmp_path)
         projects_dir = tmp_path / "claude" / "projects"
         # Directory name is meaningless, but the JSONL records a work cwd.
+        canonical = tmp_path / "work" / "deep" / "repo"
+        canonical.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(canonical)], check=True, capture_output=True)
         _make_session(projects_dir, "opaque-dir-name", "cwdrouted1234",
-                      cwd=str(tmp_path / "work" / "deep" / "repo"))
+                      cwd=str(canonical))
 
         cron_run_all(base)
 

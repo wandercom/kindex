@@ -210,17 +210,24 @@ def assistant_line(text: str) -> str:
 
 
 def test_watch_ingests_current_transcripts_and_skips_subagents(tmp_path):
+    import subprocess
+
     from kindex.daemon import find_new_sessions, incremental_ingest
 
+    canonical = tmp_path / "canonical-project"
+    canonical.mkdir()
+    subprocess.run(["git", "init", "-q", str(canonical)], check=True, capture_output=True)
     claude = tmp_path / "claude"
     project = claude / "projects" / "-code-myproj"
     subagents = project / "11111111-2222" / "subagents"
     subagents.mkdir(parents=True)
     body = ("Refactored the Payment Reconciliation pipeline and the Ledger Service "
             "so the Settlement Report matches.")
+    entry = json.loads(assistant_line(body))
+    entry["cwd"] = str(canonical)
     (project / "abcdef123456-session.jsonl").write_text(
-        json.dumps(["not", "a", "dict"]) + "\n" + assistant_line(body) + "\n")
-    (subagents / "agent-1.jsonl").write_text(assistant_line(body) + "\n")
+        json.dumps(["not", "a", "dict"]) + "\n" + json.dumps(entry) + "\n")
+    (subagents / "agent-1.jsonl").write_text(json.dumps(entry) + "\n")
     old = time.time() - 3600
     os.utime(subagents / "agent-1.jsonl", (old + 7200, old + 7200))
 
