@@ -4,6 +4,13 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.54.1] - 2026-11-09
+
+### Fixed
+- MCP Registry publication retries transient publisher download failures within
+  a bounded time limit and extracts only after a successful download. The 0.54.0
+  package reached PyPI, but its registry job failed on an upstream HTTP 504.
+
 ## [0.54.0] - 2026-11-09
 
 ### Changed
