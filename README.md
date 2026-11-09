@@ -787,6 +787,105 @@ Every edit logs per-field value diffs to the activity log, and `kin changelog` r
 
 Edits re-embed the node for vector search, protect reserved operational state (locks, claims, coordination messages), and refuse to modify a node another agent has locked unless you pass `--force`. The per-type class can be overridden in config with `edit_policy: {document: additive}` if your team wants stricter history.
 
+## Canonical projects and work in progress
+
+Ordinary primary Git checkouts keep their existing indexing behavior. Linked Git
+worktrees (including subdirectories) are always WIP and cannot be established.
+Factory's independent task clones use a root `.kindex-no-index` presence
+marker; they and all descendants are also always WIP. Factory creates it at run
+and author roots before the first Kindex use, retains it through archive/restore,
+and excludes it from accepted snapshots. Any present marker blocks indexing,
+regardless of content. Both lexical and resolved ancestry are checked, so
+symlink aliases cannot escape a marked tree or import one indirectly. Do not
+merge the marker into the canonical checkout.
+
+WIP preserves local tasks, queries, writes and generated `.kin` artifacts. Automatic
+project/session discovery does not promote that workspace into another graph;
+paid background embedding, attention and reinforcement queues stay pending. Merge
+accepted artifacts into the canonical checkout before indexing them there. Merely
+opening a store or recording it in the discovery registry is not a promotion.
+
+Inspect or explicitly pause an ordinary checkout; explicitly establish non-Git
+projects or bind a canonical project to a particular graph directory:
+
+```bash
+kin project status --project-path /path/to/canonical-checkout
+kin project wip --project-path /path/to/canonical-checkout
+kin project establish --project-path /path/to/canonical-checkout
+kin project establish --project-path /path/to/project --data-dir /path/to/graph
+```
+
+These commands only record a decision; they do not ingest, import, embed, open a
+DB or change the scheduler. Explicit decisions live in
+`$XDG_STATE_HOME/kindex/project-knowledge.json` (default
+`~/.local/state/kindex/project-knowledge.json`) and apply to an exact resolved root.
+Explicit establishment binds paid maintenance to the selected graph directory.
+It cannot override a linked worktree or transient marker. Paths without Git
+identity or an explicit decision default to WIP. Copied `.kin/config`, names,
+profile roots and historical discovery entries do not establish such projects.
+
+Migration is non-destructive: no nodes, vectors, queues, files or registrations
+are deleted. Ordinary main checkouts continue indexing without new approval.
+Existing linked worktrees are excluded immediately; **existing independent Factory
+clones need their transient marker backfilled from Factory's run records**. Kindex
+cannot distinguish an unmarked independent clone from a canonical checkout by Git
+structure alone. Do not classify them by folder-name guesses. Local graph access,
+reminders and housekeeping remain available; missing registered directories are
+not serviced. This change does not reclaim disk space.
+
+Automatic transcript discovery requires a known canonical/established working
+directory. A recorded cwd is authoritative; it never falls back around an
+exclusion. Without cwd, Claude's encoded directory is resolved against existing
+paths under configured project/profile roots; only one verified eligible match
+can be ingested. Ambiguous encodings, unclassified non-Git directories, entirely
+deleted/moved checkouts without surviving classification, and otherwise unknown
+origins are **deferred**, not treated as canonical. A missing child under a
+surviving canonical checkout still inherits its classification. These are
+intentional compatibility restrictions needed to avoid assuming that deleted
+worktrees were canonical; historical provenance cannot always be reconstructed.
+
+Transcripts are never modified or deleted by deferral. `kin status --json` lists
+local source paths, recorded cwd/encoded directory, and reasons; ordinary status,
+ingest CLI and cron results show the outstanding count. Restore a verified
+canonical path or explicitly establish an ordinary project, then rescan the
+unchanged transcripts (`kin ingest sessions --limit N`, using a large enough
+limit to include older files; watch's modification-time filter still applies);
+unknown records are re-evaluated and clear when
+eligible. Previously verified canonical attribution is retained for the exact
+observed transcript digest if its checkout later disappears; changed bytes need
+fresh provenance. Deferring a changed version preserves the last verified
+evidence, so restoring those exact bytes can recover eligibility. Current
+source/workspace exclusions always take precedence. Refusing a configured
+source/discovery alias is a recoverable scope deferral; it does not relabel the
+canonical transcript itself as transient. A transcript observed in a transient workspace remains
+excluded even after that workspace disappears. Accepted task artifacts must be
+merged into the canonical project, not reclassified as canonical session history.
+Attribution records live only in the selected local graph; moving a transcript
+or losing that graph can lose the recorded evidence. They contain no transcript
+body. Revocation takes effect at the
+next eligibility check, not during an already-running provider call. Re-establishing
+a canonical checkout allows its existing queue to resume, so inspect it first.
+Existing profile/global content and queues are not retroactively reclassified or
+deleted. Explicit `kin embed` indexing/enqueue/drain/reindex commands and ingest
+adapters also refuse transient source or target workspaces. Scans of canonical
+directories skip transient descendants without retiring their existing records.
+Query embeddings, search, local capture, and artifact generation (`kin index`,
+code-map export) remain available. Existing review/import workflows decide which
+merged artifacts become knowledge; this change does not infer acceptance or
+publish task-local knowledge.
+
+For content embedding implementations, the shared guard is
+`kindex.project_store.content_indexing_refusal(config, source_paths=())`. It returns
+a refusal message or `None`, checking the graph's `data_path`, the selected
+`_project_path` (including graphs stored elsewhere), and optional explicit input
+paths. Call it before content embedding or index persistence. Do not apply it to
+query embedding or local capture/export paths. Document embedding, direct vector
+upserts, reindexing and queue drains use this guard too; a cached result cannot
+bypass it. A workspace excluded during a running request may incur that request's
+cost, but its result is not published and later groups are not requested. Local
+queue entries and checkpoints remain intact for explicit review; no completion
+or establishment action promotes a worktree.
+
 ## Profiles
 
 One machine, multiple sequestered graphs. Profiles map names to separate data directories so work and personal knowledge never mix — different DBs, different embeddings, different everything.
@@ -1155,6 +1254,46 @@ Embedding drains retry transient provider failures. Deterministic input-size
 rejections are instead recorded in a local quarantine (`embed.quarantine.v1`),
 so `kin embed status` can distinguish a drained queue from incomplete vector
 coverage without silently discarding the operator diagnostic.
+
+Queue drains skip archived/superseded nodes and complete fresh vectors. Identity
+uses redacted document content plus provider, model, dimensions and contextual
+chunk settings; provenance is not required. Legacy vectors without that identity
+are conservatively stale. Identical complete inputs can reuse vectors within the
+same graph, including across node IDs; nothing is shared across graphs.
+
+Completed contextual requests are checkpointed locally in SQLite before the next
+request. Reuse requires the whole document generation and exact ordered group,
+so changed neighboring chunks cannot reuse obsolete contextual vectors. Partial
+checkpoints never appear in search. The previous complete generation stays until
+its replacement is validated and atomically published. Search with incompatible
+settings returns no vector results until a compatible generation is available.
+
+`kin embed drain --time-budget 120` checks the budget between groups as well as
+nodes. One in-flight request can overrun by its existing HTTP timeout; hashing,
+chunking and local publication also consume time. `--time-budget 0` explicitly
+removes this bound. Authentication failures (HTTP 401/403) stop the pass after the
+first rejection; queued work remains for a later run after credentials/access
+are fixed. Failure results contain safe error kinds, HTTP statuses and counts;
+CLI failures exit nonzero, and cron records the failed drain. `deferred` means a
+budget or competing writer stopped progress, not completed coverage.
+
+Rollout: stop older embedding workers before starting the new version. Paid
+writers use a per-graph OS file lock (POSIX `flock`, failing closed if unavailable)
+without holding a database write transaction over HTTP. Older workers do not
+honor this lock or checkpoints. The checkpoint table is additive and stores only
+input/config hashes and vectors, not document bodies or credentials. It is local
+state, not an export or backup; retain it with its database. Finish or roll back
+caller transactions before draining. Legacy direct `upsert_embedding` still
+honors its caller's transaction; its checkpoints are durable only after commit.
+
+Inspect `kin embed plan --stale` before a broad rollout, then start with a bounded
+`kin embed drain --max-jobs 1 --time-budget 30 --json`. No automatic global
+fingerprint bump is introduced. Changed model/chunk settings or unknown legacy
+identity can still require paid work. Exactly-once charging is not guaranteed:
+a provider may charge before a timeout, or a process/storage failure can occur
+after the response but before its checkpoint commits. Durable successful groups
+and complete generations prevent replay outside those windows. These defects
+and mitigations do not establish the cause of any particular provider bill.
 
 ### Operational
 | Command | Description |

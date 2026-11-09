@@ -930,6 +930,9 @@ class CodeIngestConfig(BaseModel):
 
 class Config(BaseModel):
     _project_path: Path | None = PrivateAttr(default=None)
+    # Original selected workspace spelling for indexing policy. Physical root
+    # resolution must not erase a marked/worktree ancestor of a symlink alias.
+    _project_input_path: Path | None = PrivateAttr(default=None)
     # Per-pass session routing predicate (set by daemon.cron_run_all and
     # cli.cmd_cron); callable(jsonl_path) -> bool. Never loaded from yaml.
     # When None, ingest builds one from profiles/active_profile (see
@@ -1219,6 +1222,11 @@ def load_config(
     ``secret_mask`` (user config only; see ``secret_mask.configure``).
     """
     cfg = _load_config(config_path, project_path, profile, data_dir)
+    selected = project_path or os.environ.get("KIN_PROJECT_PATH") or os.environ.get("KIN_PROJECT")
+    # A bound configuration may not inspect paths outside its root, including
+    # a discarded ambient selector. Retain only its contained authority.
+    cfg._project_input_path = (_bound_root if _bound_root is not None else
+                               Path(selected or Path.cwd()).expanduser().absolute())
     activate_secret_mask(cfg.secret_mask)
     return cfg
 
@@ -1400,6 +1408,8 @@ def trusted_supervisor_config(project_path: str | Path, data_dir: str) -> Config
             break
     cfg = Config(**data, data_dir=data_dir)
     cfg._project_path = Path(project_path).resolve()
+    cfg._project_input_path = (_bound_root if _bound_root is not None else
+                               Path(project_path).expanduser().absolute())
     return cfg
 
 

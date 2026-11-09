@@ -1135,6 +1135,10 @@ def cmd_status(args):
 
     # Standard graph stats
     stats = store.stats()
+    from .session_provenance import session_deferrals
+    provenance_deferrals = session_deferrals(store)
+    if provenance_deferrals:
+        stats["session_provenance"] = provenance_deferrals
     from .store import SCHEMA_RECOVERY_PATH_META, SCHEMA_RECOVERY_REASON_META
     recovery_path = store.get_meta(SCHEMA_RECOVERY_PATH_META)
     recovery_reason = store.get_meta(SCHEMA_RECOVERY_REASON_META)
@@ -1189,6 +1193,10 @@ def cmd_status(args):
             print(f"Profile: {cfg.active_profile} (via {cfg.profile_source})")
         else:
             print("Profile: (none — legacy single-graph)")
+        if provenance_deferrals:
+            print(f"Session provenance: {len(provenance_deferrals)} deferred/excluded; "
+                  "kin status --json lists local attribution and reasons. "
+                  "Restore canonical evidence and rescan to retry deferred sessions.")
         print(f"Nodes:     {stats['semantic_nodes']} semantic")
         print(f"Edges:     {stats['edges']} semantic")
         print(f"Orphans:   {stats['orphans']}")
@@ -2080,6 +2088,13 @@ def cmd_ingest(args):
     store = _store(args)
     cfg = _config(args)
     source = args.source
+    from .project_store import content_indexing_refusal
+    reason = content_indexing_refusal(cfg, source_paths=(
+        getattr(args, "directory", None), getattr(args, "repo_path", None)))
+    if reason:
+        print(reason, file=sys.stderr)
+        store.close()
+        raise SystemExit(2)
 
     config = IngestConfig(
         since=getattr(args, "since", None),
@@ -2116,6 +2131,12 @@ def cmd_ingest(args):
             sys.exit(1)
         print(f"\n{adapter.meta.name}: {result}")
 
+    from .session_provenance import session_deferrals
+    pending = session_deferrals(store)
+    if pending:
+        print(f"Session provenance: {len(pending)} deferred/excluded; "
+              "kin status --json lists attribution for recovery. "
+              "Restore canonical evidence and rescan to retry deferred sessions.")
     store.close()
 
 
@@ -3622,6 +3643,16 @@ def cmd_embed(args):
     """
     store = _store(args)
     action = getattr(args, "embed_action", None) or "index"
+    if action in {"index", "enqueue", "drain", "reindex"}:
+        from .project_store import content_indexing_refusal
+        reason = content_indexing_refusal(store.config, source_paths=(
+            getattr(args, "kin", None), getattr(args, "target", None)))
+        if reason:
+            print(_dumps({"status": "refused", "reason": "transient_workspace",
+                          "message": reason}) if args.json else reason,
+                  file=sys.stderr)
+            store.close()
+            raise SystemExit(2)
 
     def _split_csv(value):
         if not value:
@@ -3690,8 +3721,7 @@ def cmd_embed(args):
                     store, verbose=getattr(args, "verbose", False), **_filters()
                 )
         else:
-            count = index_all_nodes(store, verbose=getattr(args, "verbose", False))
-            result = {"status": "ok", "embedded": count}
+            result = reindex_now(store, status="active", verbose=getattr(args, "verbose", False))
         if args.json:
             print(_dumps(result, indent=2))
         elif action == "status":
@@ -3737,8 +3767,14 @@ def cmd_embed(args):
             print(f"Enqueued {result['enqueued']} nodes "
                   f"({result['queue_pending']} pending).")
         elif action == "drain":
-            print(f"Embedded {result.get('embedded', 0)} queued nodes "
-                  f"({result.get('pending', 0)} pending).")
+            print(f"Embedding drain: {result['status']}; "
+                  f"{result.get('embedded', 0)} embedded, {result.get('skipped_fresh', 0)} fresh, "
+                  f"{result.get('failed', 0)} failed, {result.get('pending', 0)} pending.")
+            print(f"Provider attempts: {result.get('provider_attempts', 0)}; "
+                  f"groups reused: {result.get('groups_reused', 0)}; "
+                  f"groups checkpointed: {result.get('groups_checkpointed', 0)}.")
+            for error in result.get("errors", []):
+                print(f"  {error['kind']}: {error.get('message') or 'Embedding failed'}")
         elif action == "reindex":
             if result.get("enqueued") is not None:
                 print(f"Enqueued {result['enqueued']} nodes "
@@ -3748,6 +3784,9 @@ def cmd_embed(args):
                       f"({result.get('failed', 0)} failed).")
         else:
             print(f"Embedded {result['embedded']} nodes for vector search.")
+        if result.get("status") in {"failed", "persistence_error", "unavailable", "refused"}:
+            store.close()
+            raise SystemExit(1)
     except Exception as e:
         print(f"Vector indexing failed: {e}", file=sys.stderr)
         print("Install dependencies: pip install kindex[vectors]", file=sys.stderr)
@@ -7397,6 +7436,24 @@ def cmd_correction_references(args):
         raise SystemExit(1) from None
 
 
+def cmd_project(args):
+    """Manage machine-local knowledge eligibility without opening a graph."""
+    from .project_store import project_knowledge_state, set_project_knowledge_state
+
+    root = Path(args.project_path).expanduser()
+    try:
+        if args.project_action == "status":
+            decision = project_knowledge_state(root)
+        else:
+            decision = set_project_knowledge_state(
+                root, "established" if args.project_action == "establish" else "wip",
+                Path(args.data_dir) if args.data_dir else None)
+    except (OSError, ValueError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
+    print(_dumps({"project_path": str(root), **decision}))
+
+
 def _common(p):
     p.add_argument("--config", help="Explicit config file (bypasses layering)")
     p.add_argument("--data-dir", help="Override data directory")
@@ -7412,6 +7469,14 @@ def build_parser() -> argparse.ArgumentParser:
                                 description="Knowledge graph that learns from your conversations")
     p.add_argument("--version", action="store_true")
     sub = p.add_subparsers(dest="command")
+
+    project = sub.add_parser("project", help="Approve or pause automatic project knowledge")
+    project_sub = project.add_subparsers(dest="project_action", required=True)
+    for action in ("status", "establish", "wip"):
+        command = project_sub.add_parser(action)
+        command.add_argument("--project-path", required=True, help="Exact workspace root")
+        command.add_argument("--data-dir", help="Approved graph directory (default: repo-local store)")
+        command.set_defaults(func=cmd_project)
 
     practical = sub.add_parser("practical-memory", help="Opt-in source-bound context and local receipts")
     practical_sub = practical.add_subparsers(dest="practical_action", required=True)

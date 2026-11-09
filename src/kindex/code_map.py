@@ -476,6 +476,10 @@ def ingest_understand_anything(
 ) -> IngestResult:
     """Ingest an Understand-Anything knowledge-graph.json into Kindex."""
     graph_path = _resolve_ua_graph(path_or_directory)
+    from .project_store import content_indexing_refusal
+    reason = content_indexing_refusal(store.config, source_paths=(path_or_directory, graph_path))
+    if reason:
+        return IngestResult(errors=[reason])
     if not graph_path.exists():
         return IngestResult(errors=[f"Understand-Anything graph not found: {graph_path}"])
 

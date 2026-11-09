@@ -6,6 +6,213 @@ import shlex
 import sqlite3
 import subprocess
 import tempfile
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class ProjectKnowledgeState(BaseModel):
+    state: Literal["wip", "established"] = "wip"
+    data_dir: str | None = None
+
+
+def project_knowledge_path() -> Path:
+    """Machine-local consent, separate from discovery and cloneable artifacts."""
+    return project_graph_registry_path().with_name("project-knowledge.json")
+
+
+def project_knowledge_state(root: Path) -> dict:
+    """Primary checkouts retain indexing; temporary workspaces never do.
+
+    Explicit decisions belong to an exact resolved root. Registry discovery
+    and copied .kin/config files are not classification authority.
+    """
+    if is_transient_workspace(root):
+        return ProjectKnowledgeState().model_dump()
+    root = Path(root).expanduser().resolve()
+    try:
+        records = json.loads(project_knowledge_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        records = {}
+    except (OSError, ValueError, AttributeError):
+        return ProjectKnowledgeState().model_dump()
+    if not isinstance(records, dict):
+        return ProjectKnowledgeState().model_dump()
+    if str(root) in records:
+        try:
+            return ProjectKnowledgeState.model_validate(records[str(root)]).model_dump()
+        except ValueError:
+            return ProjectKnowledgeState().model_dump()
+    return ProjectKnowledgeState(
+        state="established" if (root / ".git").is_dir() else "wip").model_dump()
+
+
+def is_linked_worktree(root: Path) -> bool:
+    """Git's workspace identity, not its directory name, determines WIP."""
+    root = Path(root).expanduser().resolve()
+    root = _enclosing_worktree(root) or root
+    if not (root / ".git").is_file():
+        return False
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_ENV}
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute",
+             "--git-dir", "--git-common-dir"], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, env=env, timeout=3)
+        directories = result.stdout.strip().splitlines()
+        if result.returncode or len(directories) != 2:
+            return True  # an unverifiable gitfile cannot authorize paid work
+        return Path(directories[0]).resolve() != Path(directories[1]).resolve()
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
+def project_is_established(root: Path, data_dir: Path | None = None) -> bool:
+    """Explicit approvals bind paid work to storage; canonical defaults persist."""
+    decision = project_knowledge_state(root)
+    if decision["state"] != "established":
+        return False
+    if data_dir is not None and is_transient_workspace(data_dir):
+        return False
+    return (data_dir is None or decision["data_dir"] is None
+            or str(Path(data_dir).expanduser().resolve()) == decision["data_dir"])
+
+
+def is_transient_workspace(path: Path) -> bool:
+    """Hard exclusion for Git worktrees and Factory's independent clones.
+
+    Factory places .kindex-no-index at each run/workspace root before agents
+    start. The presence marker survives archive/restore, is inherited by all
+    descendants, and must be excluded from accepted snapshots.
+    Neither explicit establishment nor a nested directory overrides it.
+    """
+    # Both names carry policy: a canonical alias into a task tree and an
+    # alias out of a marked tree are excluded. Resolving first loses the
+    # latter's lexical ancestors and silently bypasses its marker.
+    lexical = Path(path).expanduser().absolute()
+    for path in dict.fromkeys((lexical, lexical.resolve())):
+        for root in (path, *path.parents):
+            if (root / ".kindex-no-index").exists() or (root / ".kindex-no-index").is_symlink():
+                return True
+            if (root / ".git").is_file() and is_linked_worktree(root):
+                return True
+    return False
+
+
+def established_session_cwd(cwd: str) -> bool:
+    return session_cwd_status(cwd) == "established"
+
+
+def session_cwd_status(cwd: str) -> str:
+    """Only a known, established workspace may supply discovered sessions.
+
+    A nested worktree/repo or .kin boundary cannot borrow ancestor approval.
+    Missing or lossy encoded paths are not evidence of establishment.
+    """
+    if not cwd or not Path(cwd).is_absolute():
+        return "unknown"
+    if is_transient_workspace(Path(cwd)):
+        return "transient"
+    path = Path(cwd).resolve()
+    try:
+        decisions = json.loads(project_knowledge_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        decisions = {}
+    except (OSError, ValueError):
+        return "wip"
+    if not isinstance(decisions, dict):
+        return "wip"
+    for root in (path, *path.parents):
+        established = project_is_established(root)
+        if str(root) in decisions or (root / ".git").exists() or (root / ".kin").exists():
+            return "established" if established else "wip"
+    return "unknown"
+
+
+def content_indexing_refusal(config=None, *, source_paths=()) -> str | None:
+    """Shared content-indexing boundary; never apply this to query embeddings.
+
+    Config.data_path identifies the graph; Config._project_path identifies its
+    selected workspace even when the graph is stored elsewhere. Source paths
+    cover explicit file/repository inputs destined for another graph. Unscoped
+    callers use cwd. Local capture and generated-file exports do not call this.
+    """
+    from .config import active_root
+
+    paths = list(source_paths)
+    if config is None:
+        paths.append(Path.cwd())
+    else:
+        # data_path resolves aliases; retain the operator-supplied storage
+        # name as well so a marked lexical ancestor cannot disappear.
+        paths.append(config.data_path)
+        if active_root() is None:
+            paths.append(getattr(config, "data_dir", None))
+        paths.extend((getattr(config, "_project_path", None),
+                      getattr(config, "_project_input_path", None)))
+    if any(is_transient_workspace(Path(path)) for path in paths if path):
+        return ("Content indexing is disabled for transient workspaces; merge accepted "
+                "artifacts into the canonical checkout before indexing them")
+    return None
+
+
+def set_project_knowledge_state(
+        root: Path, state: str, data_dir: Path | None = None) -> dict:
+    """Explicitly approve or pause one workspace without modifying its graph.
+
+    The storage binding prevents discovery of a different data_dir from
+    inheriting paid-maintenance permission. Existing nodes and queues survive
+    either transition. Establishing is not an ingest or embedding operation.
+    """
+    from .budget import _lock_file, _unlock_file
+
+    if state == "established" and is_transient_workspace(root):
+        raise ValueError("Transient workspaces remain WIP; index the canonical checkout after merging")
+    root = Path(root).expanduser().resolve()
+    if state == "established" and not root.is_dir():
+        raise ValueError("Project path must be an existing directory")
+    decision = ProjectKnowledgeState(state=state)
+    if state == "wip":
+        directory = None  # revocation must work even if storage is conflicted
+    elif data_dir is not None:
+        directory = Path(data_dir).expanduser()
+        directory = root / directory if not directory.is_absolute() else directory
+        if is_transient_workspace(directory):
+            raise ValueError("Transient workspace storage cannot be established")
+        directory = directory.resolve()
+    else:
+        directory = project_data_path(root)
+    if directory is not None:
+        if is_transient_workspace(directory):
+            raise ValueError("Transient workspace storage cannot be established")
+        refuse_tracked_store(directory)
+        decision.data_dir = str(directory)
+    path = project_knowledge_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path.with_suffix(".lock")), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        _lock_file(fd)
+        # Unlike best-effort discovery, an explicit change must surface errors
+        # and must not overwrite an unreadable consent file.
+        records = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(records, dict):
+            raise ValueError("Invalid project knowledge registry; preserve and repair it first")
+        if state == "wip":
+            previous = records.get(str(root))
+            if isinstance(previous, dict) and isinstance(previous.get("data_dir"), str):
+                decision.data_dir = previous["data_dir"]
+        records[str(root)] = decision.model_dump()
+        with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=path.parent, delete=False,
+                prefix=".project-knowledge.") as out:
+            json.dump(records, out, sort_keys=True)
+        os.replace(out.name, path)
+    finally:
+        _unlock_file(fd)
+        os.close(fd)
+    if state == "established":
+        register_project_graph(root, directory)
+    return decision.model_dump()
 
 
 class ProjectStoreConflict(ValueError):
@@ -36,7 +243,7 @@ def database_has_durable_work(path: Path) -> bool:
             return "meta" in tables and bool(conn.execute(
                 "SELECT 1 FROM meta WHERE key LIKE 'task.%' OR key LIKE 'sim.%' "
                 "OR key LIKE 'supervisor.%' OR key LIKE 'attention.%' OR key LIKE 'reinforce.%' "
-                "OR key = 'embed.queue' LIMIT 1").fetchone())
+                "OR key = 'embed.queue' OR key LIKE 'ingest.session_provenance.%' LIMIT 1").fetchone())
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -198,7 +405,7 @@ def register_project_graph(root: Path, data_dir: Path) -> None:
 
     # Whoever keeps kindex away from the machine's scheduler (a test run)
     # keeps it away from the scheduler's registry too.
-    if scheduler_writes_disabled():
+    if scheduler_writes_disabled() or is_transient_workspace(root) or is_transient_workspace(data_dir):
         return
     path = project_graph_registry_path()
     try:

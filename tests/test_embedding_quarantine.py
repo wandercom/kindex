@@ -223,7 +223,8 @@ class TestEmbeddingQuarantine:
             lambda *_args: vectors._EmbeddingOutcome(False, terminal=True, kind="input_too_large"),
         )
 
-        assert drain_embedding_queue(store)["status"] == "ok"
+        # A terminal failure may drain the queue, but is not successful work.
+        assert drain_embedding_queue(store)["status"] != "ok"
         assert _quarantine(store)["items"][node_id]["attempts"] == 1
 
     def test_enqueue_persists_when_caller_has_pending_dml(self, store):

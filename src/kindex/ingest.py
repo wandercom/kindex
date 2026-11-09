@@ -19,15 +19,43 @@ if TYPE_CHECKING:
 # ── Project scanning ──────────────────────────────────────────────────
 
 
+def _require_ingestion_target(config: Config, store: Store) -> None:
+    """Direct scan APIs obey the same destination policy as CLI adapters."""
+    from .project_store import content_indexing_refusal
+    reason = content_indexing_refusal(store.config) or content_indexing_refusal(config)
+    if reason:
+        raise ValueError(reason)
+
+
+def _indexable_project_dirs(config: Config) -> list[Path]:
+    """Retain source spelling until policy checks, then apply config containment."""
+    from .config import _resolve_path, active_root
+    from .project_store import is_transient_workspace
+
+    directories = []
+    for raw in config.project_dirs:
+        # Bound configs intentionally discard outside inputs; do not inspect
+        # their original filesystem locations while determining eligibility.
+        if active_root() is None and is_transient_workspace(Path(raw)):
+            continue
+        directory = _resolve_path(raw)
+        if not is_transient_workspace(directory):
+            directories.append(directory)
+    return directories
+
+
 def scan_projects(config: Config, store: Store, verbose: bool = False) -> int:
     """Scan configured directories for repos with CLAUDE.md files.
 
     Creates/updates project nodes and extracts key context from each.
     Returns count of new nodes created.
     """
+    from .project_store import is_transient_workspace, project_is_established
+
+    _require_ingestion_target(config, store)
     count = 0
 
-    for project_dir in config.resolved_project_dirs:
+    for project_dir in _indexable_project_dirs(config):
         if not project_dir.exists():
             continue
 
@@ -35,6 +63,8 @@ def scan_projects(config: Config, store: Store, verbose: bool = False) -> int:
         for claude_md in sorted(project_dir.rglob("CLAUDE.md")):
             # The project root is the parent of CLAUDE.md
             project_root = claude_md.parent
+            if not project_is_established(project_root) or is_transient_workspace(claude_md):
+                continue
             slug = _project_slug(project_root)
 
             # Skip if already exists and was recently scanned
@@ -174,6 +204,7 @@ def scan_sessions(
 
     Returns count of new nodes created.
     """
+    _require_ingestion_target(config, store)
     projects_dir = config.claude_path / "projects"
     if not projects_dir.exists():
         return 0
@@ -198,13 +229,17 @@ def scan_sessions(
     # Per-profile session routing: an explicit per-pass predicate (set by
     # daemon.cron_run_all / kin cron) wins; otherwise one is built from the
     # configured profiles so EVERY ingest path routes (kin ingest sessions,
-    # MCP ingest, ...). None => no profiles: legacy, take everything.
-    from .routing import effective_session_filter
+    # MCP ingest, ...). None means no profile filter; workspace eligibility
+    # still applies below.
+    from .routing import effective_session_filter, _session_cwd
+    from .session_provenance import session_indexing_allowed
 
     session_filter = effective_session_filter(config)
 
     for jsonl_path in jsonl_files:
         if session_filter is not None and not session_filter(jsonl_path):
+            continue
+        if not session_indexing_allowed(config, store, jsonl_path, source_root=config.claude_dir):
             continue
         session_id = jsonl_path.stem[:12]
         session_slug = f"session-{session_id}"
@@ -281,6 +316,7 @@ def scan_codex_sessions(
     Codex stores sessions under YYYY/MM/DD directories. Each line is an event;
     user and assistant conversation messages appear as response_item payloads.
     """
+    _require_ingestion_target(config, store)
     sessions_dir = config.codex_path / "sessions"
     if not sessions_dir.exists():
         return 0
@@ -291,6 +327,7 @@ def scan_codex_sessions(
     # Per-profile routing by the cwd recorded in the rollout meta (Codex has
     # no Claude-style encoded dir names). None => no profiles configured.
     from .routing import effective_cwd_router
+    from .session_provenance import session_indexing_allowed
 
     cwd_router = effective_cwd_router(config)
 
@@ -306,6 +343,9 @@ def scan_codex_sessions(
             continue
 
         if cwd_router is not None and not cwd_router(str(meta.get("cwd") or "")):
+            continue
+        if not session_indexing_allowed(config, store, jsonl_path,
+                                        cwd=str(meta.get("cwd") or ""), source_root=config.codex_dir):
             continue
 
         raw_session_id = meta.get("id") or jsonl_path.stem
@@ -581,15 +621,19 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
     Returns count of updated nodes.
     """
     import yaml
+    from .project_store import is_transient_workspace, project_is_established
 
+    _require_ingestion_target(config, store)
     count = 0
     all_pending: list[tuple[str, str]] = []  # (source_slug, target_name)
     project_graphs: dict[str, str] = {}  # project_root -> resolved data_dir
-    for project_dir in config.resolved_project_dirs:
+    for project_dir in _indexable_project_dirs(config):
         if not project_dir.exists():
             continue
 
         for kin_entry in sorted(project_dir.rglob(".kin")):
+            if is_transient_workspace(kin_entry.parent):
+                continue
             # A repo-local graph the modern lane created declares no data_dir
             # and may have no config at all; it is registered all the same.
             if kin_entry.is_dir():
@@ -609,6 +653,8 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
             else:
                 continue
 
+            if is_transient_workspace(config_file):
+                continue
             slug = _project_slug(project_root)
 
             try:
@@ -660,6 +706,11 @@ def scan_kin_files(config: Config, store: Store, verbose: bool = False) -> int:
                 # registry write below applies that rule).
                 # A declared data_dir wins over the implicit repo-local store.
                 project_graphs[str(project_root)] = str(resolved_dir.resolve())
+
+            # Discovery keeps local reminders/housekeeping reachable, but is
+            # not permission to promote a workspace into a durable graph.
+            if not project_is_established(project_root):
+                continue
 
             existing = store.get_node(slug)
             if existing:
