@@ -623,11 +623,28 @@ def test_read_status_reports_bulk_lists_as_counts(store, repo, monkeypatch, tmp_
     from kindex import kinbase as kb
 
     payload = {"status": "unverified", "facts": [{"k": i} for i in range(3)],
-               "events": [{}], "query_log": [{}, {}], "unknowns": [{"id": "u1"}]}
+               "events": [{}], "query_log": [{}, {}], "query_log_total": 7,
+               "query_log_omitted": 5, "unknowns": [{"id": "u1"}]}
     stub = read_stub(tmp_path, "bulk", payload)
     monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
     assert kb.read_status(repo) == {"status": "unverified", "unknowns": [{"id": "u1"}],
-                                    "facts_count": 3, "events_count": 1, "query_log_count": 2}
+                                    "facts_omitted": 3, "events_omitted": 1,
+                                    "query_log_total": 7, "query_log_omitted": 7}
+
+
+def test_read_status_drops_the_largest_section_past_the_size_bound(
+        store, repo, monkeypatch, tmp_path):
+    """A list outside the known bulk keys can grow too; status stays under the
+    bound by dropping the largest section and naming it."""
+    from kindex import kinbase as kb
+
+    monkeypatch.setattr(kb, "MAX_STATUS_BYTES", 2000)
+    payload = {"status": "unverified", "observations": ["x" * 100] * 30,
+               "unknowns": [{"id": "u1"}]}
+    stub = read_stub(tmp_path, "large", payload)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    assert kb.read_status(repo) == {"status": "unverified", "unknowns": [{"id": "u1"}],
+                                    "omitted_for_size": ["observations"]}
 
 
 def test_read_only_tools_return_a_refusal_document_rather_than_raising(
