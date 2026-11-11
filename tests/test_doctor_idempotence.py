@@ -77,12 +77,12 @@ def persisted_state(db_path):
 
 def assert_no_issues_except_uninitialized_embeddings(report):
     """These FTS/graph fixtures intentionally have no vector index."""
-    assert not report["healthy"], report
-    assert report["embeddings"]["coverage_state"] == "unavailable", report
+    assert report["healthy"], report
+    assert report["embeddings"]["coverage_state"] == "incomplete", report
     assert report["embeddings"]["missing_nodes"] == report["embeddings"]["eligible_nodes"], report
-    assert report["issues"], report
-    assert all(issue.startswith("Embedding coverage unavailable:")
-               for issue in report["issues"]), report
+    assert not report["issues"], report
+    assert any("No vector index is initialized" in warning
+               for warning in report["warnings"]), report
 
 
 def assert_bridge_advisory(report):

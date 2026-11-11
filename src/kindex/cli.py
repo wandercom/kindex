@@ -2617,7 +2617,12 @@ def _emit_compact_context(store, args, topic: str, *, force: bool = False) -> No
     if not (force or getattr(args, "emit_context", False)) or not topic:
         return
     from .retrieve import format_context_block, hybrid_search
-    results = hybrid_search(store, topic, top_k=5)
+    from .vectors import EmbeddingFingerprintMismatch
+    try:
+        results = hybrid_search(store, topic, top_k=5)
+    except EmbeddingFingerprintMismatch as exc:
+        print(f"Optional context unavailable: {exc}", file=sys.stderr)
+        return
     print(format_context_block(store, results, query=topic, level="executive"))
 
 
@@ -3739,6 +3744,7 @@ def cmd_embed(args):
         if args.json:
             print(_dumps(result, indent=2))
         elif action == "status":
+            from .embedding_health import embedding_health_lines
             print(f"Provider: {result['provider']} / {result['model']}")
             print(f"Strategy: {result['strategy']} "
                   f"(contextual_supported={result['contextual_supported']})")
@@ -3752,6 +3758,8 @@ def cmd_embed(args):
                 print(f"  {group['count']} × {group['kind']}{code} — {group['message']}")
             print(f"Drain complete: {result.get('drain_complete', False)}")
             print(f"Coverage complete: {result.get('coverage_complete', False)}")
+            for line in embedding_health_lines(result):
+                print(line)
         elif action == "calibrate":
             if result.get("status") == "uncalibrated":
                 print(f"No calibration record for "
@@ -4726,7 +4734,9 @@ def _cmd_task(args, store):
         domains = detect_domain_from_path(store, cwd)
         topic = " ".join(domains) if domains else os.path.basename(cwd)
 
-        results = hybrid_search(store, topic, top_k=5)
+        # Nearby-task discovery is a local graph convenience, not semantic
+        # search; an unrelated vector identity must not make it fail.
+        results = hybrid_search(store, topic, top_k=5, use_vectors=False)
         seed_ids = [r["id"] for r in results]
 
         tasks = nearby_tasks(store, seed_ids, max_hops=2)

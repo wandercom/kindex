@@ -1267,12 +1267,13 @@ so changed neighboring chunks cannot reuse obsolete contextual vectors. Partial
 checkpoints never appear in search. The previous complete generation stays until
 its replacement is validated and atomically published. Existing indexes are never
 automatically erased or rebuilt when embedding settings change, even if the new
-provider is explicitly configured. Missing
-legacy identity also cannot authorize replacement. Indexing and queue drains
-fail without provider calls or prompts, preserving vectors, metadata and pending
-work. Semantic search fails with an actionable fingerprint mismatch rather than
-silently falling back to keyword-only recall; MCP semantic tools return an error.
-Nonsemantic graph inspection remains available.
+provider is explicitly configured. Missing legacy identity also cannot authorize
+replacement. Indexing and queue drains fail without provider calls or prompts,
+preserving vectors, metadata and pending work. Semantic search in the selected
+graph fails with an actionable fingerprint mismatch rather than silently falling
+back to keyword-only recall. A mismatched read-only secondary graph is skipped
+with a warning so compatible graph results remain available. Nonsemantic graph
+inspection remains available.
 
 Restore the matching provider/model/dimensions/strategy and chunk settings to
 reuse the existing index. Ordinary `kin embed reindex`, `enqueue` and `drain`

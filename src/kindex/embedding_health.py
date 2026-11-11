@@ -37,6 +37,7 @@ def embedding_coverage(store) -> dict:
         "stored_fingerprint": None,
         "stored_dimensions": None,
         "fingerprint_mismatch": None,
+        "index_initialized": False,
         "latest_retained_embedding_at": None,
         "retained_embedding_timestamp_state": "unavailable",
         "retained_embedding_timestamp_scope": "retained vector rows, not attempt history",
@@ -54,6 +55,7 @@ def embedding_coverage(store) -> dict:
         tables = {row[0] for row in store.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name IN ('node_vectors', 'node_vector_meta', 'vec_meta')")}
+        result["index_initialized"] = "node_vectors" in tables
         if "vec_meta" in tables:
             identity = dict(store.conn.execute(
                 "SELECT key, value FROM vec_meta "
@@ -80,6 +82,17 @@ def embedding_coverage(store) -> dict:
                 result.update(coverage_state="empty", fresh_nodes=0,
                               stale_or_incomplete_nodes=0, unassessed_nodes=0,
                               retained_embedding_timestamp_state="none")
+                return result
+            if "node_vectors" not in tables and "node_vector_meta" not in tables:
+                # No vector index has been created yet. Its absence proves
+                # zero current coverage; it is not an unreadable index.
+                result.update(
+                    coverage_state="incomplete", fresh_nodes=0,
+                    missing_nodes=len(eligible), stale_or_incomplete_nodes=0,
+                    unassessed_nodes=0,
+                    coverage_percent=0.0 if eligible else None,
+                    retained_embedding_timestamp_state="none",
+                )
                 return result
             result["coverage_error"] = "Missing embedding index table(s): " + ", ".join(sorted(missing_tables))
             return result
@@ -146,12 +159,17 @@ def embedding_doctor_findings(status: dict) -> tuple[list[str], list[str]]:
         issues.append(f"Embedding coverage unavailable: {status['coverage_error']}. "
                       "Inspect the local embedding backend/schema before reindexing.")
     elif status["coverage_state"] == "incomplete":
-        issues.append(
+        coverage = (
             f"Embedding coverage: {status['fresh_nodes']}/{status['eligible_nodes']} current "
             f"({status['coverage_percent']:.2f}%); {status['missing_nodes']} missing, "
-            f"{status['stale_or_incomplete_nodes']} stale/incomplete. "
-            "After resolving configuration/provider blockers, review `kin embed plan --stale` "
-            "and explicitly enqueue/drain the required work.")
+            f"{status['stale_or_incomplete_nodes']} stale/incomplete.")
+        if (not status.get("index_initialized") and status["fresh_nodes"] == 0
+                and status["missing_nodes"] == status["eligible_nodes"]):
+            warnings.append(coverage + " No vector index is initialized; embeddings are optional.")
+        else:
+            issues.append(
+                coverage + " After resolving configuration/provider blockers, review "
+                "`kin embed plan --stale` and explicitly enqueue/drain the required work.")
     if status["quarantined"]:
         issues.append(f"{status['quarantined']} quarantined embedding node(s), even if the queue is empty. "
                       "Inspect `kin embed status` quarantine reasons and resolve them before retrying.")

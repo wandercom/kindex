@@ -684,11 +684,38 @@ class EmbeddingFingerprintMismatch(RuntimeError):
     """Semantic retrieval is unsafe until the existing index identity matches."""
 
 
-_INDEX_MISMATCH_MESSAGE = (
-    "Embedding fingerprint mismatch. Keeping the existing vector index and pending work. "
-    "Restore the matching embedding provider/model/dimensions/strategy. "
-    "Changing settings does not authorize rebuilding; migration requires a separately reviewed procedure."
-)
+def _embedding_index_mismatch_message(store: Store) -> str:
+    """Describe both persisted and configured embedding identities."""
+    try:
+        metadata = dict(store.conn.execute(
+            "SELECT key, value FROM vec_meta "
+            "WHERE key IN ('embedding_fingerprint', 'embedding_dim')"
+        ).fetchall())
+    except Exception:
+        metadata = {}
+
+    def describe(fingerprint: str, dimensions: str) -> str:
+        try:
+            identity = json.loads(fingerprint)
+            parts = [identity.get("provider", "?"), identity.get("model", "?"),
+                     f"{identity.get('dimensions', dimensions)}d",
+                     identity.get("strategy", "?")]
+            for key in ("chunk_chars", "chunk_overlap_chars", "max_group_chunks"):
+                if key in identity:
+                    parts.append(f"{key}={identity[key]}")
+            return "/".join(parts)
+        except (TypeError, ValueError):
+            return f"{fingerprint}, {dimensions}d"
+
+    stored = describe(metadata.get("embedding_fingerprint", "not recorded"),
+                      metadata.get("embedding_dim", "?"))
+    current = describe(embedding_fingerprint(store.config),
+                       str(_get_embedding_dim(store.config)))
+    return (
+        f"Embedding fingerprint mismatch (stored: {stored}; current: {current}). "
+        "Restore the matching stored configuration. Existing vectors and queued work "
+        "are preserved; migration requires a separately reviewed procedure."
+    )
 
 
 def _embedding_index_mismatch(store: Store) -> bool:
@@ -745,7 +772,7 @@ def ensure_vec_table(store: Store) -> bool:
         store.conn.enable_load_extension(False)
 
         if _embedding_index_mismatch(store):
-            print(f"Warning: {_INDEX_MISMATCH_MESSAGE}", file=sys.stderr)
+            print(f"Warning: {_embedding_index_mismatch_message(store)}", file=sys.stderr)
             return False
         with _embedding_savepoint(store):
             # Check if dimension changed (provider switch)
@@ -773,10 +800,8 @@ def ensure_vec_table(store: Store) -> bool:
                     ).fetchone() is not None):
                 return True
 
-            if ((stored_dim and stored_dim != dim)
-                    or (table_exists and (stored_dim != dim or stored_fingerprint != fingerprint))):
-                print(f"Warning: {_INDEX_MISMATCH_MESSAGE}", file=sys.stderr)
-                return False
+            # A stale vec_meta record without a vector table has no index to
+            # preserve. The identity is replaced below as the new table is made.
 
             store.conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS node_vectors USING vec0(
@@ -1010,8 +1035,9 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
             if not acquired:
                 return _EmbeddingOutcome(False, kind="busy", message="Another embedding writer is active")
             if _embedding_index_mismatch(store):
-                print(f"Warning: {_INDEX_MISMATCH_MESSAGE}", file=sys.stderr)
-                return _EmbeddingOutcome(False, kind="fingerprint_mismatch", message=_INDEX_MISMATCH_MESSAGE)
+                message = _embedding_index_mismatch_message(store)
+                print(f"Warning: {message}", file=sys.stderr)
+                return _EmbeddingOutcome(False, kind="fingerprint_mismatch", message=message)
             node = _read_node_for_embedding(store, node_id)
             fingerprint = embedding_fingerprint(store.config)
             if _EMBED_CURRENT_ONLY.get() and (not node or _embedding_text_for_node(node) != text):
@@ -1579,10 +1605,11 @@ def _drain_embedding_queue(store: Store, config: Config | None = None, *,
     queue = _load_embedding_queue(store)
     quarantine = _load_embedding_quarantine(store)
     if _embedding_index_mismatch(store):
-        print(f"Warning: {_INDEX_MISMATCH_MESSAGE}", file=sys.stderr)
+        message = _embedding_index_mismatch_message(store)
+        print(f"Warning: {message}", file=sys.stderr)
         return {"status": "failed", "embedded": 0, "failed": 1, "attempted": 0,
                 "errors": [{"kind": "fingerprint_mismatch", "http_status": None,
-                            "message": _INDEX_MISMATCH_MESSAGE}],
+                            "message": message}],
                 "pending": len(queue), "quarantined": len(quarantine),
                 "drain_complete": False, "coverage_complete": False}
     if not queue:
@@ -1884,9 +1911,10 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
     if reason:
         return _indexing_refusal_result(store, reason)
     if _embedding_index_mismatch(store):
-        print(f"Warning: {_INDEX_MISMATCH_MESSAGE}", file=sys.stderr)
+        message = _embedding_index_mismatch_message(store)
+        print(f"Warning: {message}", file=sys.stderr)
         return {"status": "failed", "embedded": 0, "failed": 1,
-                "errors": [{"kind": "fingerprint_mismatch", "message": _INDEX_MISMATCH_MESSAGE}],
+                "errors": [{"kind": "fingerprint_mismatch", "message": message}],
                 "queue_pending": _embedding_queue_len(store)}
     nodes = select_reindex_nodes(store, **filters)
     plan = estimate_reindex_cost(nodes, store.config)
@@ -2047,7 +2075,7 @@ def vector_search(store: Store, query: str, top_k: int = 10,
         return []
     try:
         if _embedding_index_mismatch(store):
-            raise EmbeddingFingerprintMismatch(_INDEX_MISMATCH_MESSAGE)
+            raise EmbeddingFingerprintMismatch(_embedding_index_mismatch_message(store))
     except EmbeddingFingerprintMismatch:
         raise
     except AttributeError:

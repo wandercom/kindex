@@ -514,10 +514,19 @@ def hybrid_search(
                               verdict.verdict, query[:80], verdict.reason)
                 vec_ranked = [(r["id"], 1.0 / (1.0 + r.get("vec_distance", 1.0)))
                               for r in vec_results]
-        except EmbeddingFingerprintMismatch:
-            # MCP search/context/ask must receive the actionable refusal rather
-            # than silently presenting keyword-only results as semantic recall.
-            raise
+        except EmbeddingFingerprintMismatch as exc:
+            if getattr(store, "read_only", False):
+                # A read-only secondary graph cannot be repaired here. Omit its
+                # semantic channel while keeping results from other graphs.
+                message = ("Semantic search skipped for this read-only graph: "
+                           f"{exc}")
+                _log.warning("%s", message)
+                if grounding is not None:
+                    grounding["embedding_warning"] = message
+            else:
+                # Selected writable graphs must surface the actionable refusal
+                # instead of silently presenting keyword-only results.
+                raise
         except Exception:
             pass
 
@@ -1050,12 +1059,16 @@ def format_context_block(
     # and its own cost is charged against the budget — a warning that gets
     # trimmed away is worse than no warning.
     note = ""
+    warning = (grounding or {}).get("embedding_warning")
+    if warning:
+        note = str(warning)
     verdict = (grounding or {}).get("verdict")
     if verdict is not None:
         try:
-            note = verdict.note()
+            verdict_note = verdict.note()
+            note = f"{note}\n{verdict_note}" if note else verdict_note
         except Exception:
-            note = ""
+            pass
     prefix = f"{note}\n\n" if note else ""
     if trust_omissions is not None:
         prefix += build_trust_note(trust_omissions) + "\n\n"

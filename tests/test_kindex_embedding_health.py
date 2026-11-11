@@ -204,17 +204,19 @@ class EmbeddingHealthTests(unittest.TestCase):
         self.assertFalse(result["coverage_complete"])
         self.assertIn("pending", embedding_doctor_findings(result)[1][0])
 
-    def test_missing_tables_are_unknown_not_false_complete(self):
+    def test_never_created_index_reports_zero_of_eligible_coverage(self):
         self.add()
         result = self.status()
         self.assertEqual(result["eligible_nodes"], 1)
         self.assertEqual(result["missing_nodes"], 1)
-        self.assertEqual(result["coverage_state"], "unavailable")
-        self.assertIsNone(result["coverage_percent"])
-        self.assertIsNone(result["fresh_nodes"])
+        self.assertEqual(result["coverage_state"], "incomplete")
+        self.assertEqual(result["coverage_percent"], 0)
+        self.assertEqual(result["fresh_nodes"], 0)
         self.assertFalse(result["coverage_complete"])
-        self.assertIn("Missing embedding index", result["coverage_error"])
-        self.assertTrue(embedding_doctor_findings(result)[0])
+        self.assertIsNone(result["coverage_error"])
+        self.assertFalse(embedding_doctor_findings(result)[0])
+        self.assertIn("0/1 current (0.00%)", embedding_doctor_findings(result)[1][0])
+        self.assertIn("No vector index is initialized", embedding_doctor_findings(result)[1][0])
 
     def test_missing_vector_table_is_not_a_successful_retained_update(self):
         self.embed(self.add())
@@ -348,6 +350,21 @@ class EmbeddingHealthTests(unittest.TestCase):
         self.assertIn("Latest retained embedding update: 2001", output)
         self.assertIn("not attempt history", output)
         self.assertNotIn("No embeddings in 24", output)
+
+    def test_embed_status_text_includes_coverage_and_mismatch_details(self):
+        node_id = self.add()
+        self.embed(node_id)
+        self.store.config.embedding.model = "different-model"
+        args = SimpleNamespace(embed_action="status", data_dir=str(self.root / "graph"), json=False)
+        output = io.StringIO()
+        with patch("kindex.cli._store", return_value=self.store), \
+                patch.object(self.store, "close"), contextlib.redirect_stdout(output):
+            cli.cmd_embed(args)
+        text = output.getvalue()
+        self.assertIn("Embedding coverage:", text)
+        self.assertIn("Embedding fingerprint (stored):", text)
+        self.assertIn("Embedding fingerprint (current):", text)
+        self.assertIn("different-model", text)
 
 
 if __name__ == "__main__":

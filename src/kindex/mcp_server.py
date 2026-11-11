@@ -1215,6 +1215,9 @@ def search(query: str, top_k: int = 10, tags: str = "",
 
     ground_notes = []
     for graph, evidence in (("project", grounding), ("global", home_grounding)):
+        warning = evidence.get("embedding_warning")
+        if warning:
+            ground_notes.append(f"{graph}: {warning}" if home is not None else warning)
         if results and not any(result["_graph_source"] == graph for result in results):
             continue
         verdict = evidence.get("verdict")
@@ -1561,6 +1564,10 @@ def _render_context_sources(stores, results, warnings, *, topic: str, level: str
     total_budget = max_tokens if max_tokens > 0 else TIER_BUDGETS.get(level, 1500)
     headings = len(contributing) > 1 or aware or "global" in contributing
     denied = []
+    for graph in stores:
+        warning = warnings[graph][0].get("embedding_warning")
+        if warning:
+            denied.append(f"{graph.title()} graph: {warning}")
     if trusted_only:
         for graph in stores:
             if graph not in contributing:

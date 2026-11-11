@@ -134,6 +134,63 @@ class EmbeddingIndexSafetyTests(unittest.TestCase):
         self.assertEqual([tuple(row) for row in store.conn.execute("SELECT * FROM node_vectors")], before)
 
 
+    def test_stale_metadata_without_vector_table_does_not_block_index_creation(self):
+        store = self.store({"provider": "openai", "dimensions": 2})
+        store.conn.execute("CREATE TABLE vec_meta (key TEXT PRIMARY KEY, value TEXT)")
+        store.conn.execute("INSERT INTO vec_meta VALUES ('embedding_dim', '999')")
+        store.conn.execute("INSERT INTO vec_meta VALUES ('embedding_fingerprint', 'stale')")
+        store.conn.commit()
+        self.assertTrue(vectors.ensure_vec_table(store))
+        metadata = dict(store.conn.execute("SELECT key, value FROM vec_meta"))
+        self.assertEqual(metadata["embedding_dim"], "2")
+        self.assertEqual(metadata["embedding_fingerprint"], vectors.embedding_fingerprint(store.config))
+
+
+    def test_read_only_mismatch_drops_only_secondary_vector_channel(self):
+        from kindex.retrieve import hybrid_search
+
+        store = self.store({"provider": "openai", "dimensions": 2})
+        node = self.seed(store)
+        store.conn.commit()
+        readonly_config = store.config.model_copy(deep=True)
+        readonly_config.embedding.model = "different-model"
+        readonly = Store(readonly_config, read_only=True, migrate=False,
+                         manage_project_storage=False)
+        self.addCleanup(readonly.close)
+        grounding = {}
+        results = hybrid_search(readonly, "Existing node", top_k=5,
+                                grounding=grounding)
+        self.assertIn(node, {row["id"] for row in results})
+        self.assertIn("read-only graph", grounding["embedding_warning"])
+        self.assertIn("stored:", grounding["embedding_warning"])
+        self.assertIn("current:", grounding["embedding_warning"])
+        self.assertIn("different-model", grounding["embedding_warning"])
+
+
+    def test_nonsemantic_task_nearby_does_not_use_vectors(self):
+        from kindex.cli import _cmd_task
+        from kindex import retrieve
+
+        store = self.store()
+        with patch.object(retrieve, "detect_domain_from_path", return_value=[]), \
+                patch.object(retrieve, "hybrid_search", return_value=[]) as search, \
+                patch("kindex.tasks.nearby_tasks", return_value=[]):
+            _cmd_task(SimpleNamespace(task_action="nearby", json=True), store)
+        search.assert_called_once()
+        self.assertFalse(search.call_args.kwargs["use_vectors"])
+
+
+    def test_optional_compact_hook_context_survives_fingerprint_mismatch(self):
+        from kindex.cli import _emit_compact_context
+        store = self.store()
+        output = io.StringIO()
+        with patch("kindex.retrieve.hybrid_search",
+                   side_effect=vectors.EmbeddingFingerprintMismatch("mismatch")), \
+                contextlib.redirect_stderr(output):
+            _emit_compact_context(store, SimpleNamespace(emit_context=True), "topic")
+        self.assertIn("Optional context unavailable: mismatch", output.getvalue())
+
+
     def test_mcp_semantic_tools_return_actionable_error_while_inspection_works(self):
         from kindex import mcp_server as server
         store = self.store({"provider": "openai", "dimensions": 2})
@@ -160,6 +217,8 @@ class EmbeddingIndexSafetyTests(unittest.TestCase):
                 output = "\n".join(item.text for item in result.content if item.type == "text")
                 self.assertIn("fingerprint mismatch", output.lower())
                 self.assertIn("matching", output)
+                self.assertIn("stored:", output)
+                self.assertIn("current:", output)
                 self.assertNotIn("fake-", output)
             # Non-semantic graph inspection and diagnostic counters remain usable.
             self.assertIsNotNone(store.get_node(node))
