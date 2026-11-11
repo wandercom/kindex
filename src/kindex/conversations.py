@@ -250,8 +250,14 @@ def ingest_directory(store: Store, directory: Path, verbose: bool = False, *, li
     that many conversations were written (unchanged ones do not count, so a
     later run continues). A conversation that cannot be stored is reported in
     `errors` and leaves the graph as it was. Returns the nodes written."""
+    from .project_store import content_indexing_refusal, is_transient_workspace
+    reason = content_indexing_refusal(store.config, source_paths=(directory,))
+    if reason:
+        raise ValueError(reason)
     count = written = 0
     for path in sorted(list(directory.rglob("*.json")) + list(directory.rglob("*.jsonl"))):
+        if is_transient_workspace(path):
+            continue
         for index, conv in enumerate(load_conversations(path)):
             if limit is not None and written >= limit:
                 return count

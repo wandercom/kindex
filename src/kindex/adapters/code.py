@@ -1004,6 +1004,9 @@ def _reconcile_code_nodes(
         if not isinstance(extra, dict) or extra.get("repo_root") != str(root):
             continue
         relative = Path(str(extra.get("relative_path") or ""))
+        from ..project_store import is_transient_workspace
+        if is_transient_workspace(root / relative):
+            continue  # exclusion is not deletion; preserve prior indexed work
         if str(scope) not in ("", ".") and not relative.is_relative_to(scope):
             continue
         if row["id"] in seen:
@@ -1092,6 +1095,10 @@ def ingest_code(
     directory is ingested. A file either one drops is not listed, so its
     nodes are retired by the reconcile pass like a deleted file's.
     """
+    from ..project_store import content_indexing_refusal, is_transient_workspace
+    reason = content_indexing_refusal(store.config, source_paths=(directory,))
+    if reason:
+        return IngestResult(errors=[reason])
     directory = Path(directory).resolve()
     if not directory.is_dir():
         return IngestResult(errors=[f"Not a directory: {directory}"])
@@ -1125,7 +1132,8 @@ def ingest_code(
     # git ls-files still lists a file deleted but not staged; it is gone.
     effective_root = repo_root or directory
     files = [f for f in _get_file_list(directory, repo_root, exclude_patterns, extensions)
-             if f.is_file() and not _root_excluded(f, effective_root, extra_exclude)]
+             if f.is_file() and not is_transient_workspace(f)
+             and not _root_excluded(f, effective_root, extra_exclude)]
     if verbose:
         print(f"  Found {len(files)} source files in {directory}")
 

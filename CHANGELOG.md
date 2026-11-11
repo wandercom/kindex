@@ -12,6 +12,55 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
   reported as `facts_count`, `events_count` and `query_log_count`; certification,
   counts and Unknowns are unchanged (about 210 KB for the same repository).
 
+## [0.54.1] - 2026-11-09
+
+### Fixed
+- MCP Registry publication retries transient publisher download failures within
+  a bounded time limit and extracts only after a successful download. The 0.54.0
+  package reached PyPI, but its registry job failed on an upstream HTTP 504.
+
+## [0.54.0] - 2026-11-09
+
+### Changed
+- Linked Git worktrees and Factory clones marked with
+  `.kindex-no-index` are excluded from automatic project/session
+  discovery and paid project maintenance, without an establishment bypass.
+  Local context, generated artifacts, data and queued work are preserved.
+- Ordinary canonical checkouts retain indexing without new approval. New
+  `kin project status|wip|establish` commands manage explicit local classification.
+  Existing Factory clones require marker backfill from their lifecycle records;
+  existing profile/global content and queues are not reclassified. See README
+  migration and Factory integration notes.
+- Explicit content-indexing commands and ingestion adapters enforce the same
+  transient boundary, including marked descendants and source files ingested
+  into another graph. Query embeddings, local capture and generated artifacts
+  remain available; exclusion does not retire existing code records.
+- Session discovery resolves cwd-less encoded canonical paths when unambiguous.
+  Unknown historical provenance is deferred with durable local attribution and
+  visible status/cron diagnostics; unchanged transcripts can be retried after
+  canonical evidence is restored. Observed transient sessions remain excluded.
+
+### Fixed
+- Embedding queue drains skip fresh complete generations and archived nodes;
+  identical content/configuration can reuse local vectors despite uncertain provenance.
+- Completed contextual groups survive later failures and process interruption in
+  durable local checkpoints, without exposing partial generations to search.
+- Drain time budgets apply between provider requests within large documents.
+  Concurrent paid writers are serialized per graph without holding SQLite locks
+  over network calls. Older workers must be stopped when upgrading.
+- Authentication failures stop the current embedding pass; failures now include
+  nonsecret diagnostics and counters, propagate into cron results, and make the
+  embedding CLI exit nonzero. Checkpointing reduces replay but cannot guarantee
+  exactly-once provider charges across response/commit or timeout windows.
+
+## [0.53.0] - 2026-11-05
+
+### Added
+- `llm.timeout` configures the compact-hook extraction timeout. Kindex now derives
+  the installed Claude hook's kill timeout from it (`llm.timeout` + 4s, floor 10s).
+  Existing installs keep their previous 10-second hook until the Claude hook setup
+  is rerun.
+
 ## [0.52.0] - 2026-11-02
 
 ### Changed

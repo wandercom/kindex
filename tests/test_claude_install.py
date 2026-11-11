@@ -23,6 +23,19 @@ def test_packaged_legacy_manifest_is_generated_from_installer():
                for entry in entries for h in entry["hooks"])
 
 
+def test_legacy_manifest_derives_compact_hook_timeout_from_llm_timeout():
+    default = legacy_manifest(Config(), "kin")
+    assert [h["timeout"] for h in default["PreCompact"][0]["hooks"]] == [10]
+    assert [h["timeout"] for h in default["Stop"][0]["hooks"]
+            if "compact-hook" in h["command"]] == [10]
+    raised = legacy_manifest(Config(llm={"timeout": 30}), "kin")
+    assert [h["timeout"] for h in raised["PreCompact"][0]["hooks"]] == [34]
+    assert [h["timeout"] for h in raised["Stop"][0]["hooks"]
+            if "compact-hook" in h["command"]] == [34]
+    fractional = legacy_manifest(Config(llm={"timeout": 6.5}), "kin")
+    assert [h["timeout"] for h in fractional["PreCompact"][0]["hooks"]] == [11]
+
+
 def test_packaged_manifest_expands_plugin_root_in_hook_shell(tmp_path):
     import subprocess
     from kindex.claude_install import PACKAGED_PLUGIN_KIN

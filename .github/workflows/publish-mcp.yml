@@ -89,8 +89,14 @@ jobs:
           CHECK
 
       - name: Install mcp-publisher
+        shell: bash
         run: |
-          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          # Release asset redirects can return transient 5xx responses. Finish
+          # a bounded download before extraction; never consume a partial pipe.
+          curl --fail --show-error --location --retry 5 --retry-max-time 180 \
+            --connect-timeout 15 --max-time 60 --output mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz"
+          tar xzf mcp-publisher.tar.gz mcp-publisher
 
       - name: Authenticate to the MCP Registry
         run: ./mcp-publisher login github-oidc

@@ -149,6 +149,10 @@ def uninstall_hooks(repo_path: str | Path) -> list[str]:
 def ingest_recent_commits(store: "Store", repo_path: str | Path = ".",
                           limit: int = 20, verbose: bool = False) -> int:
     """Ingest recent git commits from a local repository."""
+    from ..project_store import content_indexing_refusal
+    reason = content_indexing_refusal(store.config, source_paths=(repo_path,))
+    if reason:
+        raise ValueError(reason)
     repo_path = Path(repo_path).resolve()
 
     try:

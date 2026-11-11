@@ -179,6 +179,7 @@ def _routed_config(tmp_path, active, default="personal", data_dir=None):
 
 
 def _seed_claude_sessions(tmp_path):
+    _canonical_session_projects(tmp_path)
     projects = tmp_path / "claude" / "projects"
     _make_session(projects, "dir-a", "workaaaa1111",
                   cwd=str(tmp_path / "work" / "repo"))
@@ -186,6 +187,14 @@ def _seed_claude_sessions(tmp_path):
                   cwd=str(tmp_path / "personal" / "notes"))
     _make_session(projects, "dir-c", "straycccc333",
                   cwd=str(tmp_path / "elsewhere"))
+
+
+def _canonical_session_projects(tmp_path):
+    """Routing fixtures supply eligible projects without changing ownership."""
+    for relative in ("work/repo", "personal/notes", "elsewhere"):
+        project = tmp_path / relative
+        project.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(project)], check=True, capture_output=True)
 
 
 class TestScanSessionsSelfRouting:
@@ -292,6 +301,7 @@ def _make_codex_session(sessions_dir: Path, sid: str, cwd: str) -> Path:
 
 class TestCodexRouting:
     def _seed(self, tmp_path):
+        _canonical_session_projects(tmp_path)
         sessions = tmp_path / "codex" / "sessions"
         _make_codex_session(sessions, "workcdx00001",
                             str(tmp_path / "work" / "repo"))
@@ -453,6 +463,7 @@ class TestCronPinnedPass:
                                                            tmp_path):
         home, project = cli_home
         _write_global_profiles(home, tmp_path)
+        _canonical_session_projects(tmp_path)
         projects = home / ".claude" / "projects"
         _make_session(projects, "dir-w", "workaaaa1111",
                       cwd=str(tmp_path / "work" / "repo"))
@@ -477,6 +488,7 @@ class TestCronPinnedPass:
         runs a legacy take-everything pass, and never stamps."""
         home, project = cli_home
         _write_global_profiles(home, tmp_path, default=None)
+        _canonical_session_projects(tmp_path)
         projects = home / ".claude" / "projects"
         _make_session(projects, "dir-w", "workaaaa1111",
                       cwd=str(tmp_path / "work" / "repo"))

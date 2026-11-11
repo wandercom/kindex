@@ -52,6 +52,14 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
     Returns dict of results.
     """
     from .ingest import scan_kin_files, scan_projects, scan_sessions
+    from .project_store import content_indexing_refusal
+
+    # A selected worktree may use an external graph directory. Check both
+    # workspace and graph identity before any paid maintenance or ingestion.
+    if content_indexing_refusal(config) or content_indexing_refusal(store.config):
+        results = _project_housekeeping(store)
+        results["paid_maintenance_skipped"] = "worktree"
+        return results
 
     results: dict = {}
 
@@ -75,6 +83,14 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         print("Scanning sessions...")
     session_count = scan_sessions(config, store, limit=50, verbose=verbose)
     results["sessions"] = session_count
+    from .session_provenance import session_deferrals
+    deferred = session_deferrals(store)
+    if deferred:
+        results["session_provenance"] = {
+            "deferred": sum(record["disposition"] == "deferred" for record in deferred),
+            "excluded": sum(record["disposition"] == "excluded" for record in deferred),
+            "details": "kin status --json",
+        }
 
     # 3. Process inbox items
     inbox_count = _process_inbox(config, store, verbose=verbose, results=results)
@@ -156,6 +172,12 @@ def cron_run(config: "Config", store: "Store", verbose: bool = False) -> dict:
         embed_drained = drain_embedding_queue(store, config, report_coverage=False)
         results["embedded"] = embed_drained.get("embedded", 0)
         results["embed_pending"] = embed_drained.get("pending", 0)
+        results["embedding_status"] = embed_drained.get("status")
+        results["embedding"] = embed_drained
+        if embed_drained.get("status") in {"failed", "persistence_error", "unavailable"}:
+            _step_failed(results, "embedding", RuntimeError(
+                f"Embedding drain failed ({embed_drained['status']}); "
+                f"{embed_drained.get('failed', 0)} failed attempts"))
     except Exception as error:
         _step_failed(results, "embedding", error)
         results["embedded"] = 0
@@ -327,7 +349,9 @@ def _project_config(base_config: "Config", root: str, directory: str) -> "Config
     reminder_nudge = cfg.reminders.remind_kindex_usage
     cfg.reminders = trusted.reminders
     cfg.reminders.remind_kindex_usage = reminder_nudge
-    cfg.data_dir = str(Path(directory).expanduser().resolve())
+    # data_path resolves the location; keep its original name for the indexing
+    # boundary so a registry's marked alias cannot become canonical by resolving.
+    cfg.data_dir = str(Path(directory).expanduser())
     cfg._project_path = Path(root).resolve()
     cfg.active_profile = None
     cfg.profile_source = "project"
@@ -449,8 +473,13 @@ def _project_maintenance(config: "Config", store: "Store", verbose: bool = False
     from .attention import drain_attention_queue
     from .reinforce import drain_reinforce_queue
     from .vectors import drain_embedding_queue
+    from .project_store import project_is_established
 
     results = _project_housekeeping(store)
+    if config._project_path is None or not project_is_established(
+            config._project_path, config.data_path):
+        results["paid_maintenance_skipped"] = "project_not_established"
+        return results
     deadline = time.monotonic() + max(0, config.embedding.drain_time_budget)
     for name, drain, fields in (
             ("reinforce", drain_reinforce_queue, {"graded": "reinforce_graded", "pending": "reinforce_pending"}),
@@ -467,9 +496,11 @@ def _project_maintenance(config: "Config", store: "Store", verbose: bool = False
             drained = drain(store, config, **kwargs)
             for source, target in fields.items():
                 results[target] = drained.get(source, 0)
+            if name == "embedding":
+                results["embedding"] = drained
             status = drained.get("status")
             if status is not None:
-                known = {"ok", "empty", "disabled", "unavailable", "failed", "error", "persistence_error"}
+                known = {"ok", "empty", "disabled", "unavailable", "failed", "error", "persistence_error", "deferred", "refused"}
                 status = status if isinstance(status, str) and status in known else "unknown"
                 results[name + "_status"] = status
             if status in {"unavailable", "failed", "error", "persistence_error"}:
@@ -972,12 +1003,16 @@ def incremental_ingest(
     This is a lightweight alternative to full scan_sessions that only
     looks at files modified since the given timestamp.
     """
+    from .ingest import _require_ingestion_target
+    _require_ingestion_target(config, store)
     new_files = find_new_sessions(config, since_iso)
     if not new_files:
         return 0
 
     from .extract import keyword_extract
     from .ingest import _extract_session_text
+    from .routing import _session_cwd
+    from .session_provenance import session_indexing_allowed
 
     # Per-profile session routing — same predicate as scan_sessions, so
     # `kin watch` cannot pull foreign-profile sessions into this store.
@@ -986,6 +1021,8 @@ def incremental_ingest(
     count = 0
     for jsonl_path in new_files:
         if session_filter is not None and not session_filter(jsonl_path):
+            continue
+        if not session_indexing_allowed(config, store, jsonl_path, source_root=config.claude_dir):
             continue
         session_id = jsonl_path.stem[:12]
         session_slug = f"session-{session_id}"
