@@ -56,6 +56,16 @@ def graph(tmp_path, monkeypatch):
     return data_dir, db_path, doctor
 
 
+def assert_no_issues_except_uninitialized_embeddings(report):
+    """These FTS/graph fixtures intentionally have no vector index."""
+    assert not report["healthy"], report
+    assert report["embeddings"]["coverage_state"] == "unavailable", report
+    assert report["embeddings"]["missing_nodes"] == report["embeddings"]["eligible_nodes"], report
+    assert report["issues"], report
+    assert all(issue.startswith("Embedding coverage unavailable:")
+               for issue in report["issues"]), report
+
+
 def fts_issues(report):
     return [item for item in report["issues"] if "FTS5" in item]
 
@@ -87,7 +97,7 @@ def test_v12_mixed_populations_do_not_request_rebuild(graph):
     before = canonical_rows(db_path)
     for report in (doctor(), doctor("--fix"), doctor()):
         assert not fts_issues(report), report
-        assert report["healthy"], report
+        assert_no_issues_except_uninitialized_embeddings(report)
         assert report["fixes_applied"] == 0
     assert canonical_rows(db_path) == before
     for token in ("sessionneedle", "ignoredneedle", "archivedneedle",
@@ -103,7 +113,7 @@ def test_doctor_detects_and_repairs_postings_corruption(graph, damage, mixed):
         with closing(Store(Config(data_dir=str(data_dir)))) as store:
             store.add_node("Session", "sessionneedle body", node_id="session",
                            node_type="session")
-    assert doctor()["healthy"]
+    assert_no_issues_except_uninitialized_embeddings(doctor())
     before = canonical_rows(db_path)
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
@@ -142,7 +152,7 @@ def test_doctor_detects_and_repairs_postings_corruption(graph, damage, mixed):
     assert repaired["fixes_applied"] == 1, repaired
     assert any("FIXED" in issue for issue in fts_issues(repaired)), repaired
     after = doctor()
-    assert after["healthy"], after
+    assert_no_issues_except_uninitialized_embeddings(after)
     assert not fts_issues(after)
     assert matches(db_path, "originalneedle") == {row[0]}
     assert not matches(db_path, "ghostneedle")
@@ -190,7 +200,7 @@ def test_rebuild_restores_mixed_rows_and_full_indexed_content(graph):
     assert fts_issues(doctor())
     repaired = doctor("--fix")
     assert repaired["fixes_applied"] == 1, repaired
-    assert doctor()["healthy"]
+    assert_no_issues_except_uninitialized_embeddings(doctor())
     for token in ("titleneedle", "longtailneedle", "aliasneedle",
                   "intentneedle", "domainneedle"):
         assert matches(db_path, token) == {rowid}

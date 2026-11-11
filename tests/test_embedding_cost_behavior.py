@@ -113,6 +113,17 @@ def snapshot(store):
         "SELECT node_id, embedding FROM node_vectors ORDER BY node_id")]
 
 
+def index_state(store):
+    """Retain vector bytes and identity/provenance when replacement is refused."""
+    return {
+        "vectors": snapshot(store),
+        "metadata": [tuple(row) for row in store.conn.execute(
+            "SELECT * FROM node_vector_meta ORDER BY vector_id")],
+        "identity": [tuple(row) for row in store.conn.execute(
+            "SELECT * FROM vec_meta ORDER BY key")],
+    }
+
+
 def assert_complete(store, node_id):
     assert node_id not in queue(store)
     status = vectors.embedding_status(store)
@@ -348,24 +359,44 @@ def test_cron_auth_failure_remains_visible_and_not_successful(isolated_surface, 
     assert "PRIVATE-SOURCE-CONTENT" not in visible
 
 
-@pytest.mark.parametrize("change", ["content", "model", "dimensions", "chunk_chars", "chunk_overlap_chars", "max_group_chunks"])
-def test_semantic_changes_require_a_new_complete_generation(world, change):
+def test_content_changes_require_a_new_complete_generation(world):
     node = world.store.add_node("T", content="abcdefghijklmnop")
     vectors.drain_embedding_queue(world.store)
     before = snapshot(world.store)
     paid = len(world.provider.calls)
-    if change == "content":
-        world.store.update_node(node, content="qrstuvwxyzABCDEF")
-    else:
-        setattr(world.config.embedding, change, {
-            "model": "voyage-3.5", "dimensions": 16, "chunk_chars": 6,
-            "chunk_overlap_chars": 1, "max_group_chunks": 3,
-        }[change])
+    world.store.update_node(node, content="qrstuvwxyzABCDEF")
     vectors.enqueue_embedding(world.store, node)
     vectors.drain_embedding_queue(world.store)
     assert len(world.provider.calls) > paid
     assert snapshot(world.store) != before
     assert_complete(world.store, node)
+
+
+@pytest.mark.parametrize("change", ["model", "dimensions", "chunk_chars", "chunk_overlap_chars", "max_group_chunks"])
+def test_embedding_config_changes_refuse_automatic_index_replacement(world, change):
+    node = world.store.add_node("T", content="abcdefghijklmnop")
+    vectors.drain_embedding_queue(world.store)
+    before = index_state(world.store)
+    paid = len(world.provider.calls)
+    setattr(world.config.embedding, change, {
+        "model": "voyage-3.5", "dimensions": 16, "chunk_chars": 6,
+        "chunk_overlap_chars": 1, "max_group_chunks": 3,
+    }[change])
+    vectors.enqueue_embedding(world.store, node)
+    pending = queue(world.store)
+    assert node in pending
+
+    # Changed settings do not authorize migration or index replacement.
+    result = vectors.drain_embedding_queue(world.store)
+
+    assert result["status"] == "failed"
+    assert result["errors"][0]["kind"] == "fingerprint_mismatch"
+    assert result["embedded"] == 0
+    assert result["provider_attempts"] == 0
+    assert result["coverage_complete"] is False
+    assert len(world.provider.calls) == paid
+    assert index_state(world.store) == before
+    assert queue(world.store) == pending
 
 
 def test_paid_contextual_group_survives_later_failure_and_database_reopen(world):
@@ -517,22 +548,43 @@ def test_failed_replacement_preserves_entire_previous_vector_generation(world):
     assert snapshot(world.open()) == old
 
 
-def test_failed_dimension_migration_preserves_previous_vectors_across_reopen(world):
+def test_dimension_mismatch_stays_refused_across_reopen_until_config_is_restored(world):
     node = world.store.add_node("T", content="abcdefghijklmnop")
     vectors.drain_embedding_queue(world.store)
-    old = snapshot(world.store)
+    old = index_state(world.store)
+    old_dimensions = world.config.embedding.dimensions
+    paid = len(world.provider.calls)
     world.config.embedding.dimensions = 16
     vectors.enqueue_embedding(world.store, node)
-    world.provider.fail_at[len(world.provider.calls) + 2] = provider_error(503)
+    pending = queue(world.store)
     result = vectors.drain_embedding_queue(world.store)
+    assert result["status"] == "failed"
+    assert result["errors"][0]["kind"] == "fingerprint_mismatch"
     assert result["embedded"] == 0
-    assert snapshot(world.store) == old, "dimension migration removed live vectors before replacement was complete"
-    assert node in queue(world.store)
+    assert result["provider_attempts"] == 0
+    assert len(world.provider.calls) == paid
+    assert index_state(world.store) == old
+    assert queue(world.store) == pending
+    assert node in pending
     world.store.close()
     reopened = world.open()
-    assert snapshot(reopened) == old
-    vectors.drain_embedding_queue(reopened)
-    assert all(len(blob) == 16 * 4 for _identity, blob in snapshot(reopened))
+    assert index_state(reopened) == old
+
+    repeated = vectors.drain_embedding_queue(reopened)
+    assert repeated["status"] == "failed"
+    assert repeated["errors"][0]["kind"] == "fingerprint_mismatch"
+    assert repeated["provider_attempts"] == 0
+    assert len(world.provider.calls) == paid
+    assert index_state(reopened) == old
+    assert queue(reopened) == pending
+
+    # Restoring compatibility resumes normal work without buying fresh vectors again.
+    world.config.embedding.dimensions = old_dimensions
+    recovered = vectors.drain_embedding_queue(reopened)
+    assert recovered["status"] == "ok"
+    assert recovered["skipped_fresh"] == 1
+    assert len(world.provider.calls) == paid
+    assert index_state(reopened) == old
     assert_complete(reopened, node)
 
 

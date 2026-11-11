@@ -473,6 +473,7 @@ def hybrid_search(
     vec_ranked: list[tuple[str, float]] = []
     verdict = None
     if use_vectors:
+        from .vectors import EmbeddingFingerprintMismatch
         try:
             from .grounding import evaluate as _evaluate_grounding
             from .grounding import similarity_from_distance
@@ -513,6 +514,10 @@ def hybrid_search(
                               verdict.verdict, query[:80], verdict.reason)
                 vec_ranked = [(r["id"], 1.0 / (1.0 + r.get("vec_distance", 1.0)))
                               for r in vec_results]
+        except EmbeddingFingerprintMismatch:
+            # MCP search/context/ask must receive the actionable refusal rather
+            # than silently presenting keyword-only results as semantic recall.
+            raise
         except Exception:
             pass
 

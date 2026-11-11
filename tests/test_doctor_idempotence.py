@@ -75,6 +75,16 @@ def persisted_state(db_path):
         }
 
 
+def assert_no_issues_except_uninitialized_embeddings(report):
+    """These FTS/graph fixtures intentionally have no vector index."""
+    assert not report["healthy"], report
+    assert report["embeddings"]["coverage_state"] == "unavailable", report
+    assert report["embeddings"]["missing_nodes"] == report["embeddings"]["eligible_nodes"], report
+    assert report["issues"], report
+    assert all(issue.startswith("Embedding coverage unavailable:")
+               for issue in report["issues"]), report
+
+
 def assert_bridge_advisory(report):
     warnings = [text for text in report["warnings"]
                 if "cross-domain" in text.lower()]
@@ -87,7 +97,7 @@ def test_repeated_fix_leaves_low_bridge_graph_unchanged(low_bridge_graph):
     db_path, doctor = low_bridge_graph
     before = persisted_state(db_path)
     initial = doctor()
-    assert initial["healthy"], initial
+    assert_no_issues_except_uninitialized_embeddings(initial)
     assert persisted_state(db_path) == before
 
     for _ in range(2):
@@ -95,7 +105,7 @@ def test_repeated_fix_leaves_low_bridge_graph_unchanged(low_bridge_graph):
         # Assert actual durable effects before checking reported fix counts:
         # the old random bridge suggestion behavior violates this invariant.
         assert persisted_state(db_path) == before
-        assert report["healthy"], report
+        assert_no_issues_except_uninitialized_embeddings(report)
         assert report["fixes_applied"] == 0, report
         assert_bridge_advisory(report)
     assert_bridge_advisory(initial)
@@ -127,7 +137,7 @@ def test_fts_repair_runs_once_without_enrichment_side_effects(low_bridge_graph):
         ).fetchall()) == 8
 
     second = doctor("--fix")
-    assert second["healthy"], second
+    assert_no_issues_except_uninitialized_embeddings(second)
     assert second["fixes_applied"] == 0, second
     assert persisted_state(db_path) == before
     assert_bridge_advisory(second)

@@ -1265,8 +1265,20 @@ Completed contextual requests are checkpointed locally in SQLite before the next
 request. Reuse requires the whole document generation and exact ordered group,
 so changed neighboring chunks cannot reuse obsolete contextual vectors. Partial
 checkpoints never appear in search. The previous complete generation stays until
-its replacement is validated and atomically published. Search with incompatible
-settings returns no vector results until a compatible generation is available.
+its replacement is validated and atomically published. Existing indexes are never
+automatically erased or rebuilt when embedding settings change, even if the new
+provider is explicitly configured. Missing
+legacy identity also cannot authorize replacement. Indexing and queue drains
+fail without provider calls or prompts, preserving vectors, metadata and pending
+work. Semantic search fails with an actionable fingerprint mismatch rather than
+silently falling back to keyword-only recall; MCP semantic tools return an error.
+Nonsemantic graph inspection remains available.
+
+Restore the matching provider/model/dimensions/strategy and chunk settings to
+reuse the existing index. Ordinary `kin embed reindex`, `enqueue` and `drain`
+never authorize erasure or migrate an incompatible index. Kindex does not provide
+a deliberate rebuild command; migration requires a separately reviewed procedure
+that preserves the existing data.
 
 `kin embed drain --time-budget 120` checks the budget between groups as well as
 nodes. One in-flight request can overrun by its existing HTTP timeout; hashing,
@@ -1289,11 +1301,22 @@ honors its caller's transaction; its checkpoints are durable only after commit.
 Inspect `kin embed plan --stale` before a broad rollout, then start with a bounded
 `kin embed drain --max-jobs 1 --time-budget 30 --json`. No automatic global
 fingerprint bump is introduced. Changed model/chunk settings or unknown legacy
-identity can still require paid work. Exactly-once charging is not guaranteed:
+identity are refused until compatibility is restored or a separately reviewed
+migration is completed. Exactly-once charging is not guaranteed:
 a provider may charge before a timeout, or a process/storage failure can occur
 after the response but before its checkpoint commits. Durable successful groups
 and complete generations prevent replay outside those windows. These defects
 and mitigations do not establish the cause of any particular provider bill.
+
+`kin doctor` and `kin embed status --json` report eligible, fresh, missing and
+stale/incomplete embedding coverage independently of queue length. Freshness
+requires current redacted text, matching configuration, complete contiguous
+chunks and retained vector rows. Metadata-only edits and an old timestamp alone
+do not make embeddings stale. The latest retained embedding update describes
+current vector rows, not provider attempt history or a guarantee of progress;
+missing, invalid or unreadable metadata is reported as unknown or unavailable.
+Doctor reports incomplete coverage, fingerprint mismatches and quarantine as
+issues. Its embedding diagnostics never reindex, including with `--fix`.
 
 ### Operational
 | Command | Description |

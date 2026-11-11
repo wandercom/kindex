@@ -1624,6 +1624,16 @@ def cmd_doctor(args):
                 embedding_queue = embedding_queue_diagnosis(store)
                 oversized_queue = embedding_queue["oversized"]
 
+    # ── Embedding coverage and content freshness ──
+    # Diagnosis never reindexes, including under --fix. An old retained vector
+    # timestamp is not a fault when the current text/fingerprint is fully indexed.
+    from .embedding_health import embedding_doctor_findings, embedding_health_lines
+    from .vectors import embedding_status
+    embeddings = embedding_status(store)
+    embedding_issues, embedding_warnings = embedding_doctor_findings(embeddings)
+    issues.extend(embedding_issues)
+    warnings.extend(embedding_warnings)
+
     # ── Oversized nodes ──
     # A knowledge node past this size is not knowledge; it is ingested build
     # output or a runaway merge. They dominate embedding cost and poison
@@ -1771,12 +1781,16 @@ def cmd_doctor(args):
             "task_owner_scan": task_owner_scan,
             "task_owner_findings": task_owner_findings,
             "task_owner_repairs": task_owner_repairs,
+            "embeddings": embeddings,
             "embedding_queue": {
                 key: value for key, value in embedding_queue.items()
                 if key != "oversized"
             } | {"oversized_inputs": len(oversized_queue)},
         }, indent=2))
     else:
+        for line in embedding_health_lines(embeddings):
+            print(line)
+        print()
         if issues:
             print(f"{len(issues)} issue(s):")
             for i in issues:
@@ -3790,6 +3804,8 @@ def cmd_embed(args):
     except Exception as e:
         print(f"Vector indexing failed: {e}", file=sys.stderr)
         print("Install dependencies: pip install kindex[vectors]", file=sys.stderr)
+        store.close()
+        raise SystemExit(1) from None
 
     store.close()
 
@@ -8763,6 +8779,7 @@ def main():
         SchemaMigrationError,
         UnsupportedSchemaVersionError,
     )
+    from .vectors import EmbeddingFingerprintMismatch
 
     parser = build_parser()
     args = parser.parse_args()
@@ -8789,6 +8806,7 @@ def main():
                 args.func(args)
             except (
                 ConfigResolutionError,
+                EmbeddingFingerprintMismatch,
                 ProfileMismatchError,
                 SchemaMigrationError,
                 UnsupportedSchemaVersionError,
