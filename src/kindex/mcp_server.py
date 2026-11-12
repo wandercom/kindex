@@ -1008,7 +1008,13 @@ def kinbase_sync(repo: str, mode: str = "auto") -> str:
 
 @_tool()
 def kinbase_status(repo: str) -> str:
-    """Report a repository's Kinbase certification, trusted facts and Unknowns.
+    """Report a repository's Kinbase certification, fact and event counts, and open Unknowns.
+
+    Facts, events and the query-log window come back only as counts
+    (`facts_omitted`, `events_omitted`, `query_log_omitted`), never the
+    records; past 1 MB the largest remaining section is dropped and named in
+    `omitted_for_size`. For the records behind one key use `kinbase_explain`
+    (or `kinbase status --json` on the CLI).
 
     USE THIS: before relying on company direction in a repository, to see
     whether Company was reachable at all. A withheld snapshot degrades the

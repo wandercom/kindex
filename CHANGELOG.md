@@ -4,6 +4,16 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- The `kinbase_status` MCP tool passed Kinbase's whole `status` document through,
+  including every fact, every event and the query-log window. Against the company
+  store that is about 190 MB of JSON, and MCP clients dropped the kindex connection
+  on it, taking every kindex tool down for the session. `facts` and `events` are now
+  reported as `facts_omitted` and `events_omitted` counts, and the query-log window's
+  rows are added to `query_log_omitted`. Past 1 MB the largest remaining section is
+  dropped and named in `omitted_for_size`. Certification, counts and Unknowns are
+  unchanged (about 210 KB for the same repository).
+
 ## [0.54.1] - 2026-11-09
 
 ### Fixed

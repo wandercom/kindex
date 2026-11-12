@@ -296,6 +296,14 @@ def _node(repo, identity, doc, mode, receipt):
 #: query shape failing loudly rather than this bound being wrong, and the
 #: extrapolation is one measured point, not a second measurement.
 STATUS_TIMEOUT_S = 30
+#: Status lists that reach tens of megabytes on a company store, reported as
+#: `<key>_omitted` counts. Kinbase already windows `query_log` and counts the
+#: rest in `query_log_omitted`, so dropping the window adds its rows there.
+STATUS_BULK_KEYS = ("facts", "events", "query_log")
+#: The most `kinbase_status` returns. 190 MB dropped MCP clients' connections and
+#: a status without the bulk lists measured about 210 KB, so this leaves roughly
+#: five times that headroom before any other list is dropped.
+MAX_STATUS_BYTES = 1024 * 1024
 SUBMIT_TIMEOUT_S = 30
 MAX_SUBMISSION_BYTES = 16 * 1024
 MAX_SUBMISSION_RECEIPT_BYTES = 64 * 1024
@@ -360,7 +368,22 @@ def read_status(repo: str | Path, *, binary="kinbase") -> dict:
     possible beats an unrecoverable one that is not.
     """
     root = Path(repo).expanduser().resolve(strict=True)
-    return _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
+    status = _query(["status", "--repo", str(root)], binary, STATUS_TIMEOUT_S)
+    # A company store's full fact list and query log run to tens of megabytes,
+    # which an MCP client drops the connection on. The counts carry the answer.
+    for key in STATUS_BULK_KEYS:
+        if isinstance(status.get(key), list):
+            status[f"{key}_omitted"] = status.get(f"{key}_omitted", 0) + len(status.pop(key))
+    # Any other list or section can grow too; drop the largest until it fits.
+    while len(json.dumps(status)) > MAX_STATUS_BYTES:
+        sizes = {key: len(json.dumps(value)) for key, value in status.items()
+                 if isinstance(value, (list, dict)) and key != "omitted_for_size"}
+        if not sizes:
+            break
+        key = max(sizes, key=sizes.get)
+        del status[key]
+        status.setdefault("omitted_for_size", []).append(key)
+    return status
 
 
 def read_explain(repo: str | Path, logical_key: str, decision: str, *,
