@@ -1547,6 +1547,13 @@ def _context_hits(stores, topic: str, top_k: int, client: str | None,
     return merged, warnings
 
 
+def _embedding_warning_notes(warnings) -> list[str]:
+    """Keep semantic omissions visible even when their graph contributes no hits."""
+    return [f"{graph.title()} graph: {grounding['embedding_warning']}"
+            for graph, (grounding, _) in warnings.items()
+            if grounding.get("embedding_warning")]
+
+
 def _render_context_sources(stores, results, warnings, *, topic: str, level: str,
                             client: str | None, evaluation_time: str,
                             trusted_only: bool = False, max_tokens: int = 0) -> str:
@@ -1559,15 +1566,11 @@ def _render_context_sources(stores, results, warnings, *, topic: str, level: str
         by_graph[row["_graph_source"]].append(row)
     contributing = [graph for graph in stores if by_graph[graph]]
     if not contributing:
-        return ""
+        return "\n".join(_embedding_warning_notes(warnings))
     aware = _graph_aware_session()
     total_budget = max_tokens if max_tokens > 0 else TIER_BUDGETS.get(level, 1500)
     headings = len(contributing) > 1 or aware or "global" in contributing
-    denied = []
-    for graph in stores:
-        warning = warnings[graph][0].get("embedding_warning")
-        if warning:
-            denied.append(f"{graph.title()} graph: {warning}")
+    denied = _embedding_warning_notes(warnings)
     if trusted_only:
         for graph in stores:
             if graph not in contributing:
@@ -1623,10 +1626,10 @@ def _render_evidence_sources(stores, results, warnings, *, budget: int, client: 
             by_graph[row["_graph_source"]].append(row)
     contributing = [graph for graph in stores if by_graph[graph]]
     if not contributing:
-        return "", 0
+        return "\n".join(_embedding_warning_notes(warnings)), 0
     aware = _graph_aware_session()
     headings = len(contributing) > 1 or aware or "global" in contributing
-    denied = []
+    denied = _embedding_warning_notes(warnings)
     if trusted_only:
         for graph in stores:
             omissions = warnings[graph][1] or {}
@@ -1704,10 +1707,11 @@ def context(
                 stores, topic, _get_config().ask.top_k if evidence else 15, client,
                 trusted_only=trusted_only, evaluation_time=now)
             if not results:
-                notes = ("\n" + "\n".join(
-                    f"{name}: {build_trust_note(warnings[name][1])}" for name in stores)
-                         if trusted_only else "")
-                return "No relevant knowledge found." + notes
+                notes = _embedding_warning_notes(warnings)
+                if trusted_only:
+                    notes.extend(f"{name}: {build_trust_note(warnings[name][1])}"
+                                 for name in stores)
+                return "No relevant knowledge found." + ("\n" + "\n".join(notes) if notes else "")
             if evidence:
                 text, _ = _render_evidence_sources(
                     stores, results, warnings, budget=max_tokens if max_tokens > 0 else MCP_EVIDENCE_TOKENS,
@@ -2324,7 +2328,9 @@ def ask(question: str, graph: str = "auto", answer: bool = False, max_tokens: in
                                  date_window(question, now[:10]), facts_first=complete,
                                  summaries_first=intent == "summary")
                 if not results:
-                    return f"[{qtype}] No relevant knowledge found for: {question}"
+                    notes = _embedding_warning_notes(warnings)
+                    return (f"[{qtype}] No relevant knowledge found for: {question}"
+                            + ("\n" + "\n".join(notes) if notes else ""))
                 breadth = needs_breadth(question, intent, complete)
                 if max_tokens > 0:
                     budget = max_tokens

@@ -167,6 +167,59 @@ class EmbeddingIndexSafetyTests(unittest.TestCase):
         self.assertIn("different-model", grounding["embedding_warning"])
 
 
+    def test_mcp_secondary_mismatch_warning_survives_all_evidence_paths(self):
+        from kindex import mcp_server as server
+
+        primary = self.store({"provider": "openai", "dimensions": 2}, name="primary")
+        primary.add_node("Primaryneedle", content="Project evidence", queue_embedding=False)
+        secondary = self.store({"provider": "openai", "dimensions": 2}, name="secondary")
+        self.seed(secondary)
+        before = self.vector_state(secondary)
+        readonly_config = secondary.config.model_copy(deep=True)
+        readonly_config.embedding.model = "different-model"
+        readonly = Store(readonly_config, read_only=True, migrate=False,
+                         manage_project_storage=False)
+        self.addCleanup(readonly.close)
+
+        @contextlib.contextmanager
+        def selected(*args, **kwargs):
+            yield primary, readonly
+
+        with patch.object(server, "_selected_read_stores", selected), \
+                patch.object(server, "_get_config", return_value=primary.config), \
+                patch.object(server, "_graph_aware_session", return_value=False):
+            for query in ("Existing node", "Primaryneedle", "Nohitsneedle"):
+                for surface in ("context", "evidence", "ask"):
+                    with self.subTest(query=query, surface=surface):
+                        if surface == "ask":
+                            output = server.ask(query)
+                        else:
+                            output = server.context(topic=query, level=(
+                                "evidence" if surface == "evidence" else "abridged"))
+                        self.assertIn("Global graph:", output)
+                        self.assertIn("read-only graph", output)
+                        self.assertIn("stored:", output)
+                        self.assertIn("current:", output)
+                        self.assertIn("different-model", output)
+                        if query == "Nohitsneedle":
+                            self.assertIn("No relevant knowledge found", output)
+                        else:
+                            self.assertIn(query, output)
+            # Evidence truncation must never erase the degradation warning.
+            for output in (server.ask("Existing node", max_tokens=1),
+                           server.context(topic="Existing node", level="evidence", max_tokens=1)):
+                self.assertIn("read-only graph", output)
+                self.assertIn("different-model", output)
+            with patch("kindex.answer.answer_client", return_value=object()), \
+                    patch("kindex.answer.plan_question", return_value=("factual", [], False)), \
+                    patch("kindex.answer.draft_answer", return_value="Drafted answer") as draft:
+                output = server.ask("Existing node", answer=True)
+                self.assertIn("read-only graph", draft.call_args.args[2])
+                self.assertIn("read-only graph", output)
+                self.assertIn("Drafted answer", output)
+        self.assertEqual(self.vector_state(secondary), before)
+
+
     def test_nonsemantic_task_nearby_does_not_use_vectors(self):
         from kindex.cli import _cmd_task
         from kindex import retrieve
