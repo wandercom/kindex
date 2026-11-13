@@ -4,6 +4,28 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Fixed
+- Incompatible embedding fingerprints and unknown legacy index identity now fail
+  closed without erasing vectors, metadata or pending work. Explicit provider
+  settings and ordinary indexing commands do not authorize index replacement.
+  Restore matching settings to reuse the index; migration is a separate procedure.
+- Semantic CLI/MCP retrieval surfaces actionable fingerprint errors instead of
+  silently hiding incompatible vector results. Scheduled drains fail without
+  prompts or provider calls, and unexpected embedding CLI failures exit nonzero.
+- A stale `vec_meta` identity without a vector table no longer blocks creating a
+  fresh index. An uninitialized optional index reports 0/N coverage as a doctor
+  warning. Read-only secondary graphs retain lexical/graph results with an
+  explicit warning when their vector identity differs; nonsemantic task-nearby
+  and optional compact-hook context remain available.
+- Fingerprint errors show stored and current provider/model/dimension/strategy,
+  and `kin embed status` prints the same coverage and identity details in human
+  output as it already did in JSON.
+
+### Added
+- `kin doctor` and `kin embed status` report embedding coverage, content
+  freshness, quarantine and the latest retained vector update. Timestamp age alone is not
+  an error, and diagnostics do not reindex, including under `doctor --fix`.
+
 ## [0.54.1] - 2026-11-09
 
 ### Fixed

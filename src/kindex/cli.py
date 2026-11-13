@@ -1624,6 +1624,16 @@ def cmd_doctor(args):
                 embedding_queue = embedding_queue_diagnosis(store)
                 oversized_queue = embedding_queue["oversized"]
 
+    # ── Embedding coverage and content freshness ──
+    # Diagnosis never reindexes, including under --fix. An old retained vector
+    # timestamp is not a fault when the current text/fingerprint is fully indexed.
+    from .embedding_health import embedding_doctor_findings, embedding_health_lines
+    from .vectors import embedding_status
+    embeddings = embedding_status(store)
+    embedding_issues, embedding_warnings = embedding_doctor_findings(embeddings)
+    issues.extend(embedding_issues)
+    warnings.extend(embedding_warnings)
+
     # ── Oversized nodes ──
     # A knowledge node past this size is not knowledge; it is ingested build
     # output or a runaway merge. They dominate embedding cost and poison
@@ -1771,12 +1781,16 @@ def cmd_doctor(args):
             "task_owner_scan": task_owner_scan,
             "task_owner_findings": task_owner_findings,
             "task_owner_repairs": task_owner_repairs,
+            "embeddings": embeddings,
             "embedding_queue": {
                 key: value for key, value in embedding_queue.items()
                 if key != "oversized"
             } | {"oversized_inputs": len(oversized_queue)},
         }, indent=2))
     else:
+        for line in embedding_health_lines(embeddings):
+            print(line)
+        print()
         if issues:
             print(f"{len(issues)} issue(s):")
             for i in issues:
@@ -2603,7 +2617,12 @@ def _emit_compact_context(store, args, topic: str, *, force: bool = False) -> No
     if not (force or getattr(args, "emit_context", False)) or not topic:
         return
     from .retrieve import format_context_block, hybrid_search
-    results = hybrid_search(store, topic, top_k=5)
+    from .vectors import EmbeddingFingerprintMismatch
+    try:
+        results = hybrid_search(store, topic, top_k=5)
+    except EmbeddingFingerprintMismatch as exc:
+        print(f"Optional context unavailable: {exc}", file=sys.stderr)
+        return
     print(format_context_block(store, results, query=topic, level="executive"))
 
 
@@ -3725,6 +3744,7 @@ def cmd_embed(args):
         if args.json:
             print(_dumps(result, indent=2))
         elif action == "status":
+            from .embedding_health import embedding_health_lines
             print(f"Provider: {result['provider']} / {result['model']}")
             print(f"Strategy: {result['strategy']} "
                   f"(contextual_supported={result['contextual_supported']})")
@@ -3738,6 +3758,8 @@ def cmd_embed(args):
                 print(f"  {group['count']} × {group['kind']}{code} — {group['message']}")
             print(f"Drain complete: {result.get('drain_complete', False)}")
             print(f"Coverage complete: {result.get('coverage_complete', False)}")
+            for line in embedding_health_lines(result):
+                print(line)
         elif action == "calibrate":
             if result.get("status") == "uncalibrated":
                 print(f"No calibration record for "
@@ -3790,6 +3812,8 @@ def cmd_embed(args):
     except Exception as e:
         print(f"Vector indexing failed: {e}", file=sys.stderr)
         print("Install dependencies: pip install kindex[vectors]", file=sys.stderr)
+        store.close()
+        raise SystemExit(1) from None
 
     store.close()
 
@@ -4710,7 +4734,9 @@ def _cmd_task(args, store):
         domains = detect_domain_from_path(store, cwd)
         topic = " ".join(domains) if domains else os.path.basename(cwd)
 
-        results = hybrid_search(store, topic, top_k=5)
+        # Nearby-task discovery is a local graph convenience, not semantic
+        # search; an unrelated vector identity must not make it fail.
+        results = hybrid_search(store, topic, top_k=5, use_vectors=False)
         seed_ids = [r["id"] for r in results]
 
         tasks = nearby_tasks(store, seed_ids, max_hops=2)
@@ -8763,6 +8789,7 @@ def main():
         SchemaMigrationError,
         UnsupportedSchemaVersionError,
     )
+    from .vectors import EmbeddingFingerprintMismatch
 
     parser = build_parser()
     args = parser.parse_args()
@@ -8789,6 +8816,7 @@ def main():
                 args.func(args)
             except (
                 ConfigResolutionError,
+                EmbeddingFingerprintMismatch,
                 ProfileMismatchError,
                 SchemaMigrationError,
                 UnsupportedSchemaVersionError,

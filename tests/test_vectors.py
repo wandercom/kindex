@@ -293,6 +293,13 @@ class TestEmbedTextDispatch:
                 "CREATE TABLE node_vectors (node_id TEXT PRIMARY KEY, embedding BLOB)"
             )
             vectors._ensure_vector_meta_table(store)
+            # The mocked index is compatible, not a legacy index with unknown identity.
+            store.conn.execute("CREATE TABLE vec_meta (key TEXT PRIMARY KEY, value TEXT)")
+            store.conn.executemany("INSERT INTO vec_meta(key,value) VALUES (?,?)", [
+                ("embedding_fingerprint", vectors.embedding_fingerprint(store.config)),
+                ("embedding_dim", str(vectors._get_embedding_dim(store.config))),
+            ])
+            store.conn.commit()
             monkeypatch.setattr(vectors, "ensure_vec_table", lambda store: True)
             monkeypatch.setattr(vectors, "_embed_document_chunks", lambda text, config, *, embed_one: [
                 {

@@ -680,10 +680,66 @@ def _embedding_savepoint(store: Store):
         raise
 
 
+class EmbeddingFingerprintMismatch(RuntimeError):
+    """Semantic retrieval is unsafe until the existing index identity matches."""
+
+
+def _embedding_index_mismatch_message(store: Store) -> str:
+    """Describe both persisted and configured embedding identities."""
+    try:
+        metadata = dict(store.conn.execute(
+            "SELECT key, value FROM vec_meta "
+            "WHERE key IN ('embedding_fingerprint', 'embedding_dim')"
+        ).fetchall())
+    except Exception:
+        metadata = {}
+
+    def describe(fingerprint: str, dimensions: str) -> str:
+        try:
+            identity = json.loads(fingerprint)
+            parts = [identity.get("provider", "?"), identity.get("model", "?"),
+                     f"{identity.get('dimensions', dimensions)}d",
+                     identity.get("strategy", "?")]
+            for key in ("chunk_chars", "chunk_overlap_chars", "max_group_chunks"):
+                if key in identity:
+                    parts.append(f"{key}={identity[key]}")
+            return "/".join(parts)
+        except (TypeError, ValueError):
+            return f"{fingerprint}, {dimensions}d"
+
+    stored = describe(metadata.get("embedding_fingerprint", "not recorded"),
+                      metadata.get("embedding_dim", "?"))
+    current = describe(embedding_fingerprint(store.config),
+                       str(_get_embedding_dim(store.config)))
+    return (
+        f"Embedding fingerprint mismatch (stored: {stored}; current: {current}). "
+        "Restore the matching stored configuration. Existing vectors and queued work "
+        "are preserved; migration requires a separately reviewed procedure."
+    )
+
+
+def _embedding_index_mismatch(store: Store) -> bool:
+    """Inspect identity without creating, repairing, or dropping vector state."""
+    if store.conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_vectors'"
+    ).fetchone() is None:
+        return False
+    # Missing legacy identity cannot prove compatibility either.
+    if store.conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_meta'"
+    ).fetchone() is None:
+        return True
+    metadata = dict(store.conn.execute(
+        "SELECT key, value FROM vec_meta WHERE key IN ('embedding_fingerprint', 'embedding_dim')"
+    ).fetchall())
+    return (metadata.get("embedding_fingerprint") != embedding_fingerprint(store.config)
+            or metadata.get("embedding_dim") != str(_get_embedding_dim(store.config)))
+
+
 def ensure_vec_table(store: Store) -> bool:
     """Create the vector table if sqlite-vec is available.
 
-    Handles provider/model/strategy changes by recreating the table.
+    Existing incompatible indexes are never automatically replaced.
     """
     if not _check_vec():
         return False
@@ -715,6 +771,9 @@ def ensure_vec_table(store: Store) -> bool:
         sqlite_vec.load(store.conn)
         store.conn.enable_load_extension(False)
 
+        if _embedding_index_mismatch(store):
+            print(f"Warning: {_embedding_index_mismatch_message(store)}", file=sys.stderr)
+            return False
         with _embedding_savepoint(store):
             # Check if dimension changed (provider switch)
             store.conn.execute(
@@ -741,14 +800,8 @@ def ensure_vec_table(store: Store) -> bool:
                     ).fetchone() is not None):
                 return True
 
-            if ((stored_dim and stored_dim != dim)
-                    or (table_exists and stored_fingerprint != fingerprint)):
-                reason = f"dimension changed ({stored_dim} -> {dim})"
-                if table_exists and stored_fingerprint != fingerprint:
-                    reason = "embedding provider/model/strategy changed"
-                print(f"{reason}. Recreating vector table.", file=sys.stderr)
-                store.conn.execute("DROP TABLE IF EXISTS node_vectors")
-                store.conn.execute("DROP TABLE IF EXISTS node_vector_meta")
+            # A stale vec_meta record without a vector table has no index to
+            # preserve. The identity is replaced below as the new table is made.
 
             store.conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS node_vectors USING vec0(
@@ -981,6 +1034,10 @@ def _upsert_embedding_outcome(store: Store, node_id: str, text: str) -> _Embeddi
         with _embedding_writer_lock(store) as acquired:
             if not acquired:
                 return _EmbeddingOutcome(False, kind="busy", message="Another embedding writer is active")
+            if _embedding_index_mismatch(store):
+                message = _embedding_index_mismatch_message(store)
+                print(f"Warning: {message}", file=sys.stderr)
+                return _EmbeddingOutcome(False, kind="fingerprint_mismatch", message=message)
             node = _read_node_for_embedding(store, node_id)
             fingerprint = embedding_fingerprint(store.config)
             if _EMBED_CURRENT_ONLY.get() and (not node or _embedding_text_for_node(node) != text):
@@ -1547,6 +1604,14 @@ def _drain_embedding_queue(store: Store, config: Config | None = None, *,
     time_budget = float(time_budget)
     queue = _load_embedding_queue(store)
     quarantine = _load_embedding_quarantine(store)
+    if _embedding_index_mismatch(store):
+        message = _embedding_index_mismatch_message(store)
+        print(f"Warning: {message}", file=sys.stderr)
+        return {"status": "failed", "embedded": 0, "failed": 1, "attempted": 0,
+                "errors": [{"kind": "fingerprint_mismatch", "http_status": None,
+                            "message": message}],
+                "pending": len(queue), "quarantined": len(quarantine),
+                "drain_complete": False, "coverage_complete": False}
     if not queue:
         return {"status": "empty", "embedded": 0, "pending": 0,
                 "quarantined": len(quarantine), "drain_complete": True,
@@ -1640,7 +1705,7 @@ def _drain_embedding_queue(store: Store, config: Config | None = None, *,
                 failures.append({"kind": outcome.kind or "embedding_error",
                                  "http_status": outcome.http_status,
                                  "message": outcome.message or "Embedding failed"})
-            if outcome.kind in {"authentication_error", "time_budget", "busy", "storage_error", "indexing_refused"}:
+            if outcome.kind in {"authentication_error", "time_budget", "busy", "storage_error", "indexing_refused", "fingerprint_mismatch"}:
                 break
         if not outcome.ok and outcome.kind != "time_budget":
             print(f"Embedding attempt {attempts} failed: {outcome.kind or 'embedding_error'}"
@@ -1693,6 +1758,11 @@ def _node_embedding_fresh(store: Store, node: dict, fingerprint: str) -> bool:
         ).fetchall()
     except Exception:
         return False
+    return _embedding_rows_fresh(rows, text_hash, fingerprint)
+
+
+def _embedding_rows_fresh(rows, text_hash: str, fingerprint: str) -> bool:
+    """Shared completeness predicate for reindex selection and diagnostics."""
     count = len(rows)
     return bool(count and {row["chunk_index"] for row in rows} == set(range(count))
                 and all(row["chunk_count"] == count and row["stored_vector"] is not None
@@ -1840,6 +1910,12 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
     reason = _embedding_policy_refusal(store.config, source_paths=(filters.get("project_path"),))
     if reason:
         return _indexing_refusal_result(store, reason)
+    if _embedding_index_mismatch(store):
+        message = _embedding_index_mismatch_message(store)
+        print(f"Warning: {message}", file=sys.stderr)
+        return {"status": "failed", "embedded": 0, "failed": 1,
+                "errors": [{"kind": "fingerprint_mismatch", "message": message}],
+                "queue_pending": _embedding_queue_len(store)}
     nodes = select_reindex_nodes(store, **filters)
     plan = estimate_reindex_cost(nodes, store.config)
     if not _check_vec():
@@ -1860,7 +1936,7 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
             failed += 1
             print(f"Embedding failed: {outcome.kind or 'embedding_error'} "
                   f"(HTTP {outcome.http_status or 'n/a'})", file=sys.stderr)
-            if outcome.kind in {"authentication_error", "storage_error", "indexing_refused"}:
+            if outcome.kind in {"authentication_error", "storage_error", "indexing_refused", "fingerprint_mismatch"}:
                 break
     plan.update({
         "status": "failed" if failed else "ok",
@@ -1875,9 +1951,10 @@ def reindex_now(store: Store, *, verbose: bool = False, **filters) -> dict:
 def embedding_status(store: Store, *, coverage: bool = True) -> dict:
     """Return current embedding configuration and queue/index status.
 
-    `coverage=False` skips the per-node freshness scan (the whole graph, one
-    query per node); `coverage_complete` is then None. The cron pass needs
-    only the queue length and ran the scan two or three times per pass."""
+    `coverage=False` skips coverage/freshness assessment entirely and leaves
+    `coverage_complete` as None. Keep the scheduled queue-status path cheap;
+    the explicit coverage path scans eligible content and vector metadata once.
+    No provider call, queue change, or index initialization is performed."""
     provider, model, dims, api_key_env = _resolve_embedding_config(store.config)
     quarantine = _load_embedding_quarantine(store)
     groups: dict[tuple[str, int | None, str], int] = {}
@@ -1918,17 +1995,17 @@ def embedding_status(store: Store, *, coverage: bool = True) -> dict:
         status["indexed_nodes"] = store.conn.execute(
             "SELECT COUNT(DISTINCT node_id) FROM node_vector_meta"
         ).fetchone()[0]
-        if not coverage:
-            return status
-        eligible = [node for node in select_reindex_nodes(store) if _embedding_text_for_node(node)]
-        fingerprint = status["fingerprint"]
-        status["coverage_complete"] = (
-            not status["queue_pending"]
-            and not status["quarantined"]
-            and all(_node_embedding_fresh(store, node, fingerprint) for node in eligible)
-        )
     except Exception:
-        status["coverage_complete"] = False if coverage else None
+        pass  # Coverage assessment below reports missing/unreadable index state.
+    if coverage:
+        from .embedding_health import embedding_coverage
+        status.update(embedding_coverage(store))
+        status["coverage_complete"] = (
+            status["coverage_state"] in {"complete", "empty"}
+            and not status["fingerprint_mismatch"]
+            and not status["queue_pending"]
+            and not status["quarantined"]
+        )
     return status
 
 
@@ -1997,11 +2074,10 @@ def vector_search(store: Store, query: str, top_k: int = 10,
     if top_k <= 0:
         return []
     try:
-        table_exists = store.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'node_vectors'").fetchone()
-        if table_exists:
-            existing = store.conn.execute("SELECT value FROM vec_meta WHERE key = 'embedding_fingerprint'").fetchone()
-            if not existing or existing[0] != embedding_fingerprint(store.config):
-                return []
+        if _embedding_index_mismatch(store):
+            raise EmbeddingFingerprintMismatch(_embedding_index_mismatch_message(store))
+    except EmbeddingFingerprintMismatch:
+        raise
     except AttributeError:
         # A custom store may initialize its connection in ensure_vec_table.
         pass
@@ -2124,7 +2200,7 @@ def index_all_nodes(store: Store, verbose: bool = False) -> int:
             count += 1
             if verbose:
                 print(f"  Embedded: {node['title']}")
-        elif outcome.kind in {"authentication_error", "storage_error", "indexing_refused"}:
+        elif outcome.kind in {"authentication_error", "storage_error", "indexing_refused", "fingerprint_mismatch"}:
             print(f"Embedding failed: {outcome.kind}", file=sys.stderr)
             break
 
