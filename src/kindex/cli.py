@@ -3726,7 +3726,8 @@ def cmd_embed(args):
                 except EOFError:
                     return False
 
-            result = rebuild_embeddings(store, confirm, verbose=getattr(args, "verbose", False))
+            result = rebuild_embeddings(
+                store, confirm, verbose=getattr(args, "verbose", False) and not args.json)
         elif action == "status":
             result = embedding_status(store)
         elif action == "calibrate":

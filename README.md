@@ -1343,10 +1343,12 @@ A SQLite-consistent, integrity-checked backup is required before reset. The prin
 backup path lives in the per-database `embedding-rebuilds` snapshot pool under
 `$XDG_STATE_HOME/kindex/snapshots` (default `~/.local/state/kindex/snapshots`) and is
 not rotated by ordinary dream snapshots. Only derived vectors, their identity,
-chunk/checkpoint metadata, and embedding queue/quarantine state are replaced;
-nodes, edges, FTS and graph history are preserved. Same-identity rebuilds also
-recompute fresh vectors. Semantic search is interrupted during rebuilding; this
-is **not** an atomic index switchover.
+chunk/checkpoint metadata, and embedding queue/quarantine state are replaced.
+The target model's active grounding calibration is invalidated; calibration history,
+other models' calibrations, nodes, edges, FTS and graph history are preserved.
+Same-identity rebuilds also recompute fresh vectors. Run `kin embed calibrate`
+after rebuilding to measure a new floor. Semantic search is interrupted during
+rebuilding; this is **not** an atomic index switchover.
 
 A later provider failure returns nonzero and reports the backup path. Successful
 new vectors and checkpoints remain. With the same graph/configuration selected,

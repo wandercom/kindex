@@ -141,6 +141,7 @@ def assert_backup_preserved(graph, output, original_state):
         assert conn.execute("SELECT * FROM edges ORDER BY 1").fetchall() == graph["durable"]["edges"]
     finally:
         conn.close()
+    return paths[0]
 
 
 @pytest.mark.parametrize("answer,interactive", [("n\n", True), ("\n", True), ("", True), ("", False)])
@@ -326,6 +327,8 @@ def test_backup_path_is_reported_before_provider_interrupts_rebuild(graph, monke
 
 
 def test_target_index_creation_failure_rolls_back_original_index(graph, monkeypatch, capsys):
+    graph["target"] = graph["configure"](model="text-embedding-3-small", dimensions=3)
+    calibration_before = seed_calibrations(graph)
     before = state(graph["original"])
     open_selected_store = cli._store
     storage_events = []
@@ -354,4 +357,90 @@ def test_target_index_creation_failure_rolls_back_original_index(graph, monkeypa
     assert code != 0
     assert state(graph["original"]) == before
     assert_graph_preserved(graph)
-    assert_backup_preserved(graph, output, before)
+    backup = assert_backup_preserved(graph, output, before)
+    from kindex.grounding import load_calibration
+    with closing(Store(graph["original"], manage_project_storage=False)) as store:
+        assert calibration_metadata(store.conn) == calibration_before
+        assert load_calibration(store, "openai", "text-embedding-3-small") is not None
+    with closing(sqlite3.connect(backup)) as conn:
+        assert calibration_metadata(conn) == calibration_before
+
+
+def test_json_verbose_rebuild_keeps_stdout_machine_readable(graph, monkeypatch, capsys):
+    before = state(graph["original"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(sys, "argv", [
+        "kin", "embed", "rebuild", "--yes", "--json", "--verbose",
+        "--config", str(graph["config"]),
+    ])
+    code = 0
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    captured = capsys.readouterr()
+    assert code == 0, captured.out + captured.err
+    result = json.loads(captured.out)
+    assert result["status"] == "ok"
+    assert "text-embedding-3-small" in captured.err
+    assert "text-embedding-3-large" in captured.err
+    assert_backup_preserved(graph, captured.err, before)
+
+
+
+def calibration_metadata(connection):
+    return dict(connection.execute(
+        "SELECT key, value FROM meta WHERE key LIKE 'grounding.calibration.%'"))
+
+
+def seed_calibrations(graph):
+    from kindex.grounding import CalibrationRecord, save_calibration
+
+    with closing(Store(graph["original"], manage_project_storage=False)) as store:
+        # Two historical generations for the rebuilding model and an unrelated
+        # model's active record must remain independently auditable.
+        for model, timestamp, floor in (
+            ("text-embedding-3-small", "2026-01-01T00:00:00", 0.8),
+            ("text-embedding-3-small", "2026-02-01T00:00:00", 0.9),
+            ("text-embedding-3-large", "2026-03-01T00:00:00", 0.7),
+        ):
+            save_calibration(store, CalibrationRecord(
+                provider="openai", model=model, floor=floor, percentile=95,
+                sample_size=20, corpus_node_count=2, embedding_count=2,
+                calibrated_at=timestamp))
+        return calibration_metadata(store.conn)
+
+
+def test_rebuild_invalidates_only_target_model_active_calibration(graph, monkeypatch, capsys):
+    from kindex.grounding import (CALIBRATION_META_PREFIX, UNCALIBRATED,
+                                  evaluate, load_calibration)
+
+    # A dimension change retains the provider/model key and final vector count,
+    # so coverage counts alone cannot establish that the old floor is obsolete.
+    graph["target"] = graph["configure"](model="text-embedding-3-small", dimensions=3)
+    graph["target"].grounding.enforce = True
+    graph["config"].write_text(json.dumps(graph["target"].model_dump(mode="json")))
+    calibration_before = seed_calibrations(graph)
+    before = state(graph["original"])
+    hits = [(next(iter(graph["ids"])), 0.5)]
+    with closing(Store(graph["original"], manage_project_storage=False)) as store:
+        verdict = evaluate(store, graph["target"], hits,
+                           provider="openai", model="text-embedding-3-small")
+        assert verdict.enforced and verdict.dropped == 1
+
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
+    assert code == 0, output
+    assert len(state(graph["target"])["node_vectors"]) == 2
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert load_calibration(store, "openai", "text-embedding-3-small") is None
+        expected = dict(calibration_before)
+        del expected[f"{CALIBRATION_META_PREFIX}openai:text-embedding-3-small"]
+        assert calibration_metadata(store.conn) == expected
+        verdict = evaluate(store, graph["target"], hits,
+                           provider="openai", model="text-embedding-3-small")
+        assert verdict.verdict == UNCALIBRATED
+        assert not verdict.enforced and verdict.dropped == 0
+    assert_graph_preserved(graph)
+    backup = assert_backup_preserved(graph, output, before)
+    with closing(sqlite3.connect(backup)) as conn:
+        assert calibration_metadata(conn) == calibration_before

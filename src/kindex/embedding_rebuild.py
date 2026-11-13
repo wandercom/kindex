@@ -118,8 +118,11 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
                     raise ValueError("Graph or embedding configuration changed before reset; preview again")
                 for table in ("node_vectors", "node_vector_meta", "vec_meta", "embedding_checkpoints"):
                     store.conn.execute(f"DROP TABLE IF EXISTS {table}")
-                store.conn.execute("DELETE FROM meta WHERE key IN (?, ?)",
-                                   (vectors.EMBED_QUEUE_META, vectors.EMBED_QUARANTINE_META))
+                from .grounding import CALIBRATION_META_PREFIX
+                provider, model, _, _ = vectors._resolve_embedding_config(store.config)
+                store.conn.execute("DELETE FROM meta WHERE key IN (?, ?, ?)",
+                                   (vectors.EMBED_QUEUE_META, vectors.EMBED_QUARANTINE_META,
+                                    f"{CALIBRATION_META_PREFIX}{provider}:{model}"))
                 if not vectors.ensure_vec_table(store):
                     raise RuntimeError("Target vector index could not be initialized")
                 from .snapshots import RESTORE_HINT
