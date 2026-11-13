@@ -3662,7 +3662,7 @@ def cmd_embed(args):
     """
     store = _store(args)
     action = getattr(args, "embed_action", None) or "index"
-    if action in {"index", "enqueue", "drain", "reindex"}:
+    if action in {"index", "enqueue", "drain", "reindex", "rebuild"}:
         from .project_store import content_indexing_refusal
         reason = content_indexing_refusal(store.config, source_paths=(
             getattr(args, "kin", None), getattr(args, "target", None)))
@@ -3699,7 +3699,35 @@ def cmd_embed(args):
             plan_embedding_reindex,
             reindex_now,
         )
-        if action == "status":
+        if action == "rebuild":
+            from .embedding_rebuild import rebuild_embeddings
+
+            def confirm(plan):
+                output = sys.stderr if args.json else sys.stdout
+                print(f"Rebuild embedding index in: {plan['database']}", file=output)
+                print(f"Stored fingerprint: {plan['stored_fingerprint'] or 'not recorded'}", file=output)
+                print(f"Target fingerprint: {plan['target_fingerprint']}", file=output)
+                print(f"Eligible nodes: {plan['nodes']}", file=output)
+                print(f"Estimated tokens: {plan['estimated_tokens']} "
+                      f"(includes a {plan['preflight_estimated_tokens']}-token readiness probe)", file=output)
+                cost = plan['estimated_cost_usd']
+                print(f"Estimated cost: ${cost:.6f}" if cost is not None
+                      else "Estimated cost: unavailable for this provider/model", file=output)
+                print("Existing derived vectors will be replaced after backup. "
+                      "Semantic search is interrupted until rebuilding completes. "
+                      "Graph nodes and edges are preserved.", file=output)
+                if getattr(args, "yes", False):
+                    return True
+                if not sys.stdin.isatty():
+                    return False
+                try:
+                    print("Replace this embedding index? [y/N] ", end="", file=output, flush=True)
+                    return input().strip().lower() in {"y", "yes"}
+                except EOFError:
+                    return False
+
+            result = rebuild_embeddings(store, confirm, verbose=getattr(args, "verbose", False))
+        elif action == "status":
             result = embedding_status(store)
         elif action == "calibrate":
             from .grounding import calibrate, load_calibration
@@ -3743,6 +3771,17 @@ def cmd_embed(args):
             result = reindex_now(store, status="active", verbose=getattr(args, "verbose", False))
         if args.json:
             print(_dumps(result, indent=2))
+        elif action == "rebuild":
+            print(f"Embedding rebuild: {result['status']}; {result.get('embedded', 0)} embedded, "
+                  f"{result.get('failed', 0)} failed.")
+            if result.get("message"):
+                print(result["message"])
+            if result.get("backup"):
+                print(f"Backup: {result['backup']}")
+                from .snapshots import RESTORE_HINT
+                print(RESTORE_HINT)
+            if result.get("resume"):
+                print(f"Resume missing/stale work: {result['resume']} (with the same graph selection).")
         elif action == "status":
             from .embedding_health import embedding_health_lines
             print(f"Provider: {result['provider']} / {result['model']}")
@@ -3806,7 +3845,7 @@ def cmd_embed(args):
                       f"({result.get('failed', 0)} failed).")
         else:
             print(f"Embedded {result['embedded']} nodes for vector search.")
-        if result.get("status") in {"failed", "persistence_error", "unavailable", "refused"}:
+        if result.get("status") in {"failed", "persistence_error", "unavailable", "refused", "cancelled"}:
             store.close()
             raise SystemExit(1)
     except Exception as e:
@@ -8003,6 +8042,12 @@ def build_parser() -> argparse.ArgumentParser:
             es.add_argument("--verbose", "-v", action="store_true")
         _common(es)
         es.set_defaults(func=cmd_embed)
+
+    es = embed_sub.add_parser("rebuild", help="Back up and explicitly replace all derived vectors")
+    es.add_argument("--yes", action="store_true", help="Approve replacement without an interactive prompt")
+    es.add_argument("--verbose", "-v", action="store_true")
+    _common(es)
+    es.set_defaults(func=cmd_embed)
 
     es = embed_sub.add_parser("drain", help="Drain queued embedding work")
     es.add_argument("--max-jobs", type=int, help="Maximum queued nodes to embed")

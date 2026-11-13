@@ -69,7 +69,7 @@ def snapshot_db(
     reason: str,
     *,
     state_dir: Path | str | None = None,
-    keep: int = DEFAULT_KEEP,
+    keep: int | None = DEFAULT_KEEP,
 ) -> Path:
     """Snapshot the live DB via the SQLite backup API; return the new path.
 
@@ -103,7 +103,7 @@ def snapshot_connection(
     reason: str,
     *,
     state_dir: Path | str | None = None,
-    keep: int = DEFAULT_KEEP,
+    keep: int | None = DEFAULT_KEEP,
 ) -> Path:
     """Snapshot an open SQLite connection without requiring a current schema.
 

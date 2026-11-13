@@ -1240,6 +1240,7 @@ Code structure lives in the same graph as your decisions, watches, and constrain
 | `kin skills [person]` | Skill profile and expertise for a person |
 | `kin embed` | Index nodes for vector similarity search |
 | `kin embed plan/enqueue/reindex/drain/status` | Scoped embedding maintenance for full or gradual reindexing |
+| `kin embed rebuild` | Explicitly confirmed, backed-up replacement of all derived vectors |
 
 `embedding.provider: voyage` uses `voyage-context-4` by default. When the
 configured model supports contextual chunk embeddings, Kindex stores stable
@@ -1277,9 +1278,9 @@ inspection remains available.
 
 Restore the matching provider/model/dimensions/strategy and chunk settings to
 reuse the existing index. Ordinary `kin embed reindex`, `enqueue` and `drain`
-never authorize erasure or migrate an incompatible index. Kindex does not provide
-a deliberate rebuild command; migration requires a separately reviewed procedure
-that preserves the existing data.
+never authorize erasure or migrate an incompatible index. For deliberate derived-vector
+replacement, review [explicit embedding index replacement](#explicit-embedding-index-replacement)
+and use `kin embed rebuild` with its backup and confirmation safeguards.
 
 `kin embed drain --time-budget 120` checks the budget between groups as well as
 nodes. One in-flight request can overrun by its existing HTTP timeout; hashing,
@@ -1302,8 +1303,8 @@ honors its caller's transaction; its checkpoints are durable only after commit.
 Inspect `kin embed plan --stale` before a broad rollout, then start with a bounded
 `kin embed drain --max-jobs 1 --time-budget 30 --json`. No automatic global
 fingerprint bump is introduced. Changed model/chunk settings or unknown legacy
-identity are refused until compatibility is restored or a separately reviewed
-migration is completed. Exactly-once charging is not guaranteed:
+identity are refused until compatibility is restored or an explicit, backed-up
+`kin embed rebuild` is approved. Exactly-once charging is not guaranteed:
 a provider may charge before a timeout, or a process/storage failure can occur
 after the response but before its checkpoint commits. Durable successful groups
 and complete generations prevent replay outside those windows. These defects
@@ -1318,6 +1319,44 @@ current vector rows, not provider attempt history or a guarantee of progress;
 missing, invalid or unreadable metadata is reported as unknown or unavailable.
 Doctor reports incomplete coverage, fingerprint mismatches and quarantine as
 issues. Its embedding diagnostics never reindex, including with `--fix`.
+
+### Explicit embedding index replacement
+
+Ordinary indexing refuses a different provider/model/dimensions/strategy and
+preserves the existing index. To deliberately replace derived vectors, first set
+the desired embedding identity in your own Kindex configuration, then run:
+
+```bash
+kin embed rebuild --data-dir /path/to/selected/graph
+# Automation must approve the same destructive operation explicitly:
+kin embed rebuild --data-dir /path/to/selected/graph --yes --json
+```
+
+The command shows the selected database, stored and configured target identities,
+eligible node count, and estimated tokens/cost (including a small readiness probe;
+cost is unknown for unpriced models). Confirmation defaults to **no**; unattended
+runs require `--yes`. Credentials and the vector backend must be available. Only
+after confirmation does a provider probe validate the target response, before any
+vectors are removed. No provider defaults or user configuration are changed.
+
+A SQLite-consistent, integrity-checked backup is required before reset. The printed
+backup path lives in the per-database `embedding-rebuilds` snapshot pool under
+`$XDG_STATE_HOME/kindex/snapshots` (default `~/.local/state/kindex/snapshots`) and is
+not rotated by ordinary dream snapshots. Only derived vectors, their identity,
+chunk/checkpoint metadata, and embedding queue/quarantine state are replaced;
+nodes, edges, FTS and graph history are preserved. Same-identity rebuilds also
+recompute fresh vectors. Semantic search is interrupted during rebuilding; this
+is **not** an atomic index switchover.
+
+A later provider failure returns nonzero and reports the backup path. Successful
+new vectors and checkpoints remain. With the same graph/configuration selected,
+resume missing/stale work with `kin embed reindex --stale`; do not repeat rebuild
+unless you intend another reset. To restore the original backup, stop every
+Kindex daemon/MCP/CLI writer, move the live database's `-wal` and `-shm` sidecars
+aside, copy the backup over the selected database, and restore the original
+embedding configuration before reopening. Restoring the full database also
+reverts graph edits made after that backup. There is no automatic rollback or
+restore command.
 
 ### Operational
 | Command | Description |
