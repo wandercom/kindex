@@ -4,6 +4,13 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+- Explicit `kin embed rebuild` with default-no confirmation, target preflight,
+  validated SQLite backup, and resumable replacement of derived vectors. The
+  target model's active grounding calibration is invalidated; calibration history
+  is retained. JSON output remains machine-readable with verbose diagnostics.
+  Existing indexing remains non-destructive.
+
 ## [0.54.2] - 2026-11-12
 
 ### Fixed
