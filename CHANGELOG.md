@@ -4,6 +4,8 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.54.2] - 2026-11-12
+
 ### Fixed
 - Incompatible embedding fingerprints and unknown legacy index identity now fail
   closed without erasing vectors, metadata or pending work. Explicit provider
