@@ -1339,6 +1339,12 @@ runs require `--yes`. Credentials and the vector backend must be available. Only
 after confirmation does a provider probe validate the target response, before any
 vectors are removed. No provider defaults or user configuration are changed.
 
+Pause other Kindex clients/daemons that write to the selected graph while
+confirming and preflighting the rebuild. Reads that record access metadata also
+count as writes. Any concurrent write in this window refuses the rebuild and
+asks for a fresh preview; no vectors are replaced. Pure read-only clients may
+remain open. The embedding-writer lock separately excludes competing indexers.
+
 A SQLite-consistent, integrity-checked backup is required before reset. The printed
 backup path lives in the per-database `embedding-rebuilds` snapshot pool under
 `$XDG_STATE_HOME/kindex/snapshots` (default `~/.local/state/kindex/snapshots`) and is

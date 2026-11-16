@@ -168,6 +168,7 @@ def test_approved_rebuild_recomputes_and_keeps_recovery_backup(graph, monkeypatc
     config_bytes = graph["config"].read_bytes()
     code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
     assert code == 0, output
+    assert "Resume missing/stale work:" not in output
     after = state(graph["target"])
     assert after["node_vectors"] != before["node_vectors"]
     assert len(after["node_vectors"]) == 2
@@ -358,6 +359,7 @@ def test_target_index_creation_failure_rolls_back_original_index(graph, monkeypa
     assert state(graph["original"]) == before
     assert_graph_preserved(graph)
     backup = assert_backup_preserved(graph, output, before)
+    assert "Resume missing/stale work:" not in output
     from kindex.grounding import load_calibration
     with closing(Store(graph["original"], manage_project_storage=False)) as store:
         assert calibration_metadata(store.conn) == calibration_before
@@ -385,6 +387,51 @@ def test_json_verbose_rebuild_keeps_stdout_machine_readable(graph, monkeypatch, 
     assert "text-embedding-3-small" in captured.err
     assert "text-embedding-3-large" in captured.err
     assert_backup_preserved(graph, captured.err, before)
+
+
+def test_access_metadata_change_during_confirmation_explains_quiescence(graph, monkeypatch, capsys):
+    before = state(graph["original"])
+    touches = []
+    node_id = next(iter(graph["ids"]))
+    with closing(Store(graph["original"], manage_project_storage=False)) as store:
+        store.conn.execute("UPDATE nodes SET last_accessed = '2000-01-01' WHERE id = ?", (node_id,))
+        store.conn.commit()
+
+    def concurrent_read():
+        with closing(Store(graph["original"], manage_project_storage=False)) as store:
+            assert store.get_node(node_id)
+        touches.append(True)
+
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", answer="y\n", interactive=True,
+                          before_answer=concurrent_read)
+    assert touches
+    assert code != 0
+    assert "pause other Kindex clients/daemons" in output
+    assert graph["provider"].calls == []
+    assert state(graph["original"]) == before
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_auxiliary_sqlite_connections_close_on_return(graph, monkeypatch, capsys, confirmed):
+    connect = sqlite3.connect
+    auxiliary = []
+
+    def track_connection(database, *args, **kwargs):
+        connection = connect(database, *args, **kwargs)
+        if str(database) == ":memory:" or str(database).endswith("?mode=ro"):
+            auxiliary.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", track_connection)
+    args = ["rebuild", "--yes"] if confirmed else ["rebuild"]
+    code, output = invoke(graph, monkeypatch, capsys, *args)
+    assert code == (0 if confirmed else 1), output
+    assert auxiliary
+    if confirmed:
+        assert len(auxiliary) > 1  # Probe(s) and the actual backup reader ran.
+    for connection in auxiliary:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
 
 
 

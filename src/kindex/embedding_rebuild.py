@@ -6,11 +6,14 @@ import os
 import sqlite3
 import sys
 from collections.abc import Callable
+from contextlib import closing
 
 from . import vectors
 from .privacy import safe_error, redacting_print as print
 
 _PROBE = "Kindex embedding rebuild readiness probe."
+_CHANGED = ("Graph or embedding configuration changed; pause other Kindex clients/daemons "
+            "that write to this graph and preview again")
 
 
 def _stored_identity(store) -> dict:
@@ -50,7 +53,7 @@ def _check_target(store) -> None:
         raise ValueError("sqlite-vec is unavailable; install kindex[vectors]")
     # Validate the target backend/dimensions without touching the retained index.
     import sqlite_vec
-    with sqlite3.connect(":memory:") as connection:
+    with closing(sqlite3.connect(":memory:")) as connection:
         connection.enable_load_extension(True)
         sqlite_vec.load(connection)
         connection.enable_load_extension(False)
@@ -69,6 +72,7 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
     keep their existing mismatch refusal. Approval never changes configuration.
     """
     plan = {"database": str(store.db_path.resolve()), "backup": None}
+    reset_committed = False
     try:
         with vectors._embedding_writer_lock(store) as acquired:
             if not acquired:
@@ -88,7 +92,7 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
             if not confirm(plan):
                 return {**plan, "status": "cancelled", "message": "Rebuild was not confirmed; index preserved"}
             if approved != _approval_state(store):
-                return {**plan, "status": "refused", "message": "Graph or embedding configuration changed; preview again"}
+                return {**plan, "status": "refused", "message": _CHANGED}
             _check_target(store)
             # This paid probe is permitted only after approval. A bad credential,
             # unsupported model or invalid vector response cannot erase the index.
@@ -98,7 +102,7 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
                     or not all(math.isfinite(value) for value in sample)):
                 raise ValueError("Target embedding readiness probe failed or returned invalid dimensions")
             if approved != _approval_state(store):
-                raise ValueError("Graph or embedding configuration changed during preflight; preview again")
+                raise ValueError(_CHANGED)
             _check_target(store)
             from .snapshots import _default_state_root, snapshot_connection
             # Hold the SQLite write reservation across backup/reset. Use a
@@ -107,15 +111,15 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
             store.conn.execute("BEGIN IMMEDIATE")
             try:
                 if approved != _approval_state(store):
-                    raise ValueError("Graph or embedding configuration changed before backup; preview again")
-                with sqlite3.connect(store.db_path.resolve().as_uri() + "?mode=ro", uri=True) as source:
+                    raise ValueError(_CHANGED)
+                with closing(sqlite3.connect(store.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as source:
                     backup = snapshot_connection(
                         store.db_path, source, "embedding-rebuild",
                         state_dir=_default_state_root() / "embedding-rebuilds", keep=None)
                 plan["backup"] = str(backup)
                 print(f"Embedding rebuild backup: {backup}", file=sys.stderr, flush=True)
                 if approved != _approval_state(store):
-                    raise ValueError("Graph or embedding configuration changed before reset; preview again")
+                    raise ValueError(_CHANGED)
                 for table in ("node_vectors", "node_vector_meta", "vec_meta", "embedding_checkpoints"):
                     store.conn.execute(f"DROP TABLE IF EXISTS {table}")
                 from .grounding import CALIBRATION_META_PREFIX
@@ -132,6 +136,7 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
                     "target_fingerprint": plan["target_fingerprint"],
                 })
                 store.conn.commit()
+                reset_committed = True
             except BaseException:
                 store.conn.rollback()
                 raise
@@ -139,8 +144,9 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
             result.update(database=plan["database"], backup=plan["backup"],
                           stored_fingerprint=plan["stored_fingerprint"],
                           target_fingerprint=plan["target_fingerprint"])
-            result["resume"] = "kin embed reindex --stale"
+            if result.get("status") != "ok" or result.get("queue_pending", 0):
+                result["resume"] = "kin embed reindex --stale"
             return result
     except Exception as error:
         return {**plan, "status": "failed", "message": safe_error(error),
-                "resume": "kin embed reindex --stale" if plan["backup"] else None}
+                "resume": "kin embed reindex --stale" if reset_committed and plan.get("nodes") else None}

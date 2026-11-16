@@ -3709,7 +3709,7 @@ def cmd_embed(args):
                 print(f"Target fingerprint: {plan['target_fingerprint']}", file=output)
                 print(f"Eligible nodes: {plan['nodes']}", file=output)
                 print(f"Estimated tokens: {plan['estimated_tokens']} "
-                      f"(includes a {plan['preflight_estimated_tokens']}-token readiness probe)", file=output)
+                      f"(readiness probe: {plan['preflight_estimated_tokens']} tokens)", file=output)
                 cost = plan['estimated_cost_usd']
                 print(f"Estimated cost: ${cost:.6f}" if cost is not None
                       else "Estimated cost: unavailable for this provider/model", file=output)
