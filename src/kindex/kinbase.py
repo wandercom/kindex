@@ -375,7 +375,8 @@ def read_status(repo: str | Path, *, binary="kinbase") -> dict:
         if isinstance(status.get(key), list):
             status[f"{key}_omitted"] = status.get(f"{key}_omitted", 0) + len(status.pop(key))
     # Any other list or section can grow too; drop the largest until it fits.
-    while len(json.dumps(status)) > MAX_STATUS_BYTES:
+    # Measured as `kinbase_status` sends it (indent=2), roughly twice compact.
+    while len(json.dumps(status, indent=2)) > MAX_STATUS_BYTES:
         sizes = {key: len(json.dumps(value)) for key, value in status.items()
                  if isinstance(value, (list, dict)) and key != "omitted_for_size"}
         if not sizes:

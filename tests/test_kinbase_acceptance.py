@@ -647,6 +647,24 @@ def test_read_status_drops_the_largest_section_past_the_size_bound(
                                     "omitted_for_size": ["observations"]}
 
 
+def test_read_status_bound_is_measured_as_the_tool_sends_it(
+        store, repo, monkeypatch, tmp_path):
+    """kinbase_status replies with indent=2, so a status that fits compact but
+    not indented must still be trimmed."""
+    import json
+    from kindex import kinbase as kb
+
+    payload = {"status": "unverified", "observations": ["x"] * 60}
+    monkeypatch.setattr(kb, "MAX_STATUS_BYTES", 500)
+    assert len(json.dumps(payload)) < 500 < len(json.dumps(payload, indent=2))
+    stub = read_stub(tmp_path, "indented", payload)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    result = kb.read_status(repo)
+    assert result["omitted_for_size"] == ["observations"]
+    assert len(json.dumps(result, indent=2)) <= 500
+
+
+
 def test_read_only_tools_return_a_refusal_document_rather_than_raising(
         store, repo, monkeypatch, tmp_path):
     """Kinbase writes refusals as typed documents on stdout. Raising would drop
