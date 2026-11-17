@@ -617,6 +617,53 @@ def test_read_only_tools_never_invoke_project(store, repo, monkeypatch, tmp_path
     assert all(line.split()[-1] == "--json" for line in invocations)
 
 
+def test_read_status_reports_bulk_lists_as_counts(store, repo, monkeypatch, tmp_path):
+    """A company store's facts and query log reach tens of megabytes, which an
+    MCP client drops the connection on; status keeps Unknowns and counts."""
+    from kindex import kinbase as kb
+
+    payload = {"status": "unverified", "facts": [{"k": i} for i in range(3)],
+               "events": [{}], "query_log": [{}, {}], "query_log_total": 7,
+               "query_log_omitted": 5, "unknowns": [{"id": "u1"}]}
+    stub = read_stub(tmp_path, "bulk", payload)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    assert kb.read_status(repo) == {"status": "unverified", "unknowns": [{"id": "u1"}],
+                                    "facts_omitted": 3, "events_omitted": 1,
+                                    "query_log_total": 7, "query_log_omitted": 7}
+
+
+def test_read_status_drops_the_largest_section_past_the_size_bound(
+        store, repo, monkeypatch, tmp_path):
+    """A list outside the known bulk keys can grow too; status stays under the
+    bound by dropping the largest section and naming it."""
+    from kindex import kinbase as kb
+
+    monkeypatch.setattr(kb, "MAX_STATUS_BYTES", 2000)
+    payload = {"status": "unverified", "observations": ["x" * 100] * 30,
+               "unknowns": [{"id": "u1"}]}
+    stub = read_stub(tmp_path, "large", payload)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    assert kb.read_status(repo) == {"status": "unverified", "unknowns": [{"id": "u1"}],
+                                    "omitted_for_size": ["observations"]}
+
+
+def test_read_status_bound_is_measured_as_the_tool_sends_it(
+        store, repo, monkeypatch, tmp_path):
+    """kinbase_status replies with indent=2, so a status that fits compact but
+    not indented must still be trimmed."""
+    import json
+    from kindex import kinbase as kb
+
+    payload = {"status": "unverified", "observations": ["x"] * 60}
+    monkeypatch.setattr(kb, "MAX_STATUS_BYTES", 500)
+    assert len(json.dumps(payload)) < 500 < len(json.dumps(payload, indent=2))
+    stub = read_stub(tmp_path, "indented", payload)
+    monkeypatch.setattr(kb.shutil, "which", lambda name: stub)
+    result = kb.read_status(repo)
+    assert result["omitted_for_size"] == ["observations"]
+    assert len(json.dumps(result, indent=2)) <= 500
+
+
 def test_read_only_tools_return_a_refusal_document_rather_than_raising(
         store, repo, monkeypatch, tmp_path):
     """Kinbase writes refusals as typed documents on stdout. Raising would drop
