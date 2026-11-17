@@ -664,7 +664,6 @@ def test_read_status_bound_is_measured_as_the_tool_sends_it(
     assert len(json.dumps(result, indent=2)) <= 500
 
 
-
 def test_read_only_tools_return_a_refusal_document_rather_than_raising(
         store, repo, monkeypatch, tmp_path):
     """Kinbase writes refusals as typed documents on stdout. Raising would drop
