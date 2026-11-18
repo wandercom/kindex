@@ -154,7 +154,8 @@ def embedding_doctor_findings(status: dict) -> tuple[list[str], list[str]]:
         issues.append(
             "Embedding fingerprint mismatch: the stored index does not match the current "
             "provider/model/dimensions/strategy. Restore the matching embedding configuration. "
-            "Keep the existing index and pending work; migration requires a separately reviewed procedure.")
+            "Keep the existing index and pending work. For deliberate destructive replacement, "
+            "use kin embed rebuild with its required backup and explicit confirmation.")
     if status["coverage_state"] == "unavailable":
         issues.append(f"Embedding coverage unavailable: {status['coverage_error']}. "
                       "Inspect the local embedding backend/schema before reindexing.")

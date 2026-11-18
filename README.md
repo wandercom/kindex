@@ -1338,6 +1338,7 @@ cost is unknown for unpriced models). Confirmation defaults to **no**; unattende
 runs require `--yes`. Credentials and the vector backend must be available. Only
 after confirmation does a provider probe validate the target response, before any
 vectors are removed. No provider defaults or user configuration are changed.
+Every client of a shared graph must resolve the same embedding identity after a rebuild.
 
 Pause other Kindex clients/daemons that write to the selected graph while
 confirming and preflighting the rebuild. Reads that record access metadata also
@@ -1348,8 +1349,11 @@ remain open. The embedding-writer lock separately excludes competing indexers.
 A SQLite-consistent, integrity-checked backup is required before reset. The printed
 backup path lives in the per-database `embedding-rebuilds` snapshot pool under
 `$XDG_STATE_HOME/kindex/snapshots` (default `~/.local/state/kindex/snapshots`) and is
-not rotated by ordinary dream snapshots. Only derived vectors, their identity,
-chunk/checkpoint metadata, and embedding queue/quarantine state are replaced.
+not rotated by ordinary dream snapshots. Each rebuild retains a full-database copy
+until the operator deletes it manually; there is no automatic pruning of these backups.
+Only derived vectors, their identity, chunk/checkpoint metadata, and the embedding
+queue are replaced. Quarantine records matching the target identity and current
+text are preserved; obsolete records cannot block a changed identity or input.
 The target model's active grounding calibration is invalidated; calibration history,
 other models' calibrations, nodes, edges, FTS and graph history are preserved.
 Same-identity rebuilds also recompute fresh vectors. Run `kin embed calibrate`
@@ -1357,9 +1361,13 @@ after rebuilding to measure a new floor. Semantic search is interrupted during
 rebuilding; this is **not** an atomic index switchover.
 
 A later provider failure returns nonzero and reports the backup path. Successful
-new vectors and checkpoints remain. With the same graph/configuration selected,
-resume missing/stale work with `kin embed reindex --stale`; do not repeat rebuild
-unless you intend another reset. To restore the original backup, stop every
+new vectors and checkpoints remain, and retryable failures remain queued. With the
+same graph/configuration selected, resume queued work with `kin embed drain`; do not
+repeat rebuild unless you intend another reset. Inspect `kin embed status` for
+quarantined inputs: deterministic rejections require correcting the input or
+deliberately choosing a compatible embedding identity, not repeated reindex attempts.
+`kin embed reindex --stale` does not honor quarantine and cannot finish inputs the
+provider continues to reject. To restore the original backup, stop every
 Kindex daemon/MCP/CLI writer, move the live database's `-wal` and `-shm` sidecars
 aside, copy the backup over the selected database, and restore the original
 embedding configuration before reopening. Restoring the full database also

@@ -42,10 +42,14 @@ RESTORE_HINT = (
 )
 
 
-def _default_state_root() -> Path:
+def default_state_root() -> Path:
+    """Configured snapshot root; callers may isolate a non-rotating pool below it."""
     base = os.environ.get("XDG_STATE_HOME", "").strip()
     root = Path(base) if base else Path.home() / ".local" / "state"
     return root / "kindex" / "snapshots"
+
+
+_default_state_root = default_state_root  # Compatibility for existing callers.
 
 
 def snapshot_dir_for(db_path: Path, state_dir: Path | str | None = None) -> Path:

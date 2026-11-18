@@ -35,14 +35,14 @@ class FakeProvider:
 
 
 @pytest.fixture
-def graph(tmp_path, monkeypatch):
+def graph(tmp_path, monkeypatch, request):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key-for-offline-test")
     provider = FakeProvider()
     monkeypatch.setattr("urllib.request.urlopen", provider)
     cfg = Config(data_dir=str(tmp_path / "graph"), embedding={
         "provider": "openai", "model": "text-embedding-3-small",
-        "dimensions": 2, "strategy": "single"})
+        "dimensions": getattr(request, "param", 2), "strategy": "single"})
     store = Store(cfg, manage_project_storage=False)
     alpha = store.add_node("alpha", content="alpha durable graph evidence", queue_embedding=False)
     beta = store.add_node("beta", content="beta durable graph evidence", queue_embedding=False)
@@ -168,7 +168,7 @@ def test_approved_rebuild_recomputes_and_keeps_recovery_backup(graph, monkeypatc
     config_bytes = graph["config"].read_bytes()
     code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
     assert code == 0, output
-    assert "Resume missing/stale work:" not in output
+    assert "Resume queued work:" not in output
     after = state(graph["target"])
     assert after["node_vectors"] != before["node_vectors"]
     assert len(after["node_vectors"]) == 2
@@ -201,7 +201,7 @@ def test_readiness_and_backup_fail_closed(graph, monkeypatch, capsys, failure):
     assert "fake-key-for-offline-test" not in output
 
 
-def test_partial_failure_keeps_successful_work_and_stale_resume(graph, monkeypatch, capsys):
+def test_partial_failure_keeps_successful_work_and_queued_resume(graph, monkeypatch, capsys):
     before = state(graph["original"])
     graph["provider"].value = 0.7
     graph["provider"].fail_text = "beta"
@@ -212,16 +212,98 @@ def test_partial_failure_keeps_successful_work_and_stale_resume(graph, monkeypat
     partial = state(graph["target"])
     assert len(partial["node_vectors"]) == 1
     assert_graph_preserved(graph)
-    assert "reindex" in output and "stale" in output
+    assert "kin embed drain" in output
     graph["provider"].fail_text = None
     graph["provider"].calls.clear()
-    code, output = invoke(graph, monkeypatch, capsys, "reindex", "--stale")
+    code, output = invoke(graph, monkeypatch, capsys, "drain")
     assert code == 0, output
     complete = state(graph["target"])
     assert len(complete["node_vectors"]) == 2
     assert set(partial["node_vectors"]).issubset(set(complete["node_vectors"]))
     assert not any("alpha" in str(call["input"]) for call in graph["provider"].calls)
     assert any("beta" in str(call["input"]) for call in graph["provider"].calls)
+
+
+@pytest.mark.parametrize("prequarantined", [True, False])
+@pytest.mark.parametrize("graph", [1536], indirect=True)
+def test_rebuild_tracks_terminal_input_without_unfinishable_resume(graph, monkeypatch, capsys, prequarantined):
+    graph["target"] = graph["configure"](model="text-embedding-3-small", dimensions=1536)
+    with closing(Store(graph["original"], manage_project_storage=False)) as store:
+        bad = store.add_node("oversized", content="word " * 12000, queue_embedding=True)
+        if prequarantined:
+            vectors.quarantine_oversized_queue_items(store)
+            record = json.loads(store.get_meta(vectors.EMBED_QUARANTINE_META))["items"][bad]
+            assert record["kind"] == "input_too_large"
+    provider = graph["provider"]
+
+    def reject_oversized(request, **kwargs):
+        if "word word" in str(json.loads(request.data).get("input")):
+            provider.calls.append(json.loads(request.data))
+            raise HTTPError(request.full_url, 400, "input too long", {},
+                            io.BytesIO(b'{"error":{"code":"input_too_large"}}'))
+        return provider(request, **kwargs)
+
+    monkeypatch.setattr("urllib.request.urlopen", reject_oversized)
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
+    assert code == 1, output
+    assert "kin embed reindex --stale" not in output
+    assert "quarantin" in output.lower()
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        quarantine = json.loads(store.get_meta(vectors.EMBED_QUARANTINE_META))["items"]
+        assert quarantine[bad]["kind"] == "input_too_large"
+        assert quarantine[bad]["fingerprint"] == vectors.embedding_fingerprint(graph["target"])
+        if prequarantined:
+            assert quarantine[bad] == record
+        assert len(state(graph["target"])["node_vectors"]) == 2
+        assert json.loads(store.get_meta(vectors.EMBED_QUEUE_META)) == []
+    assert sum("word word" in str(call.get("input")) for call in provider.calls) == (0 if prequarantined else 1)
+    calls = len(provider.calls)
+    code, output = invoke(graph, monkeypatch, capsys, "drain")
+    assert len(provider.calls) == calls
+
+
+def test_rebuild_missing_database_refuses_without_creating_it(graph, monkeypatch, capsys):
+    target = graph["target"].model_copy(deep=True)
+    target.data_dir = str(graph["root"] / "mistyped" / "graph")
+    graph["config"].write_text(json.dumps(target.model_dump(mode="json")))
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
+    assert code == 1
+    assert "existing database" in output.lower()
+    assert not Path(target.data_dir).exists()
+    assert graph["provider"].calls == []
+
+
+def test_rebuild_voyage_contextual_groups_use_contextual_endpoint(graph, monkeypatch, capsys):
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-voyage-key-for-offline-test")
+    graph["target"] = graph["configure"](
+        provider="voyage", model="voyage-context-4", dimensions=3, strategy="contextual",
+        chunk_chars=32, chunk_overlap_chars=0, max_group_chunks=2)
+    calls = []
+
+    def voyage(request, **kwargs):
+        body = json.loads(request.data)
+        calls.append((request.full_url, body))
+        assert request.full_url == "https://api.voyageai.com/v1/contextualizedembeddings"
+        assert body["model"] == "voyage-context-4"
+        assert body["output_dimension"] == 3
+        return io.BytesIO(json.dumps({"data": [{"data": [
+            {"index": i, "embedding": [0.2, 0.3, 0.4]}
+            for i, chunk in enumerate(body["inputs"][0])]}]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", voyage)
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
+    assert code == 0, output
+    assert len(calls) >= 3  # Readiness plus both documents' contextual groups.
+    assert calls[0][1]["inputs"] == [["Kindex embedding rebuild readiness probe."]]
+    assert all(body["input_type"] == "document" for _, body in calls)
+    assert all(1 <= len(body["inputs"][0]) <= 2 for _, body in calls[1:])
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        status = vectors.embedding_status(store)
+        assert status["fresh_nodes"] == status["eligible_nodes"] == 2
+        assert status["vector_rows"] > 2
+        rows = store.conn.execute("SELECT node_id, fingerprint FROM node_vector_meta").fetchall()
+        assert {row["node_id"] for row in rows} == graph["ids"]
+        assert {row["fingerprint"] for row in rows} == {vectors.embedding_fingerprint(graph["target"])}
 
 
 def test_ordinary_cli_reindex_never_rebuilds_incompatible_index(graph, monkeypatch, capsys):
@@ -232,6 +314,8 @@ def test_ordinary_cli_reindex_never_rebuilds_incompatible_index(graph, monkeypat
     assert graph["provider"].calls == []
     assert_graph_preserved(graph)
     assert "fingerprint" in output.lower()
+    assert output.index("Restore the matching") < output.index("kin embed rebuild")
+    assert "destructive replacement" in output
 
 
 def test_explicit_interactive_approval_can_rebuild(graph, monkeypatch, capsys):
@@ -359,7 +443,7 @@ def test_target_index_creation_failure_rolls_back_original_index(graph, monkeypa
     assert state(graph["original"]) == before
     assert_graph_preserved(graph)
     backup = assert_backup_preserved(graph, output, before)
-    assert "Resume missing/stale work:" not in output
+    assert "Resume queued work:" not in output
     from kindex.grounding import load_calibration
     with closing(Store(graph["original"], manage_project_storage=False)) as store:
         assert calibration_metadata(store.conn) == calibration_before

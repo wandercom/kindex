@@ -3782,7 +3782,7 @@ def cmd_embed(args):
                 from .snapshots import RESTORE_HINT
                 print(RESTORE_HINT)
             if result.get("resume"):
-                print(f"Resume missing/stale work: {result['resume']} (with the same graph selection).")
+                print(f"Resume queued work: {result['resume']} (with the same graph selection).")
         elif action == "status":
             from .embedding_health import embedding_health_lines
             print(f"Provider: {result['provider']} / {result['model']}")

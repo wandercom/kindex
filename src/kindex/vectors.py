@@ -24,7 +24,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -714,7 +714,8 @@ def _embedding_index_mismatch_message(store: Store) -> str:
     return (
         f"Embedding fingerprint mismatch (stored: {stored}; current: {current}). "
         "Restore the matching stored configuration. Existing vectors and queued work "
-        "are preserved; migration requires a separately reviewed procedure."
+        "are preserved. For deliberate destructive replacement, use kin embed rebuild "
+        "with its required backup and explicit confirmation."
     )
 
 
@@ -902,7 +903,7 @@ def embed_document_chunks(text: str, config: Config | None = None) -> list[dict]
 
 
 @contextmanager
-def _embedding_writer_lock(store: Store):
+def embedding_writer_lock(store: Store):
     """Serialize paid writers per graph without holding a SQLite transaction.
 
     flock is released by the OS on process death. Do not unlink the lock file:
@@ -930,6 +931,10 @@ def _embedding_writer_lock(store: Store):
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+# Retain the existing internal entry point for callers outside the rebuild API.
+_embedding_writer_lock = embedding_writer_lock
 
 
 def _ensure_embedding_checkpoints(store: Store) -> None:
@@ -1883,6 +1888,78 @@ def estimate_reindex_cost(nodes: list[dict], config: Config | None = None) -> di
         "strategy": strategy,
         "fingerprint": embedding_fingerprint(config),
     }
+
+
+_REBUILD_PROBE = "Kindex embedding rebuild readiness probe."
+
+
+def validate_embedding_rebuild_target(store: Store) -> None:
+    """Check policy, credential presence and backend without paid calls or reset.
+
+    The caller owns graph selection, approval and the embedding writer lock.
+    Raises on refusal; never changes embedding configuration or derived vectors.
+    """
+    import sqlite3
+
+    reason = _embedding_policy_refusal(store.config)
+    if reason:
+        raise ValueError(reason)
+    if getattr(store, "read_only", False):
+        raise ValueError("Rebuild requires a writable selected graph")
+    if store.conn.in_transaction:
+        raise ValueError("Commit or roll back the current transaction before rebuilding")
+    provider, model, dimensions, key_env = _resolve_embedding_config(store.config)
+    if provider not in PROVIDER_DEFAULTS or not model or dimensions <= 0:
+        raise ValueError("Unsupported embedding provider, model, or dimensions")
+    if provider != "local" and not os.environ.get(key_env, "").strip():
+        raise ValueError(f"Required embedding credential is not set: {key_env}")
+    if provider == "local" and _get_model(model) is None:
+        raise ValueError("Configured local embedding model is unavailable")
+    if not _check_vec():
+        raise ValueError("sqlite-vec is unavailable; install kindex[vectors]")
+    import sqlite_vec
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+        connection.enable_load_extension(False)
+        connection.execute(f"CREATE VIRTUAL TABLE probe USING vec0(embedding float[{dimensions}])")
+    store.conn.enable_load_extension(True)
+    try:
+        sqlite_vec.load(store.conn)
+    finally:
+        store.conn.enable_load_extension(False)
+
+
+def plan_embedding_rebuild(store: Store) -> tuple[list[dict], dict]:
+    """Read all eligible nonempty nodes and estimate full rebuild plus paid probe."""
+    nodes = [node for node in select_reindex_nodes(store) if _embedding_text_for_node(node)]
+    plan = estimate_reindex_cost(nodes, store.config)
+    provider, model, _, _ = _resolve_embedding_config(store.config)
+    probe_tokens = _estimate_tokens(_REBUILD_PROBE)
+    plan.update(provider=provider, model=model, preflight_estimated_tokens=probe_tokens)
+    plan["estimated_tokens"] += probe_tokens
+    if plan["estimated_cost_usd"] is not None:
+        plan["estimated_cost_usd"] += probe_tokens / 1_000_000 * plan["price_per_million_tokens"]
+    return nodes, plan
+
+
+def probe_embedding_rebuild_target(store: Store) -> None:
+    """Make one paid readiness probe, only after the caller has explicit approval."""
+    sample = _embed_text_or_raise(_REBUILD_PROBE, store.config)
+    if (sample is None or len(sample) != _get_embedding_dim(store.config)
+            or not all(math.isfinite(value) for value in sample)):
+        raise ValueError("Target embedding readiness probe failed or returned invalid dimensions")
+
+
+def stage_embedding_rebuild_queue(store: Store, node_ids: list[str]) -> None:
+    """Stage the complete selected set with reset in the caller's transaction.
+
+    No bounded-enqueue truncation. Keep text/fingerprint-scoped quarantine;
+    ordinary drain owns matching, terminal classification and retry tracking.
+    """
+    if not store.conn.in_transaction:
+        raise ValueError("Rebuild queue staging requires the reset transaction")
+    _write_embedding_meta(store, node_ids, _load_embedding_quarantine(store), commit=False)
 
 
 def plan_embedding_reindex(store: Store, **filters) -> dict:
