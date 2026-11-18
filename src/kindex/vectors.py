@@ -6,7 +6,8 @@ Enables semantic similarity search when installed:
 
 Supports multiple embedding providers:
     - voyage: Voyage AI Embeddings API (requires VOYAGE_API_KEY) — recommended default
-    - openai: OpenAI Embeddings API (requires OPENAI_API_KEY)
+    - openai: OpenAI Embeddings API (requires OPENAI_API_KEY), or any
+      OpenAI-compatible /v1/embeddings server via embedding.base_url
     - gemini: Google Gemini Embeddings API (requires GEMINI_API_KEY)
     - local: sentence-transformers (requires separate pip install sentence-transformers)
 
@@ -51,6 +52,8 @@ PROVIDER_DEFAULTS = {
     "gemini": {"model": "gemini-embedding-001", "dimensions": 3072, "api_key_env": "GEMINI_API_KEY"},
     "voyage": {"model": "voyage-context-4", "dimensions": 1024, "api_key_env": "VOYAGE_API_KEY"},
 }
+
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 EMBED_QUEUE_META = "embed.queue"
 EMBED_QUARANTINE_META = "embed.quarantine.v1"
@@ -275,6 +278,15 @@ def _resolve_embedding_config(config: Config | None) -> tuple[str, str, int, str
     return provider, model, dims, api_key_env
 
 
+def _openai_base_url(config: Config | None) -> str:
+    """Configured OpenAI-compatible base URL, or "" for the OpenAI API itself."""
+    ec = getattr(config, "embedding", None) if config is not None else None
+    base_url = (getattr(ec, "base_url", "") or "").strip()
+    if base_url.rstrip("/") == OPENAI_BASE_URL:
+        return ""
+    return base_url
+
+
 def _embedding_options(config: Config | None) -> _EmbeddingOptions:
     """Return embedding tuning options with defaults for old configs."""
     ec = getattr(config, "embedding", None) if config is not None else None
@@ -371,33 +383,92 @@ def _embed_local(text: str, model_name: str) -> list[float] | None:
     return embedding.tolist()
 
 
-def _embed_openai(text: str, model: str, dimensions: int, api_key_env: str) -> list[float] | None:
-    """Embed text using OpenAI Embeddings API."""
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        print(f"Warning: {api_key_env} not set. Cannot embed text.", file=sys.stderr)
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface redirects as HTTP errors instead of following them.
+
+    urllib carries the Authorization header to the redirect target, so a
+    user-configured endpoint must not be able to forward the key elsewhere.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def _urlopen_no_redirect(req: urllib.request.Request, timeout: float):
+    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
+
+def _openai_compatible_embeddings_url(base_url: str) -> str | None:
+    """Return ``<base_url>/embeddings`` for an http(s) base URL, else None."""
+    from urllib.parse import urlsplit
+
+    base = base_url.strip().rstrip("/")
+    try:
+        parts = urlsplit(base)
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return None
+    return f"{base}/embeddings"
+
+
+def _embed_openai(
+    text: str,
+    model: str,
+    dimensions: int,
+    api_key_env: str,
+    *,
+    base_url: str = "",
+) -> list[float] | None:
+    """Embed text using the OpenAI Embeddings API or an OpenAI-compatible server.
+
+    With ``base_url`` set (Ollama, LM Studio, llama.cpp, vLLM, ...), the API
+    key is optional and is read only from an explicitly configured
+    ``api_key_env``, so a default ``OPENAI_API_KEY`` is never sent to another
+    host. ``dimensions`` is likewise sent only when explicitly configured,
+    because many local servers reject or ignore it.
+    """
+    if base_url:
+        url = _openai_compatible_embeddings_url(base_url)
+        if url is None:
+            print("Warning: embedding.base_url must be an http(s) URL without credentials, "
+                  "query or fragment. Cannot embed text.", file=sys.stderr)
+            return None
+        api_key = os.environ.get(api_key_env) if api_key_env else None
+        if api_key_env and not api_key:
+            print(f"Warning: {api_key_env} not set. Cannot embed text.", file=sys.stderr)
+            return None
+        opener = _urlopen_no_redirect
+    else:
+        url = f"{OPENAI_BASE_URL}/embeddings"
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            print(f"Warning: {api_key_env} not set. Cannot embed text.", file=sys.stderr)
+            return None
+        opener = urllib.request.urlopen
 
     body: dict[str, object] = {"input": text, "model": model}
     if dimensions:
         body["dimensions"] = dimensions
 
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
         req = urllib.request.Request(
-            "https://api.openai.com/v1/embeddings",
+            url,
             data=json.dumps(redact(body)).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
+            headers=headers,
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with opener(req, timeout=30) as resp:
             result = json.loads(resp.read().decode())
             return result["data"][0]["embedding"]
     except urllib.error.HTTPError as e:
         raise _provider_http_error(e) from e
     except Exception as e:
-        print("OpenAI embedding request failed [REDACTED provider detail]", file=sys.stderr)
+        print("OpenAI-compatible embedding request failed [REDACTED provider detail]", file=sys.stderr)
         return None
 
 
@@ -563,6 +634,11 @@ def _embed_text_or_raise(
         if reason:
             raise _EmbeddingProviderError(kind="indexing_refused", http_status=None, message=reason)
     provider, model, dims, api_key_env = _resolve_embedding_config(config)
+    base_url = _openai_base_url(config) if provider == "openai" else ""
+    if base_url:
+        ec = config.embedding
+        return _embed_openai(redact_text(text), model, ec.dimensions, ec.api_key_env,
+                             base_url=base_url)
     fn = _EMBED_DISPATCH.get(provider)
     if fn is None:
         print(f"Warning: unknown embedding provider '{provider}'. "

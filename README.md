@@ -1135,7 +1135,8 @@ Retrieval pipeline:
       |                   full | abridged | summarized | executive | index
       |
   Embedding providers (configurable):
-      voyage-context-4 (contextual chunks) | openai | gemini | local
+      voyage-context-4 (contextual chunks) | openai (or any OpenAI-compatible
+      server via embedding.base_url) | gemini | local
 
 kin ask (answer.py), configured under `ask:`:
   classify   the question's kind, from its wording          (ask.plan: an LLM planner instead)
@@ -1249,6 +1250,23 @@ overlapping chunk vectors and aggregates chunk hits back to the parent node. Use
 `kin embed reindex --target ./repo --limit 100` for a bounded foreground pass.
 Unsupported providers/models keep the single-vector strategy unless they later
 gain explicit contextual support.
+
+`embedding.provider: openai` with `embedding.base_url` sends requests to any
+OpenAI-compatible `/v1/embeddings` server instead of the OpenAI API: Ollama,
+LM Studio, llama.cpp, vLLM, or an MLX server. The model stays loaded in that
+server, so short-lived `kin` processes embed queries without importing torch.
+Set `model` and `dimensions` to what the server returns; `dimensions` is sent
+to the server only when set. No API key is sent unless `api_key_env` is set
+explicitly, so a default `OPENAI_API_KEY` never reaches another host, and the
+endpoint's redirects are not followed.
+
+```yaml
+embedding:
+  provider: openai
+  base_url: http://127.0.0.1:11434/v1   # Ollama
+  model: nomic-embed-text
+  dimensions: 768
+```
 
 Embedding drains retry transient provider failures. Deterministic input-size
 rejections are instead recorded in a local quarantine (`embed.quarantine.v1`),
@@ -1449,6 +1467,7 @@ embedding:
   provider: voyage                 # voyage, openai, gemini, or local
   # model: ""                      # empty = provider default (voyage-context-4 for Voyage)
   # api_key_env: ""                # empty = provider default (VOYAGE_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)
+  # base_url: ""                   # openai only: OpenAI-compatible server, e.g. http://127.0.0.1:11434/v1
   # dimensions: 0                  # 0 = provider default (1024 / 1536 / 3072 / 384)
   # strategy: ""                   # empty/auto; contextual only when the model supports it
   # chunk_chars: 6000              # stable local chunks for contextual embedding models
