@@ -224,7 +224,8 @@ def test_partial_failure_keeps_successful_work_and_queued_resume(graph, monkeypa
     assert any("beta" in str(call["input"]) for call in graph["provider"].calls)
 
 
-def test_rebuild_deferred_edit_exits_nonzero_and_preserves_pending_work(graph, monkeypatch, capsys):
+@pytest.mark.parametrize("json_output", [False, True])
+def test_rebuild_deferred_edit_exits_nonzero_and_preserves_pending_work(graph, monkeypatch, capsys, json_output):
     provider = graph["provider"]
     edited = []
 
@@ -237,15 +238,23 @@ def test_rebuild_deferred_edit_exits_nonzero_and_preserves_pending_work(graph, m
         return provider(request, **kwargs)
 
     monkeypatch.setattr("urllib.request.urlopen", edit_during_embedding)
-    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes", "--json")
-    result, _ = json.JSONDecoder().raw_decode(output)
+    args = ["rebuild", "--yes", "--json"] if json_output else ["rebuild", "--yes"]
+    code, output = invoke(graph, monkeypatch, capsys, *args)
     assert edited
     assert code == 1, output
-    assert result["status"] == "failed"
-    assert result["deferred_reason"] == "input_changed"
-    assert result["queue_pending"] == 1
-    assert result["coverage_complete"] is False
-    assert result["resume"] == "kin embed drain"
+    message = "Embedding work deferred: input_changed; pending nodes: 1."
+    if json_output:
+        result, _ = json.JSONDecoder().raw_decode(output)
+        assert result["status"] == "failed"
+        assert result["deferred_reason"] == "input_changed"
+        assert result["queue_pending"] == 1
+        assert result["coverage_complete"] is False
+        assert result["resume"] == "kin embed drain"
+        assert result["message"] == message
+    else:
+        assert "Embedding rebuild: failed; 1 embedded, 0 failed." in output
+        assert message in output
+        assert "Resume queued work: kin embed drain" in output
     with closing(Store(graph["target"], manage_project_storage=False)) as store:
         assert json.loads(store.get_meta(vectors.EMBED_QUEUE_META)) == edited
         assert vectors.embedding_status(store)["fresh_nodes"] == 1

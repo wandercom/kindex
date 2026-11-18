@@ -108,11 +108,15 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
                 result["status"] = "ok"
             if result["status"] == "deferred" and result.get("pending"):
                 result["status"] = "failed"
+                result["message"] = (
+                    f"Embedding work deferred: {result.get('deferred_reason') or 'unknown'}; "
+                    f"pending nodes: {result['pending']}.")
             if result.get("quarantined") and result.get("coverage_complete") is False:
                 result["status"] = "failed"
-                result["message"] = ("Quarantined inputs remain; inspect kin embed status and "
+                result["message"] = (result.get("message", "")
+                                     + " Quarantined inputs remain; inspect kin embed status and "
                                      "resolve rejected input before retrying. Reindex --stale "
-                                     "does not bypass deterministic provider limits.")
+                                     "does not bypass deterministic provider limits.").strip()
             if verbose:
                 print(f"Embedded: {result.get('embedded', 0)} nodes", file=sys.stderr)
             result.update(database=plan["database"], backup=plan["backup"],
