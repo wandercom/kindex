@@ -106,6 +106,8 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
                 store, max_jobs=len(nodes), time_budget=float("inf"))}
             if result["status"] == "empty":
                 result["status"] = "ok"
+            if result["status"] == "deferred" and result.get("pending"):
+                result["status"] = "failed"
             if result.get("quarantined") and result.get("coverage_complete") is False:
                 result["status"] = "failed"
                 result["message"] = ("Quarantined inputs remain; inspect kin embed status and "
@@ -117,8 +119,13 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
                           queue_pending=result.get("pending"),
                           stored_fingerprint=plan["stored_fingerprint"],
                           target_fingerprint=plan["target_fingerprint"])
-            if result.get("queue_pending"):
+            unknown_pending_failure = (result.get("queue_pending") is None
+                                       and result["status"] != "ok")
+            if result.get("queue_pending") or unknown_pending_failure:
                 result["resume"] = "kin embed drain"
+            if unknown_pending_failure:
+                result["message"] = ("Queue state could not be verified; inspect kin embed status "
+                                     "before resuming queued work.")
             return result
     except Exception as error:
         return {**plan, "status": "failed", "message": safe_error(error),

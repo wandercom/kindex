@@ -224,6 +224,75 @@ def test_partial_failure_keeps_successful_work_and_queued_resume(graph, monkeypa
     assert any("beta" in str(call["input"]) for call in graph["provider"].calls)
 
 
+def test_rebuild_deferred_edit_exits_nonzero_and_preserves_pending_work(graph, monkeypatch, capsys):
+    provider = graph["provider"]
+    edited = []
+
+    def edit_during_embedding(request, **kwargs):
+        if "beta" in str(json.loads(request.data)["input"]) and not edited:
+            with closing(Store(graph["target"], manage_project_storage=False)) as store:
+                node_id = store.conn.execute("SELECT id FROM nodes WHERE title='beta'").fetchone()[0]
+                store.edit_node(node_id, content="beta edited during the paid request")
+                edited.append(node_id)
+        return provider(request, **kwargs)
+
+    monkeypatch.setattr("urllib.request.urlopen", edit_during_embedding)
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes", "--json")
+    result, _ = json.JSONDecoder().raw_decode(output)
+    assert edited
+    assert code == 1, output
+    assert result["status"] == "failed"
+    assert result["deferred_reason"] == "input_changed"
+    assert result["queue_pending"] == 1
+    assert result["coverage_complete"] is False
+    assert result["resume"] == "kin embed drain"
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert json.loads(store.get_meta(vectors.EMBED_QUEUE_META)) == edited
+        assert vectors.embedding_status(store)["fresh_nodes"] == 1
+    provider.calls.clear()
+    code, output = invoke(graph, monkeypatch, capsys, "drain")
+    assert code == 0, output
+    assert len(provider.calls) == 1
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert vectors.embedding_status(store)["coverage_complete"] is True
+
+
+def test_rebuild_unknown_pending_storage_failure_still_reports_recovery(graph, monkeypatch, capsys):
+    before = state(graph["original"])
+    drain = vectors.drain_embedding_queue
+    denied = []
+
+    def drain_with_storage_fault(store, *args, **kwargs):
+        def authorize(action, table, detail, database, source):
+            if action == sqlite3.SQLITE_READ and table == "sqlite_master":
+                denied.append(table)
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        store.conn.set_authorizer(authorize)
+        try:
+            return drain(store, *args, **kwargs)
+        finally:
+            store.conn.set_authorizer(None)
+
+    monkeypatch.setattr(vectors, "drain_embedding_queue", drain_with_storage_fault)
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes", "--json")
+    result, _ = json.JSONDecoder().raw_decode(output)
+    assert denied
+    assert code == 1, output
+    assert result["status"] == "persistence_error"
+    assert result["queue_pending"] is None
+    assert result["resume"] == "kin embed drain"
+    assert "inspect kin embed status" in result["message"]
+    assert_backup_preserved(graph, output, before)
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert set(json.loads(store.get_meta(vectors.EMBED_QUEUE_META))) == graph["ids"]
+    monkeypatch.setattr(vectors, "drain_embedding_queue", drain)
+    code, output = invoke(graph, monkeypatch, capsys, "drain")
+    assert code == 0, output
+    assert len(state(graph["target"])["node_vectors"]) == 2
+
+
 @pytest.mark.parametrize("prequarantined", [True, False])
 @pytest.mark.parametrize("graph", [1536], indirect=True)
 def test_rebuild_tracks_terminal_input_without_unfinishable_resume(graph, monkeypatch, capsys, prequarantined):
