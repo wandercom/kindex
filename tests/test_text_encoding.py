@@ -20,6 +20,10 @@ def _text_mode(call: ast.Call, name: str) -> bool:
               and isinstance(func.value, ast.Name) else None)
     if name == "open" and module in {"os", "tarfile", "zipfile", "webbrowser"}:
         return False  # descriptor, archive, or URL APIs rather than text streams
+    if (name == "open" and isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Call)
+            and getattr(func.value.func, "attr", None) == "build_opener"):
+        return False  # urllib.request.build_opener(...).open(request): a URL API
 
     if name in {"NamedTemporaryFile", "TemporaryFile"}:
         index, default = 0, "w+b"
@@ -85,6 +89,7 @@ def test_guard_catches_other_text_writer_apis(call):
     'os.fdopen(fd, "wb")',
     'tempfile.NamedTemporaryFile()',
     'gzip.open(path)',
+    'urllib.request.build_opener(handler).open(request, timeout=30)',
 ])
 def test_guard_allows_binary_and_non_text_apis(call):
     assert _missing_encoding(call) == []

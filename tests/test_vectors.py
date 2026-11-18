@@ -1,8 +1,11 @@
 """Tests for optional vector search module."""
 
 import json
+import urllib.error
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from kindex import vectors
 from kindex.vectors import (
@@ -233,6 +236,117 @@ class TestEmbedTextDispatch:
             "model": "voyage-3.5",
             "input_type": "document",
         }
+
+    def test_openai_default_endpoint_unchanged(self):
+        requests = []
+
+        def fake_urlopen(req, **_kwargs):
+            requests.append(req)
+            return FakeHTTPResponse({"data": [{"embedding": [0.1, 0.2]}]})
+
+        config = Config(embedding=EmbeddingConfig(provider="openai"))
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=True):
+            with patch("kindex.vectors.urllib.request.urlopen", fake_urlopen):
+                result = embed_text("hello", config=config)
+
+        assert result == [0.1, 0.2]
+        assert requests[0].get_full_url() == "https://api.openai.com/v1/embeddings"
+        assert requests[0].get_header("Authorization") == "Bearer sk-test"
+        body = json.loads(requests[0].data.decode("utf-8"))
+        assert body == {"input": "hello", "model": "text-embedding-3-small", "dimensions": 1536}
+
+    def test_openai_base_url_targets_compatible_server_without_key(self):
+        requests = []
+
+        def fake_open(req, timeout):
+            requests.append(req)
+            return FakeHTTPResponse({"data": [{"embedding": [0.3, 0.4]}]})
+
+        config = Config(embedding=EmbeddingConfig(
+            provider="openai", base_url="http://127.0.0.1:11434/v1/",
+            model="nomic-embed-text", dimensions=768,
+        ))
+        # A default OPENAI_API_KEY in the environment must not be sent to
+        # a non-OpenAI host unless api_key_env is configured explicitly.
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-real"}, clear=True):
+            with patch("kindex.vectors._urlopen_no_redirect", fake_open):
+                result = embed_text("hello", config=config)
+
+        assert result == [0.3, 0.4]
+        assert requests[0].get_full_url() == "http://127.0.0.1:11434/v1/embeddings"
+        assert requests[0].get_header("Authorization") is None
+        body = json.loads(requests[0].data.decode("utf-8"))
+        assert body == {"input": "hello", "model": "nomic-embed-text", "dimensions": 768}
+
+    def test_openai_base_url_omits_unconfigured_dimensions(self):
+        requests = []
+
+        def fake_open(req, timeout):
+            requests.append(req)
+            return FakeHTTPResponse({"data": [{"embedding": [0.5]}]})
+
+        config = Config(embedding=EmbeddingConfig(
+            provider="openai", base_url="http://localhost:1234/v1", model="m",
+        ))
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("kindex.vectors._urlopen_no_redirect", fake_open):
+                assert embed_text("hello", config=config) == [0.5]
+        assert "dimensions" not in json.loads(requests[0].data.decode("utf-8"))
+
+    def test_openai_base_url_sends_explicit_key(self):
+        requests = []
+
+        def fake_open(req, timeout):
+            requests.append(req)
+            return FakeHTTPResponse({"data": [{"embedding": [0.5]}]})
+
+        config = Config(embedding=EmbeddingConfig(
+            provider="openai", base_url="https://gateway.example/v1",
+            api_key_env="GATEWAY_KEY", model="m",
+        ))
+        with patch.dict("os.environ", {"GATEWAY_KEY": "gw-test"}, clear=True):
+            with patch("kindex.vectors._urlopen_no_redirect", fake_open):
+                assert embed_text("hello", config=config) == [0.5]
+        assert requests[0].get_header("Authorization") == "Bearer gw-test"
+
+    def test_openai_base_url_missing_explicit_key_returns_none(self):
+        config = Config(embedding=EmbeddingConfig(
+            provider="openai", base_url="https://gateway.example/v1", api_key_env="GATEWAY_KEY",
+        ))
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("kindex.vectors._urlopen_no_redirect") as fake_open:
+                assert embed_text("hello", config=config) is None
+        fake_open.assert_not_called()
+
+    def test_openai_base_url_rejects_unsafe_urls(self, capsys):
+        for base_url in ("file:///etc/passwd", "ftp://host/v1", "http://user:secret@host/v1",
+                         "http://host/v1?key=x", "not a url"):
+            config = Config(embedding=EmbeddingConfig(provider="openai", base_url=base_url))
+            with patch("kindex.vectors._urlopen_no_redirect") as fake_open:
+                assert embed_text("hello", config=config) is None
+            fake_open.assert_not_called()
+        assert "secret" not in capsys.readouterr().err
+
+    def test_openai_base_url_redirect_is_not_followed(self):
+        def fake_open(req, timeout):
+            raise urllib.error.HTTPError(req.get_full_url(), 302, "Found", {}, None)
+
+        config = Config(embedding=EmbeddingConfig(
+            provider="openai", base_url="http://127.0.0.1:8080/v1", model="m",
+        ))
+        with patch("kindex.vectors._urlopen_no_redirect", fake_open):
+            with pytest.raises(vectors._EmbeddingProviderError) as excinfo:
+                vectors._embed_text_or_raise("hello", config)
+        assert excinfo.value.http_status == 302
+        assert excinfo.value.kind == "provider_http_error"
+
+    def test_no_redirect_opener_refuses_redirects(self):
+        handler = vectors._NoRedirect()
+        assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example/") is None
+
+    def test_openai_base_url_equal_to_default_keeps_default_path(self):
+        config = Config(embedding=EmbeddingConfig(provider="openai", base_url="https://api.openai.com/v1/"))
+        assert vectors._openai_base_url(config) == ""
 
     def test_vector_search_embeds_query_as_query(self, monkeypatch):
         seen = {}

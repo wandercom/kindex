@@ -4,6 +4,13 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+- `embedding.base_url` points the `openai` embedding provider at any
+  OpenAI-compatible `/v1/embeddings` server (Ollama, LM Studio, llama.cpp,
+  vLLM, MLX servers). The API key is optional there and is sent only when
+  `api_key_env` is set explicitly; `dimensions` is sent only when configured;
+  redirects from a custom endpoint are not followed.
+
 ## [0.54.2] - 2026-11-12
 
 ### Fixed

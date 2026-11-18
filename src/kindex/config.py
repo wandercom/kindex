@@ -298,6 +298,7 @@ class EmbeddingConfig(BaseModel):
     provider: str = "voyage"     # "voyage", "openai", "gemini", "local"
     model: str = ""              # empty = provider default
     api_key_env: str = ""        # empty = provider default env var
+    base_url: str = ""           # openai only: OpenAI-compatible API base, e.g. http://127.0.0.1:11434/v1
     dimensions: int = 0          # 0 = provider default
     strategy: str = ""           # empty/auto, single, or contextual
     chunk_chars: int = 6000      # local chunk target for contextual strategies
