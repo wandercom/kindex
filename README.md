@@ -1240,6 +1240,7 @@ Code structure lives in the same graph as your decisions, watches, and constrain
 | `kin skills [person]` | Skill profile and expertise for a person |
 | `kin embed` | Index nodes for vector similarity search |
 | `kin embed plan/enqueue/reindex/drain/status` | Scoped embedding maintenance for full or gradual reindexing |
+| `kin embed rebuild` | Explicitly confirmed, backed-up replacement of all derived vectors |
 
 `embedding.provider: voyage` uses `voyage-context-4` by default. When the
 configured model supports contextual chunk embeddings, Kindex stores stable
@@ -1277,9 +1278,9 @@ inspection remains available.
 
 Restore the matching provider/model/dimensions/strategy and chunk settings to
 reuse the existing index. Ordinary `kin embed reindex`, `enqueue` and `drain`
-never authorize erasure or migrate an incompatible index. Kindex does not provide
-a deliberate rebuild command; migration requires a separately reviewed procedure
-that preserves the existing data.
+never authorize erasure or migrate an incompatible index. For deliberate derived-vector
+replacement, review [explicit embedding index replacement](#explicit-embedding-index-replacement)
+and use `kin embed rebuild` with its backup and confirmation safeguards.
 
 `kin embed drain --time-budget 120` checks the budget between groups as well as
 nodes. One in-flight request can overrun by its existing HTTP timeout; hashing,
@@ -1302,8 +1303,8 @@ honors its caller's transaction; its checkpoints are durable only after commit.
 Inspect `kin embed plan --stale` before a broad rollout, then start with a bounded
 `kin embed drain --max-jobs 1 --time-budget 30 --json`. No automatic global
 fingerprint bump is introduced. Changed model/chunk settings or unknown legacy
-identity are refused until compatibility is restored or a separately reviewed
-migration is completed. Exactly-once charging is not guaranteed:
+identity are refused until compatibility is restored or an explicit, backed-up
+`kin embed rebuild` is approved. Exactly-once charging is not guaranteed:
 a provider may charge before a timeout, or a process/storage failure can occur
 after the response but before its checkpoint commits. Durable successful groups
 and complete generations prevent replay outside those windows. These defects
@@ -1318,6 +1319,98 @@ current vector rows, not provider attempt history or a guarantee of progress;
 missing, invalid or unreadable metadata is reported as unknown or unavailable.
 Doctor reports incomplete coverage, fingerprint mismatches and quarantine as
 issues. Its embedding diagnostics never reindex, including with `--fix`.
+
+### Explicit embedding index replacement
+
+Ordinary indexing refuses a different provider/model/dimensions/strategy and
+preserves the existing index. To deliberately replace derived vectors, first set
+the desired embedding identity in your own Kindex configuration, then run:
+
+```bash
+kin embed rebuild --data-dir /path/to/selected/graph
+# Automation must approve the same destructive operation explicitly:
+kin embed rebuild --data-dir /path/to/selected/graph --yes --json
+```
+
+The command shows the selected database, stored and configured target identities,
+eligible node count, and estimated tokens/cost (including a small readiness probe;
+cost is unknown for unpriced models). Confirmation defaults to **no**; unattended
+runs require `--yes`. Credentials and the vector backend must be available. Only
+after confirmation does a provider probe validate the target response, before any
+vectors are removed. No provider defaults or user configuration are changed.
+Every client of a shared graph must resolve the same embedding identity after a rebuild.
+
+Pause other Kindex clients/daemons that write to the selected graph while
+confirming and preflighting the rebuild. Reads that record access metadata also
+count as writes. Any concurrent write in this window refuses the rebuild and
+asks for a fresh preview; no vectors are replaced. Pure read-only clients may
+remain open. The embedding-writer lock separately excludes competing indexers.
+
+A SQLite-consistent, integrity-checked backup is required before reset. The printed
+backup path lives in the per-database `embedding-rebuilds` snapshot pool under
+`$XDG_STATE_HOME/kindex/snapshots` (default `~/.local/state/kindex/snapshots`) and is
+not rotated by ordinary dream snapshots. Each rebuild retains a full-database copy
+until the operator deletes it manually; there is no automatic pruning of these backups.
+Only derived vectors, their identity, chunk/checkpoint metadata, and the embedding
+queue are replaced. Quarantine records matching the target identity and current
+text are preserved; obsolete records cannot block a changed identity or input.
+The target model's active grounding calibration is invalidated; calibration history,
+other models' calibrations, nodes, edges, FTS and graph history are preserved.
+Same-identity rebuilds also recompute fresh vectors. Run `kin embed calibrate`
+after rebuilding to measure a new floor. Semantic search is interrupted during
+rebuilding; this is **not** an atomic index switchover.
+
+A completed rebuild with only quarantined inputs left has status
+`completed_with_quarantine` and exits **0**: the index was replaced, the queue is
+empty, and those rejected inputs were not embedded. This applies to both existing
+quarantine and terminal input rejections discovered during this pass. Inspect
+`kin embed status`; **do not re-run rebuild** for quarantined inputs. Correct the
+input or deliberately choose a compatible embedding identity before retrying.
+
+The rebuild JSON contract retains `quarantined`, `coverage_complete`, `queue_pending`,
+and attempt counts. For example, `{"status":"completed_with_quarantine",
+"quarantined":1,"coverage_complete":false,"queue_pending":0}` describes completed
+replacement with incomplete coverage. `failed` counts failed provider attempts,
+so it can be nonzero even for this completed-with-quarantine result.
+
+| Rebuild status | Exit | Meaning |
+|---|---|---|
+| `ok` | 0 | Selected rebuild work completed |
+| `completed_with_quarantine` | 0 | Replacement completed; only quarantined inputs remain unembedded |
+| `failed`, `persistence_error`, `unavailable`, `refused`, `cancelled` | 1 | Work failed, was deferred, remains pending, is unknown, or was not authorized |
+
+A later transient/provider/storage failure returns nonzero and reports the backup
+path. Successful vectors/checkpoints remain; retryable work stays queued. The
+result covers the selected set: nodes added by another client during the pass can
+remain queued with a resume hint without failing an otherwise completed pass.
+
+Resume with the same graph/configuration and the printed command, which sets
+`--max-jobs` to the pending queue count and `--time-budget inf` so one invocation
+can visit the whole recorded backlog rather than stopping at the default
+200 jobs / 120 seconds. For a queue of 12 (including already-fresh entries):
+
+```bash
+kin embed drain --max-jobs 12 --time-budget inf --data-dir /path/to/selected/graph
+```
+
+When the count is unknown, inspect `kin embed status` first; the recovery command
+uses a deliberately large job bound (`sys.maxsize`, normally 9223372036854775807)
+instead of the bounded default. New arrivals after a drain's queue snapshot may
+still require another pass. Do not repeat rebuild unless you intend another reset.
+
+An interrupt after reset committed prints the backup, pending count when readable,
+and full-backlog resume command to stderr, then re-raises the interrupt. No resume
+advice is printed if reset did not commit. `--verbose` reports visited-entry and
+embedded counts on stderr during rebuilding; `--json` stdout remains one document
+when the command returns normally.
+
+`kin embed reindex --stale` does not honor quarantine and cannot finish inputs the
+provider continues to reject. To restore the original backup, stop every
+Kindex daemon/MCP/CLI writer, move the live database's `-wal` and `-shm` sidecars
+aside, copy the backup over the selected database, and restore the original
+embedding configuration before reopening. Restoring the full database also
+reverts graph edits made after that backup. There is no automatic rollback or
+restore command.
 
 ### Operational
 | Command | Description |

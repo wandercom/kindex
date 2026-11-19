@@ -153,7 +153,9 @@ class EmbeddingHealthTests(unittest.TestCase):
         self.assertFalse(result["coverage_complete"])
         issue = embedding_doctor_findings(result)[0][0]
         self.assertIn("Restore the matching", issue)
-        self.assertIn("separately reviewed procedure", issue)
+        self.assertIn("kin embed rebuild", issue)
+        self.assertLess(issue.index("Restore the matching"), issue.index("kin embed rebuild"))
+        self.assertIn("destructive replacement", issue)
         self.assertEqual(self.store.conn.total_changes, before)
         output = self.doctor()
         self.assertFalse(output["healthy"])

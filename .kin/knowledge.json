@@ -56,6 +56,26 @@
       "updated_at": "2026-09-06T23:02:58",
       "verification": {}
     },
+    "3924ceb24d7bb216652f218076612de4771cee05cbf36cb388510e25f5838fec": {
+      "audience": "team",
+      "connections": [],
+      "content": "Replacing an embedding generation invalidates the target provider/model active grounding calibration, even when the new index has the same node count. Grounding calibration staleness based only on row count cannot detect changed dimensions or a recomputed generation. Delete only the exact active target calibration key in the same transaction as vector reset. Keep calibration history, other model records and unrelated metadata, and retain the old active record in the recovery backup. A failed target-table creation must roll back both the vector reset and active-calibration invalidation. Implementation: src/kindex/embedding_rebuild.py; calibration loading: src/kindex/grounding.py. This is derived-state invalidation tied to explicit index replacement.",
+      "domains": [
+        "kindex",
+        "knowledge-graph",
+        "python"
+      ],
+      "id": "embedding-rebuild-active-calibration",
+      "provenance": {
+        "prov_activity": "PR 119 derived-state review",
+        "prov_source": "src/kindex/embedding_rebuild.py",
+        "prov_when": "2026-11-12T21:21:43"
+      },
+      "title": "Embedding rebuild invalidates active grounding calibration",
+      "type": "concept",
+      "updated_at": "2026-11-12T21:21:43",
+      "verification": {}
+    },
     "539642834b049fe52291431c0d941af78b08b1415b29f85065f6ec56b2e9c1d7": {
       "audience": "public",
       "connections": [
@@ -101,6 +121,26 @@
       "title": "Repository-bound Kindex Lite MCP endpoint",
       "type": "concept",
       "updated_at": "2026-10-05T22:43:27",
+      "verification": {}
+    },
+    "85d06bc4eebd83f52ef953e74c1eb3f15b9460ce3a2fb41e0d7181d238e2f5cd": {
+      "audience": "team",
+      "connections": [],
+      "content": "CLI --json output must remain one parseable JSON document even when --verbose is requested. The embedding rebuild command disables per-node stdout progress in JSON mode; preview and backup diagnostics stay on stderr. An operation that succeeds but emits invalid JSON still fails its automation contract. Keep normal verbose progress for human-readable output. This is the existing wire-format boundary failure pattern, not a new taxonomy category. Regression: tests/test_embedding_rebuild.py::test_json_verbose_rebuild_keeps_stdout_machine_readable. Implementation: src/kindex/cli.py, cmd_embed rebuild branch.",
+      "domains": [
+        "kindex",
+        "mcp",
+        "python"
+      ],
+      "id": "kindex-cli-json-verbose-output",
+      "provenance": {
+        "prov_activity": "PR 119 wire-format review",
+        "prov_source": "src/kindex/cli.py",
+        "prov_when": "2026-11-12T21:19:00"
+      },
+      "title": "JSON CLI output excludes verbose progress",
+      "type": "concept",
+      "updated_at": "2026-11-12T21:19:00",
       "verification": {}
     },
     "b8da96fba34301f6553c66c0dbc2cbf07959252d5ad6cd048487196f662586fd": {
