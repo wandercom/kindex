@@ -24,6 +24,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1219,6 +1220,14 @@ def _load_embedding_queue(store: Store) -> list[str]:
         return []
 
 
+def embedding_queue_snapshot(store: Store) -> list[str]:
+    """Read queued IDs without hiding storage/format errors as an empty queue."""
+    value = json.loads(store.get_meta(EMBED_QUEUE_META) or "[]")
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError("Embedding queue metadata is invalid")
+    return list(dict.fromkeys(item for item in value if item))
+
+
 def _load_embedding_quarantine(store: Store) -> dict[str, _EmbeddingQuarantineRecord]:
     try:
         value: Any = json.loads(store.get_meta(EMBED_QUARANTINE_META) or "{}")
@@ -1536,7 +1545,8 @@ def _indexing_refusal_result(store: Store, reason: str) -> dict:
 def drain_embedding_queue(store: Store, config: Config | None = None, *,
                           max_jobs: int | None = None,
                           time_budget: float | None = None,
-                          report_coverage: bool = True) -> dict:
+                          report_coverage: bool = True,
+                          on_progress: Callable[[int, int, int], None] | None = None) -> dict:
     reason = (_embedding_policy_refusal(store.config)
               or (_embedding_policy_refusal(config) if config is not None else None))
     if reason:
@@ -1564,7 +1574,8 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
             with _embedding_writer_lock(store) as acquired:
                 if acquired:
                     result = _drain_embedding_queue(store, config, max_jobs=max_jobs,
-                                                    time_budget=budget, report_coverage=report_coverage)
+                                                    time_budget=budget, report_coverage=report_coverage,
+                                                    on_progress=on_progress)
                 else:
                     result = {"status": "deferred", "deferred_reason": "busy", "embedded": 0,
                               "pending": _embedding_queue_len(store), "drain_complete": False,
@@ -1587,7 +1598,8 @@ def drain_embedding_queue(store: Store, config: Config | None = None, *,
 def _drain_embedding_queue(store: Store, config: Config | None = None, *,
                           max_jobs: int | None = None,
                           time_budget: float | None = None,
-                          report_coverage: bool = True) -> dict:
+                          report_coverage: bool = True,
+                          on_progress: Callable[[int, int, int], None] | None = None) -> dict:
     """Embed queued nodes. This is where the (possibly networked) embedding cost
     lives — runs in cron, off the agent's path. Idempotent per node.
 
@@ -1643,9 +1655,13 @@ def _drain_embedding_queue(store: Store, config: Config | None = None, *,
     deadline = time.monotonic() + time_budget
     fingerprint = embedding_fingerprint(config or store.config)
     provider, model, _, _ = _resolve_embedding_config(config or store.config)
+    processed = 0
     for node_id in deduped:
         if attempts >= max_jobs or time.monotonic() >= deadline:
             break
+        if on_progress:
+            on_progress(processed, len(deduped), embedded)
+        processed += 1
         eligibility = store.conn.execute("SELECT status FROM nodes WHERE id = ?", (node_id,)).fetchone()
         if not eligibility or eligibility["status"] in {"superseded", "archived"}:
             completed[node_id] = ""
@@ -1715,6 +1731,8 @@ def _drain_embedding_queue(store: Store, config: Config | None = None, *,
         if not outcome.ok and outcome.kind != "time_budget":
             print(f"Embedding attempt {attempts} failed: {outcome.kind or 'embedding_error'}"
                   f" (HTTP {outcome.http_status or 'n/a'})", file=sys.stderr)
+    if on_progress:
+        on_progress(processed, len(deduped), embedded)
     if failures:
         last = failures[-1]
         print(f"Embedding drain failed: {len(failures)} failed attempt(s); "

@@ -3727,7 +3727,7 @@ def cmd_embed(args):
                     return False
 
             result = rebuild_embeddings(
-                store, confirm, verbose=getattr(args, "verbose", False) and not args.json)
+                store, confirm, verbose=getattr(args, "verbose", False))
         elif action == "status":
             result = embedding_status(store)
         elif action == "calibrate":

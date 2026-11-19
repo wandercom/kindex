@@ -31,6 +31,20 @@ def _approval_state(store) -> tuple:
             store.conn.total_changes)
 
 
+def _pending_count(store) -> int | None:
+    try:
+        return len(vectors.embedding_queue_snapshot(store))
+    except Exception:
+        return None
+
+
+def _resume_command(pending: int | None) -> str:
+    # Unknown queue size: use a deliberately large job bound, not the default
+    # 200-job cap. Existing float parsing accepts inf as an unlimited time budget.
+    jobs = pending if pending is not None else sys.maxsize
+    return f"kin embed drain --max-jobs {jobs} --time-budget inf"
+
+
 def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool = False) -> dict:
     """Preview, confirm, preflight, snapshot, reset, then drain tracked work.
 
@@ -102,23 +116,46 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
             except BaseException:
                 store.conn.rollback()
                 raise
+            def report_progress(processed, total, embedded):
+                if total <= 100 or processed % 100 == 0 or processed == total:
+                    print(f"Embedding rebuild progress: {processed}/{total} queue entries visited; "
+                          f"{embedded} embedded.", file=sys.stderr, flush=True)
+
             result = {**plan, **vectors.drain_embedding_queue(
-                store, max_jobs=len(nodes), time_budget=float("inf"))}
+                store, max_jobs=len(nodes), time_budget=float("inf"),
+                on_progress=report_progress if verbose else None)}
             if result["status"] == "empty":
                 result["status"] = "ok"
-            if result["status"] == "deferred" and result.get("pending"):
+            if result["status"] == "ok" and result.get("pending"):
+                try:
+                    pending_selected = set(vectors.embedding_queue_snapshot(store)).intersection(
+                        node["id"] for node in nodes)
+                    if pending_selected:
+                        result["status"] = "failed"
+                        result["message"] = "Selected rebuild work remains queued."
+                except Exception:
+                    result.update(status="persistence_error", pending=None)
+            if result["status"] == "deferred":
                 result["status"] = "failed"
                 result["message"] = (
                     f"Embedding work deferred: {result.get('deferred_reason') or 'unknown'}; "
                     f"pending nodes: {result['pending']}.")
             if result.get("quarantined") and result.get("coverage_complete") is False:
-                result["status"] = "failed"
-                result["message"] = (result.get("message", "")
-                                     + " Quarantined inputs remain; inspect kin embed status and "
-                                     "resolve rejected input before retrying. Reindex --stale "
-                                     "does not bypass deterministic provider limits.").strip()
-            if verbose:
-                print(f"Embedded: {result.get('embedded', 0)} nodes", file=sys.stderr)
+                terminal_only = (
+                    result.get("pending") == 0 and result.get("drain_complete") is True
+                    and result["status"] in {"ok", "failed"} and not result.get("deferred_reason")
+                    and all(error.get("kind") == "input_too_large" for error in result.get("errors", [])))
+                if terminal_only:
+                    result["status"] = "completed_with_quarantine"
+                    result["message"] = ("Index was replaced. Quarantined inputs not embedded: "
+                                         f"{result['quarantined']}. Inspect kin embed status. "
+                                         "Do not re-run rebuild for these inputs.")
+                else:
+                    result["status"] = "failed"
+                    result["message"] = (result.get("message", "")
+                                         + " Quarantined inputs remain; inspect kin embed status and "
+                                         "resolve rejected input before retrying. Reindex --stale "
+                                         "does not bypass deterministic provider limits.").strip()
             result.update(database=plan["database"], backup=plan["backup"],
                           queue_pending=result.get("pending"),
                           stored_fingerprint=plan["stored_fingerprint"],
@@ -126,11 +163,22 @@ def rebuild_embeddings(store, confirm: Callable[[dict], bool], *, verbose: bool 
             unknown_pending_failure = (result.get("queue_pending") is None
                                        and result["status"] != "ok")
             if result.get("queue_pending") or unknown_pending_failure:
-                result["resume"] = "kin embed drain"
+                result["resume"] = _resume_command(result.get("queue_pending"))
             if unknown_pending_failure:
                 result["message"] = ("Queue state could not be verified; inspect kin embed status "
                                      "before resuming queued work.")
             return result
+    except KeyboardInterrupt:
+        if reset_committed:
+            pending = _pending_count(store)
+            print("Embedding rebuild interrupted after reset committed. "
+                  f"Backup: {plan['backup']}. Queue pending nodes: "
+                  f"{pending if pending is not None else 'unknown'}. "
+                  f"Resume with {_resume_command(pending)} (with the same graph selection). "
+                  "Do not repeat rebuild to resume.", file=sys.stderr, flush=True)
+        raise
     except Exception as error:
+        pending = _pending_count(store) if reset_committed else None
         return {**plan, "status": "failed", "message": safe_error(error),
-                "resume": "kin embed drain" if reset_committed and plan.get("nodes") else None}
+                "queue_pending": pending,
+                "resume": _resume_command(pending) if reset_committed and pending != 0 else None}

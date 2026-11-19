@@ -217,6 +217,7 @@ def test_partial_failure_keeps_successful_work_and_queued_resume(graph, monkeypa
     graph["provider"].calls.clear()
     code, output = invoke(graph, monkeypatch, capsys, "drain")
     assert code == 0, output
+    assert "Embedding rebuild progress" not in output
     complete = state(graph["target"])
     assert len(complete["node_vectors"]) == 2
     assert set(partial["node_vectors"]).issubset(set(complete["node_vectors"]))
@@ -249,7 +250,7 @@ def test_rebuild_deferred_edit_exits_nonzero_and_preserves_pending_work(graph, m
         assert result["deferred_reason"] == "input_changed"
         assert result["queue_pending"] == 1
         assert result["coverage_complete"] is False
-        assert result["resume"] == "kin embed drain"
+        assert result["resume"] == "kin embed drain --max-jobs 1 --time-budget inf"
         assert result["message"] == message
     else:
         assert "Embedding rebuild: failed; 1 embedded, 0 failed." in output
@@ -291,7 +292,7 @@ def test_rebuild_unknown_pending_storage_failure_still_reports_recovery(graph, m
     assert code == 1, output
     assert result["status"] == "persistence_error"
     assert result["queue_pending"] is None
-    assert result["resume"] == "kin embed drain"
+    assert result["resume"] == f"kin embed drain --max-jobs {sys.maxsize} --time-budget inf"
     assert "inspect kin embed status" in result["message"]
     assert_backup_preserved(graph, output, before)
     with closing(Store(graph["target"], manage_project_storage=False)) as store:
@@ -304,7 +305,8 @@ def test_rebuild_unknown_pending_storage_failure_still_reports_recovery(graph, m
 
 @pytest.mark.parametrize("prequarantined", [True, False])
 @pytest.mark.parametrize("graph", [1536], indirect=True)
-def test_rebuild_tracks_terminal_input_without_unfinishable_resume(graph, monkeypatch, capsys, prequarantined):
+@pytest.mark.parametrize("json_output", [False, True])
+def test_rebuild_tracks_terminal_input_without_unfinishable_resume(graph, monkeypatch, capsys, prequarantined, json_output):
     graph["target"] = graph["configure"](model="text-embedding-3-small", dimensions=1536)
     with closing(Store(graph["original"], manage_project_storage=False)) as store:
         bad = store.add_node("oversized", content="word " * 12000, queue_embedding=True)
@@ -322,8 +324,24 @@ def test_rebuild_tracks_terminal_input_without_unfinishable_resume(graph, monkey
         return provider(request, **kwargs)
 
     monkeypatch.setattr("urllib.request.urlopen", reject_oversized)
-    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
-    assert code == 1, output
+    args = ["rebuild", "--yes", "--json"] if json_output else ["rebuild", "--yes"]
+    code, output = invoke(graph, monkeypatch, capsys, *args)
+    assert code == 0, output
+    if json_output:
+        result, _ = json.JSONDecoder().raw_decode(output)
+        assert result["status"] == "completed_with_quarantine"
+        assert result["quarantined"] == 1
+        assert result["coverage_complete"] is False
+        assert result["queue_pending"] == 0
+        assert "resume" not in result
+        message = result["message"]
+    else:
+        assert "Embedding rebuild: completed_with_quarantine" in output
+        message = output
+    assert "Index was replaced" in message
+    assert "Quarantined inputs not embedded: 1" in message
+    assert "Inspect kin embed status" in message
+    assert "Do not re-run rebuild" in message
     assert "kin embed reindex --stale" not in output
     assert "quarantin" in output.lower()
     with closing(Store(graph["target"], manage_project_storage=False)) as store:
@@ -349,6 +367,43 @@ def test_rebuild_missing_database_refuses_without_creating_it(graph, monkeypatch
     assert "existing database" in output.lower()
     assert not Path(target.data_dir).exists()
     assert graph["provider"].calls == []
+
+
+def test_quarantine_does_not_hide_transient_pending_failure(graph, monkeypatch, capsys):
+    graph["target"] = graph["configure"](model="text-embedding-3-small", dimensions=2)
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        store.add_node("oversized", content="word " * 12000, queue_embedding=True)
+        vectors.quarantine_oversized_queue_items(store)
+    graph["provider"].fail_text = "beta"
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes", "--json")
+    result, _ = json.JSONDecoder().raw_decode(output)
+    assert code == 1
+    assert result["status"] == "failed"
+    assert result["queue_pending"] == 1
+    assert result["quarantined"] == 1
+    assert result["resume"] == "kin embed drain --max-jobs 1 --time-budget inf"
+
+
+def test_late_arrivals_keep_success_and_full_backlog_hint(graph, monkeypatch, capsys):
+    provider = graph["provider"]
+    late = []
+
+    def add_during_embedding(request, **kwargs):
+        if "readiness probe" not in str(json.loads(request.data)["input"]) and not late:
+            with closing(Store(graph["target"], manage_project_storage=False)) as store:
+                late.append(store.add_node("late arrival", content="new work after selected rebuild",
+                                           queue_embedding=True))
+        return provider(request, **kwargs)
+
+    monkeypatch.setattr("urllib.request.urlopen", add_during_embedding)
+    code, output = invoke(graph, monkeypatch, capsys, "rebuild", "--yes", "--json")
+    result, _ = json.JSONDecoder().raw_decode(output)
+    assert code == 0
+    assert result["status"] == "ok"
+    assert result["queue_pending"] == 1
+    assert result["resume"] == "kin embed drain --max-jobs 1 --time-budget inf"
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert json.loads(store.get_meta(vectors.EMBED_QUEUE_META)) == late
 
 
 def test_rebuild_voyage_contextual_groups_use_contextual_endpoint(graph, monkeypatch, capsys):
@@ -489,6 +544,68 @@ def test_backup_path_is_reported_before_provider_interrupts_rebuild(graph, monke
     assert_graph_preserved(graph)
 
 
+def test_interrupted_rebuild_reports_full_backlog_resume_without_repaying_fresh_nodes(graph, monkeypatch, capsys):
+    with closing(Store(graph["original"], manage_project_storage=False)) as store:
+        for i in range(10):
+            store.add_node(f"document-{i}", content=f"distinct durable document {i}", queue_embedding=False)
+        graph["durable"] = {table: [tuple(row) for row in store.conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
+                            for table in ("nodes", "edges", "activity_log")}
+    before = state(graph["original"])
+    provider = graph["provider"]
+    documents = []
+
+    def interrupt_seventh(request, **kwargs):
+        text = str(json.loads(request.data)["input"])
+        if "readiness probe" not in text:
+            documents.append(text)
+            if len(documents) == 7:
+                raise KeyboardInterrupt("offline seventh document interruption")
+        return provider(request, **kwargs)
+
+    monkeypatch.setattr("urllib.request.urlopen", interrupt_seventh)
+    with pytest.raises(KeyboardInterrupt):
+        invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
+    captured = capsys.readouterr()
+    assert "reset committed" in captured.err
+    assert "pending nodes: 12" in captured.err
+    command = "kin embed drain --max-jobs 12 --time-budget inf"
+    assert command in captured.err
+    assert_backup_preserved(graph, captured.out + captured.err, before)
+    partial = state(graph["target"])
+    assert len(partial["node_vectors"]) == 6
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert len(json.loads(store.get_meta(vectors.EMBED_QUEUE_META))) == 12
+    provider.calls.clear()
+    monkeypatch.setattr("urllib.request.urlopen", provider)
+    code, output = invoke(graph, monkeypatch, capsys, "drain", "--max-jobs", "12", "--time-budget", "inf")
+    assert code == 0, output
+    assert len(provider.calls) == 6
+    assert not {str(call["input"]) for call in provider.calls}.intersection(documents[:6])
+    assert set(partial["node_vectors"]).issubset(set(state(graph["target"])["node_vectors"]))
+    with closing(Store(graph["target"], manage_project_storage=False)) as store:
+        assert vectors.embedding_status(store)["fresh_nodes"] == 12
+        assert vectors.embedding_status(store)["queue_pending"] == 0
+
+
+@pytest.mark.parametrize("phase", ["probe", "backup"])
+def test_interrupt_before_reset_has_no_resume_advice(graph, monkeypatch, capsys, phase):
+    before = state(graph["original"])
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("offline pre-reset interruption")
+
+    if phase == "probe":
+        monkeypatch.setattr("urllib.request.urlopen", interrupt)
+    else:
+        monkeypatch.setattr("kindex.snapshots.snapshot_connection", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        invoke(graph, monkeypatch, capsys, "rebuild", "--yes")
+    captured = capsys.readouterr()
+    assert "reset committed" not in captured.err
+    assert "kin embed drain" not in captured.err
+    assert state(graph["original"]) == before
+
+
 def test_target_index_creation_failure_rolls_back_original_index(graph, monkeypatch, capsys):
     graph["target"] = graph["configure"](model="text-embedding-3-small", dimensions=3)
     calibration_before = seed_calibrations(graph)
@@ -532,6 +649,21 @@ def test_target_index_creation_failure_rolls_back_original_index(graph, monkeypa
 
 def test_json_verbose_rebuild_keeps_stdout_machine_readable(graph, monkeypatch, capsys):
     before = state(graph["original"])
+    provider = graph["provider"]
+    notices = []
+    documents = []
+
+    def observe_progress(request, **kwargs):
+        if "readiness probe" not in str(json.loads(request.data)["input"]):
+            documents.append(True)
+            if len(documents) == 2:
+                during = capsys.readouterr()
+                assert during.out == ""
+                notices.append(during.err)
+                assert "Embedding rebuild progress: 1/2" in during.err
+        return provider(request, **kwargs)
+
+    monkeypatch.setattr("urllib.request.urlopen", observe_progress)
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     monkeypatch.setattr(sys, "argv", [
         "kin", "embed", "rebuild", "--yes", "--json", "--verbose",
@@ -543,6 +675,7 @@ def test_json_verbose_rebuild_keeps_stdout_machine_readable(graph, monkeypatch, 
     except SystemExit as exc:
         code = exc.code
     captured = capsys.readouterr()
+    captured = captured._replace(err="".join(notices) + captured.err)
     assert code == 0, captured.out + captured.err
     result = json.loads(captured.out)
     assert result["status"] == "ok"

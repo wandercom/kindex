@@ -1360,12 +1360,50 @@ Same-identity rebuilds also recompute fresh vectors. Run `kin embed calibrate`
 after rebuilding to measure a new floor. Semantic search is interrupted during
 rebuilding; this is **not** an atomic index switchover.
 
-A later provider failure returns nonzero and reports the backup path. Successful
-new vectors and checkpoints remain, and retryable failures remain queued. With the
-same graph/configuration selected, resume queued work with `kin embed drain`; do not
-repeat rebuild unless you intend another reset. Inspect `kin embed status` for
-quarantined inputs: deterministic rejections require correcting the input or
-deliberately choosing a compatible embedding identity, not repeated reindex attempts.
+A completed rebuild with only quarantined inputs left has status
+`completed_with_quarantine` and exits **0**: the index was replaced, the queue is
+empty, and those rejected inputs were not embedded. This applies to both existing
+quarantine and terminal input rejections discovered during this pass. Inspect
+`kin embed status`; **do not re-run rebuild** for quarantined inputs. Correct the
+input or deliberately choose a compatible embedding identity before retrying.
+
+The rebuild JSON contract retains `quarantined`, `coverage_complete`, `queue_pending`,
+and attempt counts. For example, `{"status":"completed_with_quarantine",
+"quarantined":1,"coverage_complete":false,"queue_pending":0}` describes completed
+replacement with incomplete coverage. `failed` counts failed provider attempts,
+so it can be nonzero even for this completed-with-quarantine result.
+
+| Rebuild status | Exit | Meaning |
+|---|---|---|
+| `ok` | 0 | Selected rebuild work completed |
+| `completed_with_quarantine` | 0 | Replacement completed; only quarantined inputs remain unembedded |
+| `failed`, `persistence_error`, `unavailable`, `refused`, `cancelled` | 1 | Work failed, was deferred, remains pending, is unknown, or was not authorized |
+
+A later transient/provider/storage failure returns nonzero and reports the backup
+path. Successful vectors/checkpoints remain; retryable work stays queued. The
+result covers the selected set: nodes added by another client during the pass can
+remain queued with a resume hint without failing an otherwise completed pass.
+
+Resume with the same graph/configuration and the printed command, which sets
+`--max-jobs` to the pending queue count and `--time-budget inf` so one invocation
+can visit the whole recorded backlog rather than stopping at the default
+200 jobs / 120 seconds. For a queue of 12 (including already-fresh entries):
+
+```bash
+kin embed drain --max-jobs 12 --time-budget inf --data-dir /path/to/selected/graph
+```
+
+When the count is unknown, inspect `kin embed status` first; the recovery command
+uses a deliberately large job bound (`sys.maxsize`, normally 9223372036854775807)
+instead of the bounded default. New arrivals after a drain's queue snapshot may
+still require another pass. Do not repeat rebuild unless you intend another reset.
+
+An interrupt after reset committed prints the backup, pending count when readable,
+and full-backlog resume command to stderr, then re-raises the interrupt. No resume
+advice is printed if reset did not commit. `--verbose` reports visited-entry and
+embedded counts on stderr during rebuilding; `--json` stdout remains one document
+when the command returns normally.
+
 `kin embed reindex --stale` does not honor quarantine and cannot finish inputs the
 provider continues to reject. To restore the original backup, stop every
 Kindex daemon/MCP/CLI writer, move the live database's `-wal` and `-shm` sidecars
