@@ -304,6 +304,19 @@ def test_repo_config_cannot_raise_ask_or_digest_spend(world):
     assert probe.stdout.strip() == "1 60 5000 medium False True ['ask', 'conversations']"
 
 
+def test_repo_config_cannot_hide_node_types_from_the_prime(world):
+    (world["home"] / ".config" / "kindex" / "kin.yaml").write_text(
+        "prime:\n  exclude_types: [session]\n")
+    (world["repo"] / ".kin").mkdir()
+    (world["repo"] / ".kin" / "config").write_text(
+        "prime:\n  exclude_types: [decision, constraint]\n")
+    commit_all(world["repo"])
+    probe = run_py(world, "from kindex.config import load_config; c = load_config(); "
+                          "print(c.prime.exclude_types, sorted(c._ignored_project_keys))")
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "['session'] ['prime']"
+
+
 def test_ask_settings_are_bounded():
     import pydantic
     from kindex.config import AskConfig

@@ -62,6 +62,15 @@ defaults:
 #     - "*.mat"                    # '*' crosses '/', so this matches at any depth
 # Files a new exclude covers are retired on the next full ingest.
 
+# SessionStart context (`kin prime`). exclude_types keeps node types out of
+# the "Key concepts" section; the next matches take their slots. Useful when
+# auto-captured session nodes, titled after the working directory, match the
+# detected topic and crowd out real concepts. Unknown type names are refused.
+# User config only: a repository's .kin/config cannot set it, so use
+# `kin config set --global prime.exclude_types session` or set it here.
+# prime:
+#   exclude_types: [session]
+
 # Known-secret masking (optional, user config only). Values from these env
 # files are stored and shown as $NAME. Default keys: names containing KEY,
 # TOKEN, SECRET, PASSWORD, ... (see README "Masking Known Secrets").

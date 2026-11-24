@@ -114,6 +114,125 @@ class TestPrimeContext:
         assert len(output) < 3000  # generous upper bound for 200 token budget
 
 
+def _key_concepts(block: str) -> str:
+    """The Key concepts section of a prime block, heading excluded."""
+    if "### Key concepts" not in block:
+        return ""
+    section = block.split("### Key concepts", 1)[1]
+    return section.split("\n### ", 1)[0]
+
+
+@pytest.fixture
+def crowded_store(store):
+    """More topic-matching session nodes than Key concepts has slots.
+
+    Auto-captured session nodes are titled after the working directory, so
+    they match the topic prime detects from it.
+    """
+    for i in range(10):
+        store.add_node("Session: -home-dev-notes", content=f"Session {i} in notes",
+                       node_type="session", node_id=f"sess-{i}")
+    store.add_node("Notes archive layout", content="Where the notes live and how they are filed",
+                   node_type="concept", node_id="notes-layout")
+    store.add_node("Notes review cadence", content="Weekly review of notes",
+                   node_type="concept", node_id="notes-cadence")
+    return store
+
+
+class TestPrimeExcludeTypes:
+    def test_by_default_every_type_competes_for_key_concepts(self, crowded_store, tmp_path):
+        from kindex.hooks import prime_context
+
+        cfg = Config(data_dir=str(tmp_path))
+        assert cfg.prime.exclude_types == []
+        concepts = _key_concepts(prime_context(crowded_store, topic="notes",
+                                               config=cfg, max_tokens=1500))
+        assert "(session)" in concepts
+
+    def test_an_excluded_type_never_appears_and_its_slots_refill(self, crowded_store, tmp_path):
+        from kindex.hooks import prime_context
+
+        cfg = Config(data_dir=str(tmp_path), prime={"exclude_types": ["session"]})
+        concepts = _key_concepts(prime_context(crowded_store, topic="notes",
+                                               config=cfg, max_tokens=1500))
+        assert "(session)" not in concepts
+        assert "Session: -home-dev-notes" not in concepts
+        assert "Notes archive layout" in concepts
+        assert "Notes review cadence" in concepts
+
+    def test_an_excluded_type_is_not_named_as_a_neighbour(self, store, tmp_path):
+        from kindex.hooks import prime_context
+
+        store.add_node("Notes archive layout", content="Where the notes live",
+                       node_type="concept", node_id="notes-layout")
+        store.add_node("Filing decision", content="File by month",
+                       node_type="decision", node_id="filing")
+        store.add_edge("notes-layout", "filing", provenance="test")
+
+        def layout_line(cfg):
+            block = prime_context(store, topic="Notes archive", config=cfg, max_tokens=1500)
+            return next(line for line in _key_concepts(block).splitlines()
+                        if "Notes archive layout" in line)
+
+        assert "[Filing decision]" in layout_line(Config(data_dir=str(tmp_path)))
+        excluded = Config(data_dir=str(tmp_path), prime={"exclude_types": ["decision"]})
+        assert "Filing decision" not in layout_line(excluded)
+
+    def test_exclusion_leaves_operational_sections_alone(self, crowded_store, tmp_path):
+        from kindex.hooks import prime_context
+
+        crowded_store.add_node("Never rewrite the notes index by hand", node_type="constraint",
+                               node_id="notes-rule", extra={"trigger": "edit", "action": "warn"})
+        cfg = Config(data_dir=str(tmp_path), prime={"exclude_types": ["session", "constraint"]})
+        block = prime_context(crowded_store, topic="notes", config=cfg, max_tokens=1500)
+        assert "### Active constraints" in block
+        assert "Never rewrite the notes index by hand" in block
+
+    def test_excluding_questions_keeps_an_imported_facts_unknowns(self, store, tmp_path):
+        """Excluding a type hides its nodes as entries, never the caveat an
+        imported Kinbase fact carries (its open Unknowns are question nodes)."""
+        from kindex.hooks import prime_context
+
+        store.add_node("deploy skips tests on Fridays", "deploy skips tests on Fridays",
+                       node_id="policy", standing="authoritative",
+                       extra={"kinbase": {"repo": "/tmp/somerepo", "mode": "raw",
+                                          "logical_key": "deploy.policy", "provenance": "human"}})
+        store.add_node("Is the Friday deploy policy still in force?",
+                       "Is the Friday deploy policy still in force?",
+                       node_id="question", node_type="question",
+                       extra={"kinbase": {"repo": "/tmp/somerepo", "mode": "raw",
+                                          "logical_key": "deploy.policy", "status": "open",
+                                          "owner_role": "release-manager"}})
+        cfg = Config(data_dir=str(tmp_path), prime={"exclude_types": ["question"]})
+        concepts = _key_concepts(prime_context(store, topic="deploy Friday", config=cfg))
+        assert "(question)" not in concepts
+        entry = concepts[concepts.index("**deploy skips tests on Fridays**"):]
+        assert "Unknown [open]: Is the Friday deploy policy still in force?" in entry
+
+    def test_a_single_type_may_be_written_as_a_string(self):
+        from kindex.config import PrimeConfig
+
+        assert PrimeConfig(exclude_types="session").exclude_types == ["session"]
+        assert PrimeConfig(exclude_types=None).exclude_types == []
+        assert PrimeConfig(exclude_types=["session", "session"]).exclude_types == ["session"]
+
+    def test_an_unknown_type_is_refused(self, tmp_path):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="sesion"):
+            Config(data_dir=str(tmp_path), prime={"exclude_types": ["sesion"]})
+
+    def test_an_unknown_type_in_kin_yaml_is_refused_at_load(self, tmp_path):
+        from pydantic import ValidationError
+
+        from kindex.config import load_config
+
+        path = tmp_path / "kin.yaml"
+        path.write_text(f"data_dir: {tmp_path / 'graph'}\nprime:\n  exclude_types: [sesion]\n")
+        with pytest.raises(ValidationError, match="sesion"):
+            load_config(path)
+
+
 class TestCaptureSessionEnd:
     def test_capture_session_end(self, store, config, ledger):
         """Provides session text, verifies nodes/edges are created."""

@@ -928,6 +928,41 @@ class CodeIngestConfig(BaseModel):
         return [value] if isinstance(value, str) else value
 
 
+class PrimeConfig(BaseModel):
+    """What `kin prime` (the SessionStart context block) draws from the graph.
+
+    exclude_types: node types kept out of the "Key concepts" section, e.g.
+    ["session"] when auto-captured session nodes titled after the working
+    directory match the detected topic and crowd out real concepts. They are
+    left out of the search itself, so the slots go to the next matches, and
+    they are not named as neighbours of the entries shown. Constraints,
+    watches, directives and recent activity are unaffected. An unknown type
+    name is refused rather than silently matching nothing. User config only:
+    a repository's .kin/config may not hide node types from the prime.
+    """
+
+    exclude_types: list[str] = Field(default_factory=list)
+
+    @field_validator("exclude_types", mode="before")
+    @classmethod
+    def _one_type_is_a_list(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        return [value] if isinstance(value, str) else value
+
+    @field_validator("exclude_types")
+    @classmethod
+    def _known_types(cls, value: list[str]) -> list[str]:
+        from .schema import STORAGE_NODE_TYPES
+
+        unknown = [t for t in value if t not in STORAGE_NODE_TYPES]
+        if unknown:
+            raise ValueError(
+                f"unknown node type(s) {', '.join(map(repr, unknown))}; "
+                f"expected any of: {', '.join(STORAGE_NODE_TYPES)}")
+        return list(dict.fromkeys(value))
+
+
 class Config(BaseModel):
     _project_path: Path | None = PrivateAttr(default=None)
     # Original selected workspace spelling for indexing policy. Physical root
@@ -984,6 +1019,7 @@ class Config(BaseModel):
     reminders: ReminderConfig = Field(default_factory=ReminderConfig)
     work_policy: WorkPolicyConfig = Field(default_factory=WorkPolicyConfig)
     code_ingest: CodeIngestConfig = Field(default_factory=CodeIngestConfig)
+    prime: PrimeConfig = Field(default_factory=PrimeConfig)
     # Mask known secret values (from env files such as ~/.profile) as $NAME
     # wherever Kindex stores or shows text. User config only; absent = off.
     secret_mask: SecretMaskConfig | None = None
@@ -1163,6 +1199,8 @@ _PROJECT_LAYER_UNTRUSTED_KEYS = frozenset({
     "secret_mask",
     # LLM spend: how hard `kin ask` and conversation digests work.
     "ask", "conversations",
+    # What the session prime shows: a clone may not hide node types from it.
+    "prime",
 })
 # Sections a repository may tune only partly. Reminder channels carry private
 # reminder text to webhooks and mailboxes, and the rest of the section decides

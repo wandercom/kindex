@@ -84,8 +84,16 @@ def prime_context(
     # Search for relevant nodes (expired and other-client nodes never
     # surface). Per-node filtering: one bad node is skipped, never allowed
     # to zero the section, and a failed search still primes the rest.
+    # Configured types (prime.exclude_types) are left out of the search
+    # itself, not dropped afterwards, so they never take a slot the next
+    # match could fill. With none configured the search runs unfiltered.
+    excluded = frozenset(getattr(getattr(config, "prime", None), "exclude_types", None) or ())
+    search_scope = (
+        {"node_filter": lambda node: node.get("type") not in excluded}
+        if excluded else {}
+    )
     try:
-        raw_results = hybrid_search(store, topic, top_k=8)
+        raw_results = hybrid_search(store, topic, top_k=8, **search_scope)
     except Exception as e:
         section_failures.append(("prime.search", e))
         search_failed = True
@@ -94,6 +102,12 @@ def prime_context(
     for r in raw_results:
         try:
             if not node_expired(r) and not adapter_scoped_out(r.get("tags"), adapter):
+                if excluded:
+                    # The type filter chooses entries, not caveats: an
+                    # imported fact keeps its open Unknowns (question nodes)
+                    # even when questions are excluded as entries.
+                    from .kinbase import attach_unknowns
+                    attach_unknowns(store, r)
                 results.append(redact(r))
         except Exception:
             continue
