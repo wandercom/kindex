@@ -84,9 +84,11 @@ def prime_context(
     # Search for relevant nodes (expired and other-client nodes never
     # surface). Per-node filtering: one bad node is skipped, never allowed
     # to zero the section, and a failed search still primes the rest.
-    # Configured types (prime.exclude_types) are left out of the search
-    # itself, not dropped afterwards, so they never take a slot the next
-    # match could fill. With none configured the search runs unfiltered.
+    # Configured types (prime.exclude_types) are filtered inside the search,
+    # not dropped afterwards: text and recall-cue candidates are admitted
+    # through the filter, so the next matches take the freed slots. The
+    # vector channel still fetches top_k before filtering, so excluded types
+    # can use up its share. With none configured the search runs unfiltered.
     excluded = frozenset(getattr(getattr(config, "prime", None), "exclude_types", None) or ())
     search_scope = (
         {"node_filter": lambda node: node.get("type") not in excluded}
@@ -98,15 +100,17 @@ def prime_context(
         section_failures.append(("prime.search", e))
         search_failed = True
         raw_results = []
+    # The type filter chooses entries, not caveats: an imported fact keeps
+    # its open Unknowns (question nodes) even when questions are excluded as
+    # entries, so those are re-attached without the filter.
+    reattach_unknowns = "question" in excluded
+    if reattach_unknowns:
+        from .kinbase import attach_unknowns
     results = []
     for r in raw_results:
         try:
             if not node_expired(r) and not adapter_scoped_out(r.get("tags"), adapter):
-                if excluded:
-                    # The type filter chooses entries, not caveats: an
-                    # imported fact keeps its open Unknowns (question nodes)
-                    # even when questions are excluded as entries.
-                    from .kinbase import attach_unknowns
+                if reattach_unknowns:
                     attach_unknowns(store, r)
                 results.append(redact(r))
         except Exception:

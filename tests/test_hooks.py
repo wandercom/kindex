@@ -222,6 +222,19 @@ class TestPrimeExcludeTypes:
         with pytest.raises(ValidationError, match="sesion"):
             Config(data_dir=str(tmp_path), prime={"exclude_types": ["sesion"]})
 
+    def test_config_set_refuses_an_unknown_type_before_writing(self, tmp_path):
+        from pydantic import ValidationError
+
+        from kindex.cli import _config_write
+        from kindex.config import load_config
+
+        path = tmp_path / "kin.yaml"
+        with pytest.raises(ValidationError, match="sesion"):
+            _config_write("prime.exclude_types", "sesion", str(path))
+        assert not path.exists()
+        _config_write("prime.exclude_types", "session", str(path))
+        assert load_config(path).prime.exclude_types == ["session"]
+
     def test_an_unknown_type_in_kin_yaml_is_refused_at_load(self, tmp_path):
         from pydantic import ValidationError
 

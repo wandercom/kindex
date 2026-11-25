@@ -8,10 +8,11 @@ All notable changes to Kindex are documented here. Format follows [Keep a Change
 - `prime.exclude_types` keeps the listed node types out of the "Key concepts"
   section of `kin prime`, for example `[session]` when auto-captured session
   nodes titled after the working directory crowd out real concepts. Excluded
-  types are filtered inside the search, so the next matches fill their slots;
-  an imported fact still keeps its open Unknowns when `question` is excluded.
-  The default is empty and leaves the prime unchanged; an unknown type name is
-  refused when the config loads. Only the user's config may set it: a
+  types are filtered as text and recall-cue candidates are admitted, so the
+  next matches fill their slots; an imported fact still keeps its open
+  Unknowns when `question` is excluded. The default is empty and leaves the
+  prime unchanged; an unknown type name is refused by `kin config set` and
+  when the config loads. Only the user's config may set it: a
   repository's `.kin/config` cannot hide node types from the prime.
 
 ## [0.54.2] - 2026-11-12

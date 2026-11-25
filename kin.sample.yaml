@@ -67,7 +67,7 @@ defaults:
 # auto-captured session nodes, titled after the working directory, match the
 # detected topic and crowd out real concepts. Unknown type names are refused.
 # User config only: a repository's .kin/config cannot set it, so use
-# `kin config set --global prime.exclude_types session` or set it here.
+# `kin config --global set prime.exclude_types session` or set it here.
 # prime:
 #   exclude_types: [session]
 

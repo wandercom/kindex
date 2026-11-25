@@ -1523,12 +1523,15 @@ an existing reminder backlog.
 section of `kin prime` (the SessionStart context block). Use it when one type
 crowds that section: auto-captured `session` nodes are titled after the
 working directory, so they match the topic `kin prime` detects from it and can
-fill every slot. Excluded types are left out of the search itself, so the next
-matches take their place, and they are not named as neighbours of the entries
-shown. Constraints, watches, directives and recent activity are unaffected. An
-unknown type name is refused when the config loads. Only your own config sets
-it; a repository's `.kin/config` cannot hide node types from your prime, so
-set it with `kin config set --global prime.exclude_types session` or in
+fill every slot. Excluded types are filtered as the search admits text and
+recall-cue candidates, so the next matches take their place, and they are not
+named as neighbours of the entries shown. (The vector channel still fetches
+its candidates before the filter, so excluded types can use up its share.)
+Constraints, watches, directives and recent activity are unaffected. An
+unknown type name is refused by `kin config set` and when the config loads.
+Only your own config sets it; a repository's `.kin/config` cannot hide node
+types from your prime, so set it with
+`kin config --global set prime.exclude_types session` or in
 `~/.config/kindex/kin.yaml` (a plain `kin config set` writes `.kin/config`,
 where it is ignored).
 

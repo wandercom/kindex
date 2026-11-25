@@ -934,10 +934,12 @@ class PrimeConfig(BaseModel):
     exclude_types: node types kept out of the "Key concepts" section, e.g.
     ["session"] when auto-captured session nodes titled after the working
     directory match the detected topic and crowd out real concepts. They are
-    left out of the search itself, so the slots go to the next matches, and
-    they are not named as neighbours of the entries shown. Constraints,
-    watches, directives and recent activity are unaffected. An unknown type
-    name is refused rather than silently matching nothing. User config only:
+    filtered as the search admits text and recall-cue candidates (vector
+    candidates are fetched before filtering), so the slots go to the next
+    matches, and they are not named as neighbours of the entries shown.
+    Constraints, watches, directives and recent activity are unaffected. An
+    unknown type name is refused rather than silently matching nothing.
+    User config only:
     a repository's .kin/config may not hide node types from the prime.
     """
 
