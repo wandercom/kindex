@@ -7357,6 +7357,10 @@ def _config_write(key: str, value: str, config_path: str | None = None,
         from .config import SimConfig
         # Reject invalid values before creating or modifying configuration files.
         SimConfig(**{parts[-1]: _coerce_value(value)})
+    if len(parts) == 2 and parts[0] == "prime":
+        from .config import PrimeConfig
+        # A bad type name written here would fail every later config load.
+        PrimeConfig(**{parts[1]: _coerce_value(value)})
 
     if config_path:
         from .config import _resolve_path

@@ -1473,6 +1473,9 @@ attention:
   max_conversation_cost: 0.25     # best-effort cap when the client provides a stable session id
   cooldown_seconds: 1800          # suppress repeat injections
 
+prime:
+  exclude_types: []               # node types kept out of `kin prime`'s Key concepts, e.g. [session]
+
 project_dirs:
   - ~/src
   - ~/notes
@@ -1515,6 +1518,22 @@ window. A deliberate `kin remind snooze` defers that window to the snooze expiry
 retain their previous deferral semantics, since automatic and manual snoozes
 were historically stored identically. This change does not classify or repair
 an existing reminder backlog.
+
+`prime.exclude_types` keeps the listed node types out of the "Key concepts"
+section of `kin prime` (the SessionStart context block). Use it when one type
+crowds that section: auto-captured `session` nodes are titled after the
+working directory, so they match the topic `kin prime` detects from it and can
+fill every slot. Excluded types are filtered as the search admits text and
+recall-cue candidates, so the next matches take their place, and they are not
+named as neighbours of the entries shown. (The vector channel still fetches
+its candidates before the filter, so excluded types can use up its share.)
+Constraints, watches, directives and recent activity are unaffected. An
+unknown type name is refused by `kin config set` and when the config loads.
+Only your own config sets it; a repository's `.kin/config` cannot hide node
+types from your prime, so set it with
+`kin config --global set prime.exclude_types session` or in
+`~/.config/kindex/kin.yaml` (a plain `kin config set` writes `.kin/config`,
+where it is ignored).
 
 Use `kin attention estimate --messages 1000` to estimate cost over a fixed prompt window. Conversation accounting is retained when a client provides a stable session id. Hook-driven attention does not fall back to cwd as a fake conversation id, because that would cross-pollute two chats open in the same repo.
 
